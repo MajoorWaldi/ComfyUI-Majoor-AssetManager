@@ -846,33 +846,6 @@ function renderFileManager(root) {
   grid.style.gridAutoRows = "auto";
   gridWrapper.appendChild(grid);
 
-  // Scroll minimap slider to visualize and jump within large grids
-  const sliderTrack = createEl("div", "mjr-fm-scroll-track");
-  Object.assign(sliderTrack.style, {
-    position: "fixed",
-    top: "0",
-    left: "0",
-    width: "6px",
-    height: "40px",
-    background: "rgba(255,255,255,0.07)",
-    borderRadius: "8px",
-    pointerEvents: "auto",
-    zIndex: "1000",
-  });
-  const sliderThumb = createEl("div", "mjr-fm-scroll-thumb");
-  Object.assign(sliderThumb.style, {
-    position: "absolute",
-    left: "0",
-    width: "100%",
-    minHeight: "20px",
-    background: "var(--comfy-accent, #4da3ff)",
-    borderRadius: "10px",
-    boxShadow: "0 0 6px rgba(77,163,255,0.6)",
-    cursor: "grab",
-  });
-  sliderTrack.appendChild(sliderThumb);
-  gridWrapper.appendChild(sliderTrack);
-
   // RIGHT : metadata panel (hidden by default, toggled by "<")
   const metaPanel = createEl("div", "mjr-fm-meta-panel");
   metaPanel.style.flex = "1.4";
@@ -905,86 +878,6 @@ function renderFileManager(root) {
   body.appendChild(gridWrapper);
   body.appendChild(metaPanel);
 
-  let sliderDrag = false;
-  let sliderDragOffset = 0;
-
-  const updateScrollThumb = () => {
-    const rect = gridWrapper.getBoundingClientRect();
-    sliderTrack.style.top = `${rect.top + 6}px`;
-    sliderTrack.style.height = `${Math.max(20, rect.height - 12)}px`;
-    sliderTrack.style.left = `${rect.right - 10}px`;
-    const maxScroll = gridWrapper.scrollHeight - gridWrapper.clientHeight;
-    if (maxScroll <= 0) {
-      sliderTrack.style.display = "none";
-      return;
-    }
-    sliderTrack.style.display = "block";
-    const trackHeight = sliderTrack.clientHeight || gridWrapper.clientHeight;
-    const thumbHeight = Math.max(
-      20,
-      (gridWrapper.clientHeight / gridWrapper.scrollHeight) * trackHeight
-    );
-    sliderThumb.style.height = `${thumbHeight}px`;
-    const ratio = Math.max(0, Math.min(1, gridWrapper.scrollTop / maxScroll));
-    const top = ratio * Math.max(0, trackHeight - thumbHeight);
-    sliderThumb.style.top = `${top}px`;
-  };
-
-  const onTrackPointerDown = (ev) => {
-    ev.preventDefault();
-    const rect = sliderTrack.getBoundingClientRect();
-    const y = ev.clientY - rect.top;
-    const maxScroll = gridWrapper.scrollHeight - gridWrapper.clientHeight;
-    const trackHeight = sliderTrack.clientHeight || gridWrapper.clientHeight;
-    const thumbHeight = sliderThumb.offsetHeight || 20;
-    const clamped = Math.max(0, Math.min(trackHeight - thumbHeight, y - thumbHeight / 2));
-    const ratio = trackHeight > thumbHeight ? clamped / (trackHeight - thumbHeight) : 0;
-    gridWrapper.scrollTop = ratio * maxScroll;
-    updateScrollThumb();
-  };
-
-  const onThumbPointerDown = (ev) => {
-    ev.preventDefault();
-    sliderDrag = true;
-    sliderThumb.setPointerCapture(ev.pointerId);
-    const rect = sliderThumb.getBoundingClientRect();
-    sliderDragOffset = ev.clientY - rect.top;
-    sliderThumb.style.cursor = "grabbing";
-  };
-
-  const onPointerMove = (ev) => {
-    if (!sliderDrag) return;
-    ev.preventDefault();
-    const rect = sliderTrack.getBoundingClientRect();
-    const trackHeight = sliderTrack.clientHeight || gridWrapper.clientHeight;
-    const thumbHeight = sliderThumb.offsetHeight || 20;
-    const maxScroll = gridWrapper.scrollHeight - gridWrapper.clientHeight;
-    const y = ev.clientY - rect.top - sliderDragOffset;
-    const clamped = Math.max(0, Math.min(trackHeight - thumbHeight, y));
-    const ratio = trackHeight > thumbHeight ? clamped / (trackHeight - thumbHeight) : 0;
-    gridWrapper.scrollTop = ratio * maxScroll;
-    updateScrollThumb();
-  };
-
-  const onPointerUp = (ev) => {
-    if (!sliderDrag) return;
-    sliderDrag = false;
-    sliderThumb.releasePointerCapture?.(ev.pointerId);
-    sliderThumb.style.cursor = "grab";
-  };
-
-  sliderTrack.addEventListener("pointerdown", onTrackPointerDown);
-  sliderThumb.addEventListener("pointerdown", onThumbPointerDown);
-  window.addEventListener("pointermove", onPointerMove);
-  window.addEventListener("pointerup", onPointerUp);
-  window.addEventListener("pointercancel", onPointerUp);
-
-  let sliderResizeObserver = null;
-  if (typeof ResizeObserver !== "undefined") {
-    sliderResizeObserver = new ResizeObserver(() => updateScrollThumb());
-    sliderResizeObserver.observe(gridWrapper);
-  }
-
   let gridRenderScheduled = false;
   const scheduleRender = () => {
     if (gridRenderScheduled) return;
@@ -992,12 +885,10 @@ function renderFileManager(root) {
     requestAnimationFrame(() => {
       gridRenderScheduled = false;
       renderGrid();
-      updateScrollThumb();
     });
   };
 
   gridWrapper.addEventListener("scroll", () => {
-    updateScrollThumb();
     scheduleRender();
   });
   window.addEventListener("resize", scheduleRender);
@@ -1495,7 +1386,6 @@ function renderFileManager(root) {
     });
     state.renderVersion = (state.renderVersion || 0) + 1;
     renderGrid();
-    updateScrollThumb();
     if (!skipMetadataFetch) {
       fetchMetadataForVisible();
     }
@@ -2001,9 +1891,6 @@ function renderFileManager(root) {
   const cleanup = () => {
     try {
       mjrGlobalState.instances.delete(instance);
-    } catch (_) {}
-    try {
-      sliderResizeObserver?.disconnect();
     } catch (_) {}
   };
   // Expose a destroy hook on the root element

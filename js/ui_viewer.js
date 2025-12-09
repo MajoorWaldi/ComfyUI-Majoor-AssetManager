@@ -12,7 +12,7 @@ import {
   mjrGlobalState,
 } from "./ui_settings.js";
 
-export const mjrViewerState = { overlay: null, frame: null };
+export const mjrViewerState = { overlay: null, frame: null, abCleanup: null, resetView: null };
 export const mjrViewerNav = { prev: null, next: null };
 let mjrViewerEscBound = false;
 export let mjrViewerIsAB = false;
@@ -206,16 +206,30 @@ export function mjrEnsureViewerOverlay() {
         if (mjrStepVideos(1 / 30)) handled = true;
       } else if (ev.key === "ArrowDown" && isViewerOpen && mjrSettings.hotkeys.frameStep) {
         if (mjrStepVideos(-1 / 30)) handled = true;
-      } else if (navEnabled && !inInput && mjrSettings.viewer.ratingHotkeys) {
-        let num = null;
-        if (/^[0-5]$/.test(ev.key)) {
-          num = Number(ev.key);
-        } else if (ev.code && ev.code.startsWith("Numpad")) {
-          const k = ev.key && /^[0-9]$/.test(ev.key) ? Number(ev.key) : null;
-          if (k !== null && k <= 5) num = k;
-        }
-        if (num !== null) {
+      } else if (
+        navEnabled &&
+        !inInput &&
+        mjrSettings.viewer.ratingHotkeys &&
+        (/^[0-5]$/.test(ev.key) || (ev.code && ev.code.startsWith("Numpad") && /^[0-9]$/.test(ev.key)))
+      ) {
+        const num = Number(ev.key);
+        if (!Number.isNaN(num) && num <= 5) {
           mjrSetViewerRating(num);
+          handled = true;
+        }
+      } else if (isViewerOpen && !inInput && (ev.key === "f" || ev.key === "F")) {
+        if (typeof mjrViewerState.resetView !== "function") {
+          const pane = mjrViewerState.frame?.firstChild;
+          if (pane && typeof pane.__mjrReset === "function") {
+            mjrViewerState.resetView = pane.__mjrReset;
+          }
+        }
+        const runReset =
+          typeof mjrViewerState.resetView === "function"
+            ? mjrViewerState.resetView
+            : mjrViewerState.frame?.firstChild?.__mjrReset;
+        if (typeof runReset === "function") {
+          runReset();
           handled = true;
         }
       }
@@ -231,6 +245,9 @@ export function mjrEnsureViewerOverlay() {
 }
 
 export function mjrCloseViewer() {
+  mjrViewerState.abCleanup?.();
+  mjrViewerState.abCleanup = null;
+  mjrViewerState.resetView = null;
   if (!mjrViewerState.overlay) return;
   mjrViewerState.overlay.style.display = "none";
   if (mjrViewerState.frame) {
@@ -330,11 +347,12 @@ export function mjrCreateViewerPane(file) {
     touchAction: "none",
   });
 
+  const zoomHudOffsetPx = 10;
   const zoomHud = document.createElement("div");
   Object.assign(zoomHud.style, {
     position: "absolute",
     right: "10px",
-    bottom: "10px",
+    bottom: `${zoomHudOffsetPx}px`,
     padding: "4px 8px",
     borderRadius: "6px",
     background: "rgba(0,0,0,0.65)",
@@ -379,6 +397,17 @@ export function mjrCreateViewerPane(file) {
   el.style.transformOrigin = `${originX}% ${originY}%`;
 
   const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+  const calcFitScale = () => {
+    const wrapRect = mediaWrap.getBoundingClientRect();
+    const wrapW = wrapRect.width || mediaWrap.clientWidth || 1;
+    const wrapH = wrapRect.height || mediaWrap.clientHeight || 1;
+    const mediaW = el.videoWidth || el.naturalWidth || el.clientWidth || wrapW;
+    const mediaH = el.videoHeight || el.naturalHeight || el.clientHeight || wrapH;
+    if (!mediaW || !mediaH) return 1;
+    const ratio = Math.min(wrapW / mediaW, wrapH / mediaH);
+    return Math.max(0.01, Math.min(10, ratio || 1));
+  };
+
   const applyTransform = () => {
     // Recentre offsets when zoom is reset
     if (scale <= 1) {
@@ -390,6 +419,18 @@ export function mjrCreateViewerPane(file) {
     zoomHud.textContent = `${Math.round(scale * 100)}%`;
   };
 
+  const resetZoomPan = () => {
+    scale = calcFitScale();
+    offsetX = 0;
+    offsetY = 0;
+    applyTransform();
+  };
+  // Make single-view reset accessible to global hotkeys
+  mjrViewerState.resetView = resetZoomPan;
+  const fitOnReady = () => resetZoomPan();
+  el.addEventListener?.("load", fitOnReady);
+  el.addEventListener?.("loadedmetadata", fitOnReady);
+
   mediaWrap.addEventListener(
     "wheel",
     (ev) => {
@@ -400,7 +441,7 @@ export function mjrCreateViewerPane(file) {
       const px = ev.clientX - rect.left;
       const py = ev.clientY - rect.top;
       const prevScale = scale;
-      const newScale = clamp(scale * factor, 0.25, 5);
+      const newScale = clamp(scale * factor, 0.25, 10);
 
       // Keep the point under cursor stable while zooming
       const dx = (px - rect.width / 2 - offsetX) / prevScale;
@@ -457,12 +498,7 @@ export function mjrCreateViewerPane(file) {
   });
 
   // Reset zoom on double click
-  mediaWrap.addEventListener("dblclick", () => {
-    scale = 1;
-    offsetX = 0;
-    offsetY = 0;
-    applyTransform();
-  });
+  mediaWrap.addEventListener("dblclick", resetZoomPan);
 
   mediaWrap.appendChild(el);
   // Hint overlay for controls
@@ -486,7 +522,7 @@ export function mjrCreateViewerPane(file) {
     textAlign: "center",
     whiteSpace: "nowrap",
   });
-  hint.textContent = "Scroll: Zoom  •  Drag: Pan  •  Double-click: Reset";
+  hint.textContent = "Scroll: Zoom  •  Drag: Pan  •  F: Fit/Reset";
   mediaWrap.appendChild(hint);
   hint.style.transition = "opacity 0.3s ease";
   let hideTimer = setTimeout(() => {
@@ -518,10 +554,16 @@ export function mjrCreateViewerPane(file) {
   mediaWrap.addEventListener("mouseleave", () => scheduleHide(700));
   pane.appendChild(mediaWrap);
   pane.appendChild(infoBar);
+  pane.__mjrReset = resetZoomPan;
+  requestAnimationFrame(() => resetZoomPan());
   return pane;
 }
 
 export function mjrOpenABViewer(fileA, fileB) {
+  // Clean up any previous A/B-specific listeners
+  mjrViewerState.abCleanup?.();
+  mjrViewerState.abCleanup = null;
+
   mjrEnsureViewerOverlay();
   mjrViewerState.overlay.style.display = "flex";
   mjrViewerIsAB = true;
@@ -548,7 +590,7 @@ export function mjrOpenABViewer(fileA, fileB) {
     border: "1px solid #444",
     userSelect: "none",
     touchAction: "none",
-    cursor: "col-resize",
+    cursor: "default",
   });
 
   const baseWrap = document.createElement("div");
@@ -617,11 +659,21 @@ export function mjrOpenABViewer(fileA, fileB) {
       }
     };
 
+    if (!state.reset) {
+      state.reset = () => {
+        state.scale = 1;
+        state.offsetX = 0;
+        state.offsetY = 0;
+        applyAll();
+      };
+    }
+
+    const zoomHudOffsetPx = 36;
     const zoomHud = document.createElement("div");
     Object.assign(zoomHud.style, {
       position: "absolute",
       right: "10px",
-      bottom: "10px",
+      bottom: `${zoomHudOffsetPx}px`,
       padding: "4px 8px",
       borderRadius: "6px",
       background: "rgba(0,0,0,0.65)",
@@ -649,7 +701,7 @@ export function mjrOpenABViewer(fileA, fileB) {
         const px = ev.clientX - rect.left;
         const py = ev.clientY - rect.top;
         const prevScale = state.scale;
-        const newScale = clamp(state.scale * factor, 0.25, 5);
+        const newScale = clamp(state.scale * factor, 0.25, 10);
         const dx = (px - rect.width / 2 - state.offsetX) / prevScale;
         const dy = (py - rect.height / 2 - state.offsetY) / prevScale;
         state.offsetX = px - rect.width / 2 - newScale * dx;
@@ -698,11 +750,20 @@ export function mjrOpenABViewer(fileA, fileB) {
       window.addEventListener("pointercancel", stopDrag);
     });
 
+    const fitOnReady = () => {
+      sharedZoom.scale = calcFitScale();
+      sharedZoom.offsetX = 0;
+      sharedZoom.offsetY = 0;
+      applySharedZoom();
+    };
+    mediaEl.addEventListener?.("load", fitOnReady);
+    mediaEl.addEventListener?.("loadedmetadata", fitOnReady);
+
     wrap.addEventListener("dblclick", () => {
-      state.scale = 1;
-      state.offsetX = 0;
-      state.offsetY = 0;
-      applyAll();
+      sharedZoom.scale = calcFitScale();
+      sharedZoom.offsetX = 0;
+      sharedZoom.offsetY = 0;
+      applySharedZoom();
     });
 
     applyAll();
@@ -716,6 +777,98 @@ export function mjrOpenABViewer(fileA, fileB) {
   const sharedZoom = { scale: 1, offsetX: 0, offsetY: 0, entries: [] };
   enableZoomPan(baseMedia, baseWrap, sharedZoom);
   enableZoomPan(topMedia, topWrap, sharedZoom);
+
+  const applySharedZoom = () => {
+    if (sharedZoom.scale <= 1) {
+      sharedZoom.offsetX = 0;
+      sharedZoom.offsetY = 0;
+    }
+    for (const entry of sharedZoom.entries) {
+      entry.media.style.transform = `translate(${sharedZoom.offsetX}px, ${sharedZoom.offsetY}px) scale(${sharedZoom.scale})`;
+      entry.media.style.transformOrigin = "50% 50%";
+      entry.media.style.cursor = sharedZoom.scale > 1 ? "grab" : "default";
+      if (entry.hud) {
+        entry.hud.textContent = `${Math.round(sharedZoom.scale * 100)}%`;
+      }
+    }
+  };
+  sharedZoom.applySharedZoom = applySharedZoom;
+  const calcFitScale = () => {
+    const wrapRect = baseWrap.getBoundingClientRect();
+    const wrapW = wrapRect.width || baseWrap.clientWidth || 1;
+    const wrapH = wrapRect.height || baseWrap.clientHeight || 1;
+    const mediaW1 = baseMedia.videoWidth || baseMedia.naturalWidth || baseMedia.clientWidth || wrapW;
+    const mediaH1 = baseMedia.videoHeight || baseMedia.naturalHeight || baseMedia.clientHeight || wrapH;
+    const mediaW2 = topMedia.videoWidth || topMedia.naturalWidth || topMedia.clientWidth || wrapW;
+    const mediaH2 = topMedia.videoHeight || topMedia.naturalHeight || topMedia.clientHeight || wrapH;
+    const ratioA = mediaW1 && mediaH1 ? Math.min(wrapW / mediaW1, wrapH / mediaH1) : 1;
+    const ratioB = mediaW2 && mediaH2 ? Math.min(wrapW / mediaW2, wrapH / mediaH2) : 1;
+    const ratio = Math.min(ratioA || 1, ratioB || 1);
+    return Math.max(0.01, Math.min(10, ratio || 1));
+  };
+
+  // Simple context menu to reset zoom/pan
+  let contextMenuEl = null;
+  const closeContextMenu = () => {
+    if (contextMenuEl && contextMenuEl.parentNode) contextMenuEl.parentNode.removeChild(contextMenuEl);
+    contextMenuEl = null;
+  };
+  const buildContextMenu = (x, y) => {
+    closeContextMenu();
+    const menu = document.createElement("div");
+    Object.assign(menu.style, {
+      position: "fixed",
+      left: `${x}px`,
+      top: `${y}px`,
+      background: "rgba(0,0,0,0.92)",
+      color: "#eee",
+      border: "1px solid #444",
+      borderRadius: "6px",
+      boxShadow: "0 6px 20px rgba(0,0,0,0.5)",
+      padding: "6px 0",
+      minWidth: "150px",
+      zIndex: "99999",
+      fontSize: "12px",
+      userSelect: "none",
+    });
+    // Keep clicks inside from closing before they fire
+    menu.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+    const item = document.createElement("div");
+    item.textContent = "Reset zoom / pan";
+    Object.assign(item.style, {
+      padding: "6px 12px",
+      cursor: "pointer",
+    });
+    item.addEventListener("mouseenter", () => {
+      item.style.background = "rgba(255,255,255,0.08)";
+    });
+    item.addEventListener("mouseleave", () => {
+      item.style.background = "transparent";
+    });
+    item.addEventListener("click", () => {
+      closeContextMenu();
+      sharedZoom.reset?.();
+    });
+    menu.appendChild(item);
+    document.body.appendChild(menu);
+    contextMenuEl = menu;
+  };
+
+  const onWindowPointerDown = () => closeContextMenu();
+  const onWindowBlur = () => closeContextMenu();
+
+  container.addEventListener("contextmenu", (ev) => {
+    ev.preventDefault();
+    buildContextMenu(ev.clientX, ev.clientY);
+  });
+  window.addEventListener("pointerdown", onWindowPointerDown);
+  window.addEventListener("blur", onWindowBlur);
+
+  mjrViewerState.abCleanup = () => {
+    closeContextMenu();
+    window.removeEventListener("pointerdown", onWindowPointerDown);
+    window.removeEventListener("blur", onWindowBlur);
+  };
 
   // Hint overlay for controls
   const hint = document.createElement("div");
@@ -738,7 +891,7 @@ export function mjrOpenABViewer(fileA, fileB) {
     textAlign: "center",
     whiteSpace: "nowrap",
   });
-  hint.textContent = "Scroll: Zoom  •  Left-drag: Pan  •  Right-drag: Split";
+  hint.textContent = "Scroll: Zoom  •  Drag image (zoomed): Pan  •  Drag bar: Split  •  F: Fit/Reset";
   container.appendChild(hint);
   hint.style.transition = "opacity 0.3s ease";
   let hintTimer = setTimeout(() => {
@@ -775,17 +928,35 @@ export function mjrOpenABViewer(fileA, fileB) {
     bottom: "0",
     left: "50%",
     width: "2px",
-    background: "#ffffffaa",
-    pointerEvents: "none",
+    marginLeft: "-1px",
+    background: "rgba(255,255,255,0.35)",
+    backdropFilter: "blur(1px)",
     zIndex: "5",
   });
+  handle.style.pointerEvents = "none";
+  handle.dataset.mjrSplitHandle = "1";
   handle.textContent = "↔";
   handle.style.color = "#fff";
-  handle.style.fontSize = "14px";
+  handle.style.fontSize = "13px";
   handle.style.display = "flex";
   handle.style.alignItems = "center";
   handle.style.justifyContent = "center";
   handle.style.transform = "translateX(-50%)";
+
+  const handleHit = document.createElement("div");
+  Object.assign(handleHit.style, {
+    position: "absolute",
+    top: "0",
+    bottom: "0",
+    left: "50%",
+    width: "12px",
+    marginLeft: "-6px",
+    cursor: "col-resize",
+    zIndex: "6",
+    background: "transparent",
+  });
+  handleHit.dataset.mjrSplitHandle = "1";
+  handleHit.appendChild(handle);
 
   // Labels A / B
   const labelA = document.createElement("div");
@@ -827,26 +998,40 @@ export function mjrOpenABViewer(fileA, fileB) {
     const pct = Math.max(0, Math.min(100, Number(val) || 0));
     topWrap.style.clipPath = `inset(0 ${100 - pct}% 0 0)`;
     handle.style.left = pct + "%";
+    handleHit.style.left = pct + "%";
   };
 
-  // Drag direct sur la ligne
-  container.addEventListener("pointerdown", (ev) => {
-    // Left click should not control the split (reserved for pan in zoom mode)
-    const isRightClick = ev.button === 2 || ev.buttons === 2;
-    if (!isRightClick) return;
+  const resetView = () => {
+    sharedZoom.scale = calcFitScale();
+    sharedZoom.offsetX = 0;
+    sharedZoom.offsetY = 0;
+    applySharedZoom();
+    updateSplit(50);
+  };
+  sharedZoom.reset = resetView;
+  mjrViewerState.resetView = resetView;
+
+  // Drag direct sur la ligne (handle). When zoomed-in, only the handle drags to avoid conflicting with panning.
+  const startSplitDrag = (ev) => {
+    const isPrimary = ev.button === 0 || ev.buttons === 1;
+    if (!isPrimary) return;
+    const targetIsHandle =
+      ev.target === handle || (ev.target && ev.target.closest?.("[data-mjr-split-handle]"));
+    if (sharedZoom.scale > 1 && !targetIsHandle) return;
     ev.preventDefault();
     const rect = container.getBoundingClientRect();
-    const x = ev.clientX - rect.left;
-    const pct = (x / rect.width) * 100;
-    updateSplit(pct);
+    const apply = (clientX) => {
+      const x = clientX - rect.left;
+      const pct = (x / rect.width) * 100;
+      updateSplit(pct);
+    };
+    apply(ev.clientX);
     try {
       container.setPointerCapture(ev.pointerId);
     } catch (_) {}
 
     const move = (e) => {
-      const rx = e.clientX - rect.left;
-      const p = (rx / rect.width) * 100;
-      updateSplit(p);
+      apply(e.clientX);
     };
     const up = () => {
       container.releasePointerCapture?.(ev.pointerId);
@@ -857,14 +1042,16 @@ export function mjrOpenABViewer(fileA, fileB) {
     window.addEventListener("pointermove", move, { passive: false });
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", up);
-  });
+  };
+  handleHit.addEventListener("pointerdown", startSplitDrag);
+  container.addEventListener("pointerdown", startSplitDrag);
 
   // position initiale
   updateSplit(50);
 
   container.appendChild(baseWrap);
   container.appendChild(topWrap);
-  container.appendChild(handle);
+  container.appendChild(handleHit);
   container.appendChild(labelA);
   container.appendChild(labelB);
 
@@ -887,6 +1074,15 @@ export function mjrOpenABViewer(fileA, fileB) {
   }
 
   frame.appendChild(container);
+
+  // Fit after layout
+  requestAnimationFrame(() => resetView());
+  // Also refit once media reports intrinsic sizes
+  const fitOnReady = () => resetView();
+  baseMedia.addEventListener?.("load", fitOnReady);
+  baseMedia.addEventListener?.("loadedmetadata", fitOnReady);
+  topMedia.addEventListener?.("load", fitOnReady);
+  topMedia.addEventListener?.("loadedmetadata", fitOnReady);
 }
 
 export function mjrOpenViewerForFiles(files, listContext = null) {
@@ -929,6 +1125,7 @@ export function mjrRenderSingleCurrent() {
   mjrViewerState.frame.innerHTML = "";
 
   const pane = mjrCreateViewerPane(file);
+  mjrViewerState.resetView = pane && pane.__mjrReset ? pane.__mjrReset : null;
   mjrViewerState.frame.appendChild(pane);
   if (mjrViewerState.frame.firstChild) {
     Object.assign(mjrViewerState.frame.firstChild.style, {
