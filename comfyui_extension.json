@@ -1,0 +1,6 @@
+{
+  "name": "Majoor-FileManager",
+  "version": "2.0.0",
+  "frontend": "js/",
+  "backend": "server/"
+}
