@@ -1,8 +1,8 @@
-# 📂 Majoor File Manager for ComfyUI
+# 📂 Majoor Asset Manager for ComfyUI
 
 **A fast, modern, and robust media manager for ComfyUI with native OS metadata integration.**
 
-Majoor File Manager is a custom node extension designed to browse, inspect, and organize your generated images, videos, and audio files without leaving the ComfyUI interface.
+Majoor Asset Manager is a custom node extension designed to browse, inspect, and organize your generated images, videos, and audio files without leaving the ComfyUI interface.
 
 Unlike other file managers, **it runs asynchronously** (no freezing during scans) and **writes ratings/tags directly to your files' Windows properties** (via Exif/OS shell), ensuring your organization survives outside of ComfyUI.
 
