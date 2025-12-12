@@ -19,11 +19,18 @@ SAMPLER_CLASSES: Set[str] = {
     "ksampler",
     "samplercustom",
     "ksampleradvanced",
+    "samplercustomadvanced",
+    "samplercustomeadvanced",  # variant typo seen in some nodes
+    "flux2scheduler",
+    "randomnoise",
+    "basicguider",
     # WAN / Kijai wrappers
     "wanvideosampler",
     "wanvideoksampler",
     "wanvideoksampler",
     "wanmoeksampler",
+    "wanmoeksampler",  # alias/variant
+    "painteri2v",
 }
 
 # Model loaders (diffusion / checkpoint)
@@ -44,6 +51,19 @@ LORA_CLASSES: Set[str] = {
     "LoraLoader",
     "LoraLoaderModelOnly",
 }
+
+def _clean_model_name(raw: str) -> str:
+    """
+    Strip directories and extensions from model names to keep titles clean.
+    Example: 'WAN2.2\\foo\\bar.safetensors' -> 'bar'
+    """
+    try:
+        name = raw.replace("\\", "/").split("/")[-1]
+        if name.lower().endswith(".safetensors"):
+            name = name[: -len(".safetensors")]
+        return name
+    except Exception:
+        return raw
 
 
 # --------- General helpers ---------
@@ -422,34 +442,37 @@ def load_raw_workflow_from_png(path: str | Path) -> Optional[Dict[str, Any]]:
 # --------- Extraction sampler-centric ---------
 
 
-def _pick_sampler_node(prompt_graph: Dict[str, Any]) -> Optional[str]:
+def _list_sampler_nodes(prompt_graph: Dict[str, Any]) -> Tuple[List[int], List[int]]:
     """
-    Select a single sampler from the graph.
-    Simple deterministic strategy:
-    - pick the sampler with the largest numeric id.
+    Returns (wired_samplers, all_samplers) as int ids, sorted descending.
+    Wired means the sampler has a positive or negative link.
     """
     sampler_ids: List[int] = []
+    wired_ids: List[int] = []
 
     for node_id, node in prompt_graph.items():
         node_type = (node.get("class_type") or "").lower()
         if node_type in SAMPLER_CLASSES or "sampler" in node_type:
             try:
-                sampler_ids.append(int(node_id))
+                nid = int(node_id)
             except Exception:
-                # si l'id n'est pas un int, on ignore
                 continue
+            sampler_ids.append(nid)
+            inputs = node.get("inputs", {}) or {}
+            pos = _extract_link_node_id(inputs.get("positive"))
+            neg = _extract_link_node_id(inputs.get("negative"))
+            if pos or neg:
+                wired_ids.append(nid)
 
-    if not sampler_ids:
-        return None
-
-    best_id = max(sampler_ids)
-    return str(best_id)
+    wired_ids.sort(reverse=True)
+    sampler_ids.sort(reverse=True)
+    return wired_ids, sampler_ids
 
 
 def _extract_clip_text(prompt_graph: Dict[str, Any], node_id: Optional[str]) -> Optional[str]:
     """
     Extract text from a text-encoder-like node (CLIP / SDXL / Flux, etc.).
-    Keep it generic: look at fields 'text', 'text_g', 'text_l'.
+    Keep it generic: look at common fields and widgets ('text', 'text_g', 'text_l', 'string', 'value', etc.).
     """
     if node_id is None:
         return None
@@ -461,15 +484,22 @@ def _extract_clip_text(prompt_graph: Dict[str, Any], node_id: Optional[str]) -> 
     inputs: Dict[str, Any] = node.get("inputs", {}) or {}
 
     texts: List[str] = []
-    for key in ("text", "text_g", "text_l"):
+    for key in ("text", "text_g", "text_l", "string", "value", "prompt", "content"):
         v = inputs.get(key)
         if isinstance(v, str) and v.strip():
             texts.append(v.strip())
 
+    # Some text nodes store content in widgets_values
+    widgets = node.get("widgets_values")
+    if isinstance(widgets, list):
+        for w in widgets:
+            if isinstance(w, str) and w.strip():
+                texts.append(w.strip())
+
     if not texts:
         return None
 
-    # jointure simple; tu peux raffiner (multi-lignes, etc.)
+    # simple join; keep separator consistent
     return " | ".join(texts)
 
 
@@ -568,7 +598,7 @@ def _walk_model_chain(
         if node_type in CHECKPOINT_LOADER_CLASSES:
             ckpt = inputs.get("ckpt_name") or inputs.get("ckpt_file")
             if isinstance(ckpt, str):
-                model_name = ckpt
+                model_name = _clean_model_name(ckpt)
             vae = inputs.get("vae_name")
             if isinstance(vae, str):
                 vae_name = vae
@@ -578,13 +608,13 @@ def _walk_model_chain(
         if node_type in UNET_LOADER_CLASSES:
             unet = inputs.get("unet_name") or inputs.get("model_name")
             if isinstance(unet, str):
-                model_name = unet
+                model_name = _clean_model_name(unet)
             break
 
         if node_type in DIFFUSERS_LOADER_CLASSES:
             m = inputs.get("model_path") or inputs.get("model_name")
             if isinstance(m, str):
-                model_name = m
+                model_name = _clean_model_name(m)
             break
 
         # --- LoRA chain ---
@@ -592,7 +622,7 @@ def _walk_model_chain(
             lora_name = inputs.get("lora_name")
             if isinstance(lora_name, str):
                 l_entry = {
-                    "name": lora_name,
+                    "name": _clean_model_name(lora_name),
                     "strength_model": inputs.get("strength_model"),
                     "strength_clip": inputs.get("strength_clip"),
                 }
@@ -627,7 +657,8 @@ def extract_generation_params_from_prompt_graph(
     if not prompt_graph:
         return {}
 
-    sampler_id = _pick_sampler_node(prompt_graph)
+    wired_samplers, all_samplers = _list_sampler_nodes(prompt_graph)
+    sampler_id = str(wired_samplers[0]) if wired_samplers else (str(all_samplers[0]) if all_samplers else None)
 
     if sampler_id is None:
         collected = _collect_all_texts(prompt_graph)
@@ -679,13 +710,29 @@ def extract_generation_params_from_prompt_graph(
     else:
         negative_prompt = _extract_clip_text(prompt_graph, neg_id)
 
-    # Fallback: collect any text nodes if prompts are missing
-    if not positive_prompt or not negative_prompt:
-        collected = _collect_all_texts(prompt_graph)
-        if not positive_prompt and collected.get("positive"):
-            positive_prompt = " | ".join(collected["positive"])
-        if not negative_prompt and collected.get("negative"):
-            negative_prompt = " | ".join(collected["negative"])
+    # If prompts are missing, try other samplers (still only via linked inputs)
+    if (not positive_prompt or not negative_prompt) and (wired_samplers or all_samplers):
+        for sid in (wired_samplers or all_samplers):
+            if str(sid) == sampler_id:
+                continue
+            node = prompt_graph.get(str(sid), {})
+            inputs_alt: Dict[str, Any] = node.get("inputs", {}) or {}
+            pos_alt = inputs_alt.get("positive")
+            neg_alt = inputs_alt.get("negative")
+            pos_alt_id = _extract_link_node_id(pos_alt)
+            neg_alt_id = _extract_link_node_id(neg_alt)
+            if not positive_prompt:
+                if pos_alt_id is None and isinstance(pos_alt, str):
+                    positive_prompt = pos_alt
+                else:
+                    positive_prompt = _extract_clip_text(prompt_graph, pos_alt_id)
+            if not negative_prompt:
+                if neg_alt_id is None and isinstance(neg_alt, str):
+                    negative_prompt = neg_alt
+                else:
+                    negative_prompt = _extract_clip_text(prompt_graph, neg_alt_id)
+            if positive_prompt and negative_prompt:
+                break
 
     # Model chain
     model_link_id = (

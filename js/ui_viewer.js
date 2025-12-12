@@ -5,6 +5,8 @@ import {
   CARD_STYLES,
   createEl,
   getBaseName,
+  getExt,
+  detectKindFromExt,
   mjrAttachHoverFeedback,
   mjrCardBasePx,
   mjrSettings,
@@ -20,6 +22,89 @@ export let mjrViewerIsAB = false;
 let mjrViewerRatingEl = null;
 let mjrCurrentList = [];
 let mjrCurrentIndex = 0;
+const mjrThumbCache = new Map();
+const mjrThumbPromises = new Map();
+
+function mjrFileThumbUrl(file) {
+  const name = file?.filename || file?.name || "";
+  const kind = file?.kind || detectKindFromExt(file?.ext || getExt(name));
+  if (kind === "video" || kind === "audio" || kind === "model3d") {
+    const pngName = name.includes(".") ? name.replace(/\.[^.]+$/, ".png") : `${name}.png`;
+    return buildViewUrl({ ...file, filename: pngName, name: pngName });
+  }
+  return buildViewUrl(file);
+}
+
+function mjrThumbPlaceholder(kind) {
+  const labels = {
+    video: "VIDEO",
+    audio: "AUDIO",
+    model3d: "3D",
+    image: "IMAGE",
+  };
+  const label = labels[kind] || "FILE";
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='96' height='96' viewBox='0 0 96 96'><rect width='96' height='96' rx='10' fill='%23111'/><text x='50%' y='50%' fill='%23ccc' font-family='Arial, sans-serif' font-size='16' font-weight='700' text-anchor='middle' dominant-baseline='middle'>${label}</text></svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
+function mjrCaptureVideoThumb(file, imgEl) {
+  const key = `${file?.subfolder || ""}/${file?.filename || file?.name || ""}`;
+  if (mjrThumbCache.has(key)) {
+    const cached = mjrThumbCache.get(key);
+    if (cached && imgEl) imgEl.src = cached;
+    return;
+  }
+  if (mjrThumbPromises.has(key)) {
+    mjrThumbPromises.get(key).then((url) => {
+      if (url && imgEl) imgEl.src = url;
+    });
+    return;
+  }
+
+  const promise = new Promise((resolve) => {
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+    video.crossOrigin = "anonymous";
+    video.src = buildViewUrl(file);
+
+    let timeout = null;
+    const cleanup = (res) => {
+      if (timeout) clearTimeout(timeout);
+      video.onloadeddata = null;
+      video.onerror = null;
+      video.src = "";
+      resolve(res || null);
+    };
+
+    video.onloadeddata = () => {
+      try {
+        const w = video.videoWidth || 0;
+        const h = video.videoHeight || 0;
+        if (!w || !h) return cleanup(null);
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return cleanup(null);
+        ctx.drawImage(video, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL("image/png");
+        mjrThumbCache.set(key, dataUrl);
+        if (imgEl) imgEl.src = dataUrl;
+        cleanup(dataUrl);
+      } catch (_) {
+        cleanup(null);
+      }
+    };
+
+    video.onerror = () => cleanup(null);
+    timeout = setTimeout(() => cleanup(null), 3000);
+  });
+
+  mjrThumbPromises.set(key, promise);
+  promise.finally(() => mjrThumbPromises.delete(key));
+}
 
 export function mjrUpdateNavVisibility() {
   const display = mjrViewerIsAB || !mjrSettings.viewer.navEnabled ? "none" : "inline-flex";
@@ -165,7 +250,8 @@ export function mjrEnsureViewerOverlay() {
     for (let i = start; i < end; i++) {
       const file = mjrCurrentList[i];
       if (!file) continue;
-      const thumbUrl = buildViewUrl(file);
+      const kind = file?.kind || detectKindFromExt(file?.ext || getExt(file?.filename || file?.name || ""));
+      const thumbUrl = mjrFileThumbUrl(file);
       const t = document.createElement("img");
       t.src = thumbUrl;
       Object.assign(t.style, {
@@ -177,6 +263,13 @@ export function mjrEnsureViewerOverlay() {
         border: i === mjrCurrentIndex ? "2px solid #5fb3ff" : "2px solid transparent",
         opacity: i === mjrCurrentIndex ? "1" : "0.6",
       });
+      t.onerror = () => {
+        t.onerror = null;
+        t.src = mjrThumbPlaceholder(kind);
+      };
+      if (kind === "video") {
+        mjrCaptureVideoThumb(file, t);
+      }
       t.onclick = (e) => {
         e.stopPropagation();
         mjrCurrentIndex = i;

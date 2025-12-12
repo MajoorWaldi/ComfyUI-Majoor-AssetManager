@@ -48,6 +48,13 @@ try:
 except Exception:
     _SCAN_MIN_INTERVAL = 5.0
 
+try:
+    _META_PREFETCH_COUNT = int(os.environ.get("MJR_META_PREFETCH_COUNT", "80"))
+    if _META_PREFETCH_COUNT < 0:
+        _META_PREFETCH_COUNT = 0
+except Exception:
+    _META_PREFETCH_COUNT = 80
+
 _CACHE_LOCK = threading.Lock()
 
 
@@ -261,6 +268,39 @@ async def list_files(request: web.Request) -> web.Response:
     force = force_param in ("1", "true", "yes", "force")
 
     files = await _scan_outputs_async(force=force)
+
+    # Prefetch metadata for the first N items without delaying the response
+    prefetch_count = min(len(files), _META_PREFETCH_COUNT)
+    if prefetch_count > 0:
+        root = _get_output_root()
+
+        def _prefetch():
+            for f in files[:prefetch_count]:
+                try:
+                    filename = f.get("filename") or f.get("name")
+                    subfolder = f.get("subfolder", "")
+                    if not filename:
+                        continue
+                    target = (root / subfolder / filename).resolve()
+                    try:
+                        target.relative_to(root)
+                    except ValueError:
+                        continue
+                    kind = f.get("kind") or classify_ext(filename.lower())
+                    meta_target = _metadata_target(target, kind)
+                    if not meta_target.exists():
+                        continue
+                    sys_meta = get_system_metadata(str(meta_target))
+                    json_meta = load_metadata(str(meta_target))
+                    f["rating"] = sys_meta.get("rating") or json_meta.get("rating", 0)
+                    f["tags"] = sys_meta.get("tags") or json_meta.get("tags", [])
+                    f["__metaLoaded"] = True
+                except Exception:
+                    continue
+
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, _prefetch)
+
     return web.json_response({"files": files})
 
 

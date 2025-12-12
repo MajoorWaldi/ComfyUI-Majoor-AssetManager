@@ -401,17 +401,15 @@ export function createMetadataSidebar(options) {
     if (hasNegative) fieldsContainer.appendChild(createCopyField("NEGATIVE PROMPT", negative, true));
     if (hasSeeds) fieldsContainer.appendChild(createCopyField("SEED(S)", seeds, false));
 
-    const modelBlockLines = [];
-    if (models) modelBlockLines.push(`MODEL(S): ${models}`);
-    if (loras) modelBlockLines.push(`LoRA(S): ${loras}`);
-    if (samplers) modelBlockLines.push(`SAMPLER(S): ${samplers}`);
-    if (cfg) modelBlockLines.push(`CFG: ${cfg}`);
-
-    const modelBlockText = modelBlockLines.join("\n");
-    if (modelBlockText) {
-      fieldsContainer.appendChild(
-        createCopyField("MODEL / LoRA / SAMPLER / CFG", modelBlockText, true)
-      );
+    const genLines = [];
+    if (models) genLines.push(`Model: ${models}`);
+    if (loras) genLines.push(`LoRAs: ${loras}`);
+    if (samplers) genLines.push(`Sampler: ${samplers}`);
+    if (meta && meta.scheduler) genLines.push(`Scheduler: ${meta.scheduler}`);
+    if (cfg) genLines.push(`CFG: ${cfg}`);
+    if (meta && meta.steps !== undefined && meta.steps !== null) genLines.push(`Steps: ${meta.steps}`);
+    if (genLines.length) {
+      fieldsContainer.appendChild(createCopyField("MODEL / LORA / SAMPLER", genLines.join("\n"), true));
     }
 
     if (hasAnyGen) {
