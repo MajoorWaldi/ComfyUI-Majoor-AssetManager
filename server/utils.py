@@ -331,27 +331,30 @@ def update_metadata_with_windows(file_path: str, updates: dict) -> dict:
     Update rating/tags via Windows + sidecar (if enabled).
     Returns final metadata.
     """
-    current_rating = 0
-    current_tags: List[str] = []
-    try:
-        existing = load_metadata(file_path)
-        current_rating = existing.get("rating", 0)
-        current_tags = existing.get("tags", [])
-    except Exception:
-        pass
+    # Load current values (prefer system metadata, fallback to sidecar)
+    sys_meta = get_system_metadata(file_path) or {}
+    sidecar = load_metadata(file_path) or {}
+    current_rating = sys_meta.get("rating", sidecar.get("rating", 0))
+    current_tags = sys_meta.get("tags", sidecar.get("tags", []))
 
-    rating = updates.get("rating", current_rating)
-    tags = updates.get("tags", current_tags)
+    has_rating = "rating" in updates
+    has_tags = "tags" in updates
 
-    ok_win = set_windows_metadata(file_path, rating, tags)
-    ok_exif = set_exif_metadata(file_path, rating, tags)
+    rating = updates.get("rating", current_rating if has_rating else current_rating)
+    tags = updates.get("tags", current_tags if has_tags else current_tags)
+
+    # Only write tags when provided; otherwise preserve existing tags in system metadata
+    target_tags = tags if has_tags else current_tags
+
+    ok_win = set_windows_metadata(file_path, rating, target_tags)
+    ok_exif = set_exif_metadata(file_path, rating, target_tags)
 
     if ENABLE_JSON_SIDECAR:
-        save_metadata(file_path, {"rating": rating, "tags": tags})
+        save_metadata(file_path, {"rating": rating, "tags": target_tags})
 
     effective_rating = rating if (ok_win or ok_exif) else current_rating
-    _META_CACHE[file_path] = (_get_mtime_safe(file_path), _CACHE_EPOCH, {"rating": effective_rating, "tags": tags})
-    return {"rating": effective_rating, "tags": tags}
+    _META_CACHE[file_path] = (_get_mtime_safe(file_path), _CACHE_EPOCH, {"rating": effective_rating, "tags": target_tags})
+    return {"rating": effective_rating, "tags": target_tags}
 
 
 def apply_system_metadata(file_path: str, rating, tags: list) -> dict:

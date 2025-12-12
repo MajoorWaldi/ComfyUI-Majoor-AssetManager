@@ -431,6 +431,8 @@ async def get_metadata(request: web.Request) -> web.Response:
 
     target = (root / subfolder / filename).resolve()
 
+    kind = classify_ext(filename.lower())
+
     try:
         target.relative_to(root)
     except ValueError:
@@ -443,18 +445,12 @@ async def get_metadata(request: web.Request) -> web.Response:
             {"ok": False, "error": "File not found"}, status=404
         )
 
-    if target.suffix.lower() == ".mp4":
-        png_sibling = target.with_suffix(".png")
-        if not png_sibling.exists():
+    meta_target = _metadata_target(target, kind)
+    if kind != "image":
+        if not meta_target.exists() or meta_target.suffix.lower() != ".png":
             return web.json_response(
-                {"ok": False, "error": "PNG sibling not found for video"}, status=404
+                {"ok": False, "error": "PNG sibling not found for this file"}, status=404
             )
-
-    if target.suffix.lower() == ".mp4":
-        png_sibling = target.with_suffix(".png")
-        meta_target = png_sibling if png_sibling.exists() else target
-    else:
-        meta_target = target
 
     try:
         params = extract_generation_params_from_png(meta_target)
@@ -479,8 +475,10 @@ async def update_metadata(request: web.Request) -> web.Response:
 
     filename = payload.get("filename")
     subfolder = payload.get("subfolder", "")
-    rating = payload.get("rating")
-    tags = payload.get("tags") or []
+    rating_provided = "rating" in payload
+    tags_provided = "tags" in payload
+    rating = payload.get("rating") if rating_provided else None
+    tags = payload.get("tags") if tags_provided else None
 
     if not filename:
         return web.json_response(
@@ -488,6 +486,7 @@ async def update_metadata(request: web.Request) -> web.Response:
         )
 
     target = (root / subfolder / filename).resolve()
+    kind = classify_ext(filename.lower())
     try:
         target.relative_to(root)
     except ValueError:
@@ -500,15 +499,22 @@ async def update_metadata(request: web.Request) -> web.Response:
             {"ok": False, "error": "File not found"}, status=404
         )
 
+    updates = {}
+    if rating_provided:
+        updates["rating"] = rating
+    if tags_provided:
+        updates["tags"] = tags if tags is not None else []
+
     try:
-        meta = update_metadata_with_windows(str(target), {"rating": rating, "tags": tags})
-        sibling = (target.parent / (target.stem + ".png")).resolve()
-        if sibling.exists():
-            try:
-                sibling.relative_to(root)
-                update_metadata_with_windows(str(sibling), {"rating": rating, "tags": tags})
-            except Exception:
-                pass
+        meta = update_metadata_with_windows(str(target), updates)
+        if kind != "image":
+            sibling = (target.parent / (target.stem + ".png")).resolve()
+            if sibling.exists():
+                try:
+                    sibling.relative_to(root)
+                    update_metadata_with_windows(str(sibling), updates)
+                except Exception:
+                    pass
     except Exception as exc:
         return web.json_response(
             {

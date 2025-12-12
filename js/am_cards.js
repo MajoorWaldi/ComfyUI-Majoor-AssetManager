@@ -19,7 +19,7 @@ export function updateCardVisuals(card, file) {
   const newRatingText = rating > 0 ? "★".repeat(rating) : "";
   let ratingBadge = card.querySelector(".mjr-fm-rating-badge");
 
-  if (rating > 0) {
+  if (mjrSettings.grid.showRating && rating > 0) {
     if (!ratingBadge) {
       ratingBadge = createEl("div", "mjr-fm-rating-badge");
       applyStyles(ratingBadge, BADGE_STYLES.rating);

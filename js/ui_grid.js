@@ -324,28 +324,11 @@ function renderAssetsManager(root) {
   Object.assign(toolbar.style, { display: "flex", flexDirection: "column", gap: "6px", padding: "8px 12px 6px 12px", borderBottom: "1px solid var(--border-color, #444)", background: "var(--comfy-menu-bg, #111)" });
 
   const headerRow = createEl("div", "mjr-fm-header-row");
-  Object.assign(headerRow.style, { display: "flex", alignItems: "center", justifyContent: "space-between" });
+  Object.assign(headerRow.style, { display: "flex", alignItems: "center", justifyContent: "flex-start" });
 
   const title = createEl("div", "mjr-fm-title", "Majoor Assets Manager");
   Object.assign(title.style, { fontWeight: "600", fontSize: "0.85rem", opacity: "0.9" });
-  
-  const headerActions = createEl("div");
-  Object.assign(headerActions.style, { display: "flex", gap: "6px" });
-
-  const settingsBtn = createEl("button", "comfy-btn");
-  Object.assign(settingsBtn.style, { padding: "4px 6px", borderRadius: "6px", display: "flex", alignItems: "center", gap: "4px" });
-  const cog = createEl("i", "pi pi-cog");
-  settingsBtn.append(cog, createEl("span", "", "Settings", { fontSize: "0.8rem" }));
-
-  const onSettingsClick = () => {
-    if (app?.ui?.settings?.show) app.ui.settings.show();
-    else mjrShowToast("info", "Use the main Settings menu to adjust Assets Manager options.", "Settings");
-  };
-  settingsBtn.addEventListener("click", onSettingsClick);
-  cleanups.push(() => settingsBtn.removeEventListener("click", onSettingsClick));
-  
-  headerActions.appendChild(settingsBtn);
-  headerRow.append(title, headerActions);
+  headerRow.append(title);
 
   const searchRow = createEl("div", "mjr-fm-search-row");
   Object.assign(searchRow.style, { display: "flex", alignItems: "center", gap: "6px" });
@@ -799,6 +782,7 @@ app.registerExtension({
       onChange: (val) => {
         mjrSettings.autoRefresh.enabled = val;
         mjrSaveSettings(mjrSettings);
+        mjrStartAutoRefreshTimer();
       },
     });
 
@@ -811,6 +795,7 @@ app.registerExtension({
       onChange: (val) => {
         mjrSettings.autoRefresh.interval = val;
         mjrSaveSettings(mjrSettings);
+        mjrStartAutoRefreshTimer();
       },
     });
 
