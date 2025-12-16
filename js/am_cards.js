@@ -33,29 +33,20 @@ export function resolveWorkflowState(file) {
 
 export function handleDragStart(file, ev) {
   if (!ev?.dataTransfer) return;
-  // Always attach payload (videos first target; others harmless)
   const filename = file.filename || file.name;
-  const subfolder = file.subfolder || "";
-  const payload = { filename, subfolder };
-  const relPath = subfolder ? `${subfolder}/${filename}` : filename;
+  if (!filename) return;
+
   const extGuess = file.ext || getExt(filename) || "";
   const kind = file.kind || detectKindFromExt(extGuess);
-  const isVideo = kind === "video";
-  const fileUrl = new URL(
-    `/view?filename=${encodeURIComponent(filename)}&subfolder=${encodeURIComponent(subfolder)}&type=output`,
-    window.location.origin
-  ).toString();
+  const isSiblingTarget =
+    kind === "video" || kind === "audio" || kind === "model3d" || kind === "3d" || kind === "other3d";
+  if (!isSiblingTarget) return;
+
   ev.dataTransfer.effectAllowed = "copy";
-  ev.dataTransfer.setData("application/x-mjr-sibling-file", JSON.stringify(payload));
-  ev.dataTransfer.setData("application/x-mjr-origin", "majoor-assetmanager");
-  ev.dataTransfer.setData("application/x-mjr-intent", "workflow");
-  // Also provide standard paths for native handlers / nodes
-  ev.dataTransfer.setData("text/plain", relPath); // filename/path only
-  // Keep URI in a custom channel to avoid being shown as filename on canvas (still useful for nodes)
-  if (isVideo) {
-    ev.dataTransfer.setData("application/x-mjr-url", fileUrl);
-    ev.dataTransfer.setData("text/uri-list", fileUrl);
-  }
+  ev.dataTransfer.setData(
+    "application/x-mjr-sibling-file",
+    JSON.stringify({ filename, subfolder: file.subfolder || "" })
+  );
 }
 
 export function updateWorkflowDot(card, workflowState) {

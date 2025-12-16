@@ -18,10 +18,7 @@ import {
   ensureNewFilesListener,
   ensureQueueListener,
   ensureWorkflowDropHandler,
-  mjrFetchFileAsDataTransferFile,
-  mjrDispatchSyntheticDrop,
   mjrStartAutoRefreshTimer,
-  mjrIsOurDrag,
 } from "./grid/events.js";
 import { createMetadataFetcher } from "./grid/fetch.js";
 import { initManagerState, populateCollectionsOptions } from "./grid/state.js";
@@ -184,68 +181,7 @@ function renderAssetsManager(root) {
   refreshAllInstances = refreshAllInstancesFn;
   const refreshCollections = () => populateCollectionsOptions(state, collectionFilterSelect);
 
-  // Synthetic upload for our drags dropped on ComfyUI file widgets
-  const FILE_INPUT_SELECTORS = [
-    "input[type='file']",
-    ".comfy-file-input",
-    ".comfy-file",
-    ".file-input",
-    ".upload-area",
-  ].join(",");
-  const isGraphCanvas = (t) =>
-    t instanceof HTMLCanvasElement && t.classList && t.classList.contains("graphcanvas");
-  const findFileInput = (target) => {
-    if (!target || typeof target.closest !== "function") return null;
-    // Direct input
-    const direct = target.closest("input[type='file']");
-    if (direct) return direct;
-    const wrapper = target.closest(FILE_INPUT_SELECTORS);
-    if (wrapper) {
-      if (wrapper instanceof HTMLInputElement && wrapper.type === "file") return wrapper;
-      return wrapper.querySelector("input[type='file']") || null;
-    }
-    return null;
-  };
-  const onGlobalDrop = async (ev) => {
-    if (!mjrIsOurDrag(ev)) return;
-    if (isGraphCanvas(ev.target)) return;
-    const fileInput = findFileInput(ev.target);
-    if (!fileInput) return;
-
-    let info = null;
-    try {
-      const raw = ev.dataTransfer.getData("application/x-mjr-sibling-file");
-      if (raw) info = JSON.parse(raw);
-    } catch (_) {
-      info = null;
-    }
-    if (!info || !info.filename) return;
-
-    const filename = info.filename || info.name || "";
-    const ext = (filename.split(".").pop() || "").toLowerCase();
-    const kind = typeof detectKindFromExt === "function" ? detectKindFromExt(ext) : "";
-    if (kind !== "image") {
-      if (mjrSettings && mjrSettings.debugDnD) {
-        console.debug("[Majoor.DnD] skip synthetic drop for non-image", filename, kind);
-      }
-      return; // Let native handling proceed for videos/others
-    }
-
-    ev.preventDefault();
-    ev.stopPropagation();
-    if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
-    try {
-      const fileObj = await mjrFetchFileAsDataTransferFile(info);
-      if (!fileObj) return;
-      mjrDispatchSyntheticDrop(fileInput, fileObj);
-    } catch (err) {
-      console.warn("[Majoor.AssetsManager] synthetic upload failed", err);
-    }
-  };
-  document.addEventListener("drop", onGlobalDrop, false);
-  cleanupsExternal.push(() => document.removeEventListener("drop", onGlobalDrop, false));
-
-  // Workflow drops are handled in events.js and gated by our intent flag ("workflow")
+  // Workflow drops are handled in events.js (sibling payload drop on graph)
   cleanups.push(ensureWorkflowDropHandler());
   cleanups.push(ensureQueueListener(refreshAllInstances));
   cleanups.push(ensureNewFilesListener());

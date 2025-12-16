@@ -94,7 +94,49 @@ def _parse_candidate_json(s: str):
     try:
         return json.loads(s)
     except Exception:
+        pass
+
+    # Some tools stash JSON into a text field but escape quotes, e.g.:
+    #   {\"nodes\": [...], \"prompt\": {...}}
+    # This is not valid JSON until unescaped.
+    if not isinstance(s, str) or not s or '\\"' not in s:
         return None
+
+    def _wrap_as_json_string(val: str) -> str:
+        # Build a JSON string literal that preserves existing escapes, while
+        # escaping any quotes that would terminate the wrapper.
+        out: List[str] = []
+        for i, ch in enumerate(val):
+            if ch != '"':
+                out.append(ch)
+                continue
+            # Quote is escaped if preceded by an odd number of backslashes.
+            backslashes = 0
+            j = i - 1
+            while j >= 0 and val[j] == "\\":
+                backslashes += 1
+                j -= 1
+            if backslashes % 2 == 1:
+                out.append('"')
+            else:
+                out.append('\\"')
+        return '"' + "".join(out) + '"'
+
+    candidate = s
+    for _ in range(2):
+        try:
+            unescaped = json.loads(_wrap_as_json_string(candidate))
+        except Exception:
+            return None
+        if not isinstance(unescaped, str) or not unescaped:
+            return None
+        candidate = unescaped
+        try:
+            return json.loads(candidate)
+        except Exception:
+            continue
+
+    return None
 
 
 def _detect_prompt_graph(obj) -> Optional[Dict[str, Any]]:
@@ -156,6 +198,11 @@ def _scan_png_info_for_generation(info: Dict[str, Any]) -> Tuple[Optional[Dict[s
             extra = obj.get("extra_pnginfo")
             if isinstance(extra, dict):
                 try_payload(extra)
+        elif isinstance(obj, (bytes, bytearray)):
+            try:
+                try_payload(obj.decode("utf-8", errors="replace"))
+            except Exception:
+                return
         elif isinstance(obj, str):
             txt = obj.strip()
             candidates: List[str] = []
@@ -569,8 +616,16 @@ def load_prompt_graph_from_png(path: str | Path) -> Optional[Dict[str, Any]]:
     img = Image.open(p)
     info = getattr(img, "info", {}) or {}
 
+    def _as_text(v: Any) -> Any:
+        if isinstance(v, (bytes, bytearray)):
+            try:
+                return v.decode("utf-8", errors="replace")
+            except Exception:
+                return ""
+        return v
+
     # 1) prompt au top-level
-    prompt = _ensure_dict_from_json(info.get("prompt"))
+    prompt = _ensure_dict_from_json(_as_text(info.get("prompt")))
     if prompt is not None:
         # some dumps contain a list of nodes rather than a map
         if isinstance(prompt, list):
@@ -578,7 +633,7 @@ def load_prompt_graph_from_png(path: str | Path) -> Optional[Dict[str, Any]]:
         return prompt
 
     # 1bis) workflow au top-level
-    wf_raw = _ensure_dict_from_json(info.get("workflow"))
+    wf_raw = _ensure_dict_from_json(_as_text(info.get("workflow")))
     if wf_raw is not None:
         pg = _normalize_workflow_to_prompt_graph(wf_raw)
         if pg:
@@ -619,7 +674,7 @@ def load_prompt_graph_from_png(path: str | Path) -> Optional[Dict[str, Any]]:
         return None
 
     # 2) prompt dans extra_pnginfo (cas courant)
-    extra = info.get("extra_pnginfo")
+    extra = _as_text(info.get("extra_pnginfo"))
     if isinstance(extra, str):
         try:
             extra = json.loads(extra)
@@ -627,12 +682,12 @@ def load_prompt_graph_from_png(path: str | Path) -> Optional[Dict[str, Any]]:
             extra = None
 
     if isinstance(extra, dict):
-        prompt = _ensure_dict_from_json(extra.get("prompt"))
+        prompt = _ensure_dict_from_json(_as_text(extra.get("prompt")))
         if prompt is not None:
             if isinstance(prompt, list):
                 prompt = _normalize_workflow_to_prompt_graph({"nodes": prompt})
             return prompt
-        wf_raw = _ensure_dict_from_json(extra.get("workflow"))
+        wf_raw = _ensure_dict_from_json(_as_text(extra.get("workflow")))
         if wf_raw is not None:
             pg = _normalize_workflow_to_prompt_graph(wf_raw)
             if pg:
@@ -641,10 +696,10 @@ def load_prompt_graph_from_png(path: str | Path) -> Optional[Dict[str, Any]]:
         for item in extra:
             if not isinstance(item, dict):
                 continue
-            prompt = _ensure_dict_from_json(item.get("prompt"))
+            prompt = _ensure_dict_from_json(_as_text(item.get("prompt")))
             if prompt is not None:
                 return prompt
-            wf_raw = _ensure_dict_from_json(item.get("workflow"))
+            wf_raw = _ensure_dict_from_json(_as_text(item.get("workflow")))
             if wf_raw is not None:
                 pg = _normalize_workflow_to_prompt_graph(wf_raw)
                 if pg:
@@ -656,13 +711,13 @@ def load_prompt_graph_from_png(path: str | Path) -> Optional[Dict[str, Any]]:
                     return pg
 
     # 3) Parameters field (other tools)
-    params_payload = _extract_from_parameters(info.get("parameters"))
+    params_payload = _extract_from_parameters(_as_text(info.get("parameters")))
     if params_payload:
         pg = _maybe_prompt_from_payload(params_payload)
         if pg:
             return pg
     if isinstance(extra, dict):
-        params_payload = _extract_from_parameters(extra.get("parameters"))
+        params_payload = _extract_from_parameters(_as_text(extra.get("parameters")))
         if params_payload:
             pg = _maybe_prompt_from_payload(params_payload)
             if pg:
@@ -697,6 +752,14 @@ def load_raw_workflow_from_png(path: str | Path) -> Optional[Dict[str, Any]]:
     img = Image.open(p)
     info = getattr(img, "info", {}) or {}
 
+    def _as_text(v: Any) -> Any:
+        if isinstance(v, (bytes, bytearray)):
+            try:
+                return v.decode("utf-8", errors="replace")
+            except Exception:
+                return ""
+        return v
+
     def _maybe_workflow(val: Any) -> Optional[Dict[str, Any]]:
         wf = _ensure_dict_from_json(val)
         if isinstance(wf, dict) and wf.get("nodes"):
@@ -719,11 +782,11 @@ def load_raw_workflow_from_png(path: str | Path) -> Optional[Dict[str, Any]]:
         return None
 
     # Top-level
-    wf = _maybe_workflow(info.get("workflow"))
+    wf = _maybe_workflow(_as_text(info.get("workflow")))
     if wf:
         return wf
 
-    extra = info.get("extra_pnginfo")
+    extra = _as_text(info.get("extra_pnginfo"))
     if isinstance(extra, str):
         try:
             extra = json.loads(extra)
@@ -731,24 +794,24 @@ def load_raw_workflow_from_png(path: str | Path) -> Optional[Dict[str, Any]]:
             extra = None
 
     if isinstance(extra, dict):
-        wf = _maybe_workflow(extra.get("workflow"))
+        wf = _maybe_workflow(_as_text(extra.get("workflow")))
         if wf:
             return wf
-        wf = _extract_from_parameters(extra.get("parameters"))
+        wf = _extract_from_parameters(_as_text(extra.get("parameters")))
         if wf:
             return wf
     if isinstance(extra, list):
         for item in extra:
             if not isinstance(item, dict):
                 continue
-            wf = _maybe_workflow(item.get("workflow"))
+            wf = _maybe_workflow(_as_text(item.get("workflow")))
             if wf:
                 return wf
-            wf = _extract_from_parameters(item.get("parameters"))
+            wf = _extract_from_parameters(_as_text(item.get("parameters")))
             if wf:
                 return wf
 
-    wf = _extract_from_parameters(info.get("parameters"))
+    wf = _extract_from_parameters(_as_text(info.get("parameters")))
     if wf:
         return wf
     wf_alt = _scan_png_info_for_generation(info)[1]
@@ -1122,6 +1185,11 @@ def extract_generation_params_from_png(path: str | Path) -> Dict[str, Any]:
                         break
                 except Exception:
                     continue
+            if isinstance(params_val, (bytes, bytearray)):
+                try:
+                    params_val = params_val.decode("utf-8", errors="replace")
+                except Exception:
+                    params_val = None
             if isinstance(params_val, str):
                 parsed = parse_a1111_parameters(params_val)
                 if parsed:

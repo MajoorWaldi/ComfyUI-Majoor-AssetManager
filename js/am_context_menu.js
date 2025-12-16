@@ -94,11 +94,11 @@ export function mjrCreateContextMenu(file, deps) {
   // --- ACTIONS ---
   const actions = [
     {
-      label: "Open in Explorer",
+      label: "Open Folder",
       action: async () => {
         closeContextMenu();
         try {
-          const res = await api.fetchApi("/mjr/filemanager/open_explorer", {
+          const res = await api.fetchApi("/mjr/filemanager/open_folder", {
             method: "POST",
             body: JSON.stringify({
               filename: file.filename || file.name,
@@ -108,10 +108,10 @@ export function mjrCreateContextMenu(file, deps) {
           const data = await res.json().catch(() => ({}));
           if (!res.ok || data.ok === false) throw new Error(data.error || "Request failed");
           
-          if (data.warning) mjrShowToast("warn", data.warning, "Explorer");
-          else mjrShowToast("success", "Opened in Explorer", "Explorer");
+          if (data.warning) mjrShowToast("warn", data.warning, "Folder");
+          else mjrShowToast("success", "Opened folder", "Folder");
         } catch (err) {
-          mjrShowToast("error", err?.message || "Failed to open", "Explorer");
+          mjrShowToast("error", err?.message || "Failed to open folder", "Folder");
         }
       },
     },

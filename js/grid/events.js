@@ -20,13 +20,7 @@ const mjrDbg = (...args) => {
 
 export const mjrIsOurDrag = (ev) => {
   const types = Array.from(ev?.dataTransfer?.types || []);
-  if (!types.length) return false;
-  if (!types.includes("application/x-mjr-origin") && !types.includes("application/x-mjr-sibling-file")) return false;
-  try {
-    const origin = ev.dataTransfer.getData("application/x-mjr-origin");
-    if (origin && origin !== "majoor-assetmanager") return false;
-  } catch (_) {}
-  return true;
+  return types.includes("application/x-mjr-sibling-file");
 };
 let mjrGraphCanvas = null;
 let mjrCanvasObserver = null;
@@ -239,153 +233,55 @@ export async function refreshAssetsForPrompt(promptId) {
 export function ensureWorkflowDropHandler() {
   if (mjrWorkflowDropBound) return () => {};
 
-  const loadWorkflowFromSibling = async (info) => {
-    const params = new URLSearchParams();
-    params.set("filename", info.filename);
-    if (info.subfolder) params.set("subfolder", info.subfolder);
-    const res = await api.fetchApi(`/mjr/filemanager/metadata?${params.toString()}`);
-    if (!res.ok) return false;
-    const data = await res.json();
-    const gen = (data && data.ok && data.generation) ? data.generation : null;
-    const wf =
-      (gen && gen.workflow) ||
-      (gen && gen.raw_workflow) ||
-      (gen && gen.workflow_reconstructed);
-    if (wf) {
-      app.loadGraphData(wf);
-      mjrShowToast("info", "Workflow loaded from metadata.", "Workflow");
-      return true;
-    }
-    if (gen && gen.prompt_graph) {
-      // We have a prompt graph but no workflow; notify user
-      mjrShowToast("warn", "Prompt data found, but no workflow graph available for this file.", "Workflow");
-      return false;
-    }
-    mjrShowToast("warn", "No workflow found for this sibling.", "Workflow");
-    return false;
-  };
-
-  const onCanvasDrop = async (ev) => {
-    // 1. Only handle our drags
-    if (!mjrIsOurDrag(ev)) return;
-
-    // 2. If dropping on a node input/widget, let native handling occur
-    if (ev.target && typeof ev.target.closest === "function") {
-      if (ev.target.closest("input, textarea, select, .comfy-node-input")) {
-        return;
-      }
-    }
-
-    // 3. Identify the graph canvas regardless of child target
-    let graphCanvas =
-      (ev.currentTarget instanceof HTMLCanvasElement && ev.currentTarget.classList.contains("graphcanvas"))
-        ? ev.currentTarget
-        : (ev.target && typeof ev.target.closest === "function" ? ev.target.closest("canvas.graphcanvas") : null);
-    if (!graphCanvas) {
-      graphCanvas = document.querySelector("canvas.graphcanvas");
-    }
-    if (graphCanvas) {
+  const onDragOver = (ev) => {
+    const types = Array.from(ev.dataTransfer?.types || []);
+    if (types.includes("application/x-mjr-sibling-file")) {
       ev.preventDefault();
-      ev.stopPropagation();
-      if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
-      ev.__mjrHandled = true;
-      let intent = "auto";
-      try {
-        intent = ev.dataTransfer?.getData("application/x-mjr-intent") || "auto";
-      } catch (_) {}
-      mjrDbg("workflow drop on canvas", { intent });
-
-      let info = null;
-      try {
-        const raw = ev.dataTransfer.getData("application/x-mjr-sibling-file");
-        if (raw) info = JSON.parse(raw);
-      } catch (_) {
-        info = null;
-      }
-      if (!info || !info.filename) return;
-
-      try {
-        await loadWorkflowFromSibling(info);
-      } catch (err) {
-        console.warn("[Majoor.AssetsManager] sibling workflow drop failed", err);
-        mjrShowToast("error", "Failed to load sibling workflow", "Workflow");
-      }
-      return;
-    }
-    // Otherwise let native handlers manage the drop.
-  };
-
-  const getGraphCanvas = () => document.querySelector("canvas.graphcanvas");
-  const bindCanvas = () => {
-    const canvas = getGraphCanvas();
-    if (canvas === mjrGraphCanvas) return;
-    if (mjrGraphCanvas) {
-      mjrGraphCanvas.removeEventListener("drop", onCanvasDrop, true);
-      mjrGraphCanvas = null;
-    }
-    if (canvas) {
-      // capture=true to run before ComfyUI native drop and stop alert/noise when we handle our drags
-      canvas.addEventListener("drop", onCanvasDrop, true);
-      mjrGraphCanvas = canvas;
+      ev.dataTransfer.dropEffect = "copy";
     }
   };
 
-  // Global capture fallback to catch drops that miss the canvas element
-  const onWindowDragOver = (ev) => {
+  const onDrop = async (ev) => {
     const types = Array.from(ev.dataTransfer?.types || []);
     if (!types.includes("application/x-mjr-sibling-file")) return;
-    ev.preventDefault();
-    ev.dataTransfer.dropEffect = "copy";
-  };
 
-  const onWindowDrop = (ev) => {
-    if (!mjrIsOurDrag(ev)) return;
-    if (ev.__mjrHandled) return;
-    // Avoid inputs/widgets
-    if (ev.target && typeof ev.target.closest === "function") {
-      if (ev.target.closest("input, textarea, select, .comfy-node-input")) {
-        return;
+    ev.preventDefault();
+
+    let info = null;
+    try {
+      const raw = ev.dataTransfer.getData("application/x-mjr-sibling-file");
+      if (raw) info = JSON.parse(raw);
+    } catch (_) {
+      info = null;
+    }
+    if (!info || !info.filename) return;
+
+    try {
+      const params = new URLSearchParams();
+      params.set("filename", info.filename);
+      if (info.subfolder) params.set("subfolder", info.subfolder);
+      const res = await api.fetchApi(`/mjr/filemanager/metadata?${params.toString()}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data && data.ok && data.generation && data.generation.workflow) {
+        app.loadGraphData(data.generation.workflow);
+        mjrShowToast("info", "Workflow loaded from sibling PNG.", "Workflow");
+      } else {
+        mjrShowToast("warn", "No workflow found for this sibling.", "Workflow");
       }
+    } catch (err) {
+      console.warn("[Majoor.AssetsManager] sibling workflow drop failed", err);
+      mjrShowToast("error", "Failed to load sibling workflow", "Workflow");
     }
-    let canvas = ev.target && typeof ev.target.closest === "function" ? ev.target.closest("canvas.graphcanvas") : null;
-    if (!canvas) {
-      canvas = document.querySelector("canvas.graphcanvas");
-    }
-    if (!canvas) return;
-    ev.preventDefault();
-    ev.stopPropagation();
-    if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
-    ev.__mjrHandled = true;
-    onCanvasDrop(ev);
   };
 
-  bindCanvas();
-  if (!mjrCanvasObserver) {
-    mjrCanvasObserver = new MutationObserver(() => bindCanvas());
-    mjrCanvasObserver.observe(document.body || document.documentElement, {
-      childList: true,
-      subtree: true,
-    });
-  }
-
-  window.addEventListener("dragover", onWindowDragOver, true);
-  window.addEventListener("drop", onWindowDrop, true);
-
+  window.addEventListener("dragover", onDragOver, true);
+  window.addEventListener("drop", onDrop, true);
   mjrWorkflowDropBound = true;
 
   return () => {
-    if (mjrGraphCanvas) {
-      mjrGraphCanvas.removeEventListener("drop", onCanvasDrop, true);
-      mjrGraphCanvas = null;
-    }
-    if (mjrCanvasObserver) {
-      try {
-        mjrCanvasObserver.disconnect();
-      } catch (_) {}
-      mjrCanvasObserver = null;
-    }
-    window.removeEventListener("dragover", onWindowDragOver, true);
-    window.removeEventListener("drop", onWindowDrop, true);
+    window.removeEventListener("dragover", onDragOver, true);
+    window.removeEventListener("drop", onDrop, true);
     mjrWorkflowDropBound = false;
   };
 }

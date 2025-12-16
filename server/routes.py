@@ -225,6 +225,69 @@ def _open_in_explorer(path: Path) -> bool:
         return False
 
 
+def _open_in_file_manager(path: Path) -> tuple[bool, Optional[str]]:
+    """
+    Open the OS file manager for a given path.
+    - Windows: Explorer with selection when possible.
+    - macOS: Finder with selection via `open -R`.
+    - Linux: open the containing folder via xdg-open/gio/kde-open.
+    Returns: (ok, warning_message)
+    """
+    try:
+        system = platform.system()
+        is_file = path.is_file()
+        folder = path.parent if is_file else path
+
+        def _run(cmd: List[str]) -> int:
+            return subprocess.run(
+                cmd,
+                shell=False,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            ).returncode
+
+        if system == "Windows":
+            if is_file and _open_in_explorer(path):
+                return True, None
+            rc = _run(["explorer.exe", str(folder)])
+            if rc in (0, 1):
+                return True, ("Opened folder (selection may not be highlighted)" if is_file else None)
+            return False, f"explorer.exe failed (code {rc})"
+
+        if system == "Darwin":
+            if is_file:
+                rc = _run(["open", "-R", str(path)])
+                if rc == 0:
+                    return True, None
+                rc2 = _run(["open", str(folder)])
+                if rc2 == 0:
+                    return True, "Opened folder (selection may not be highlighted)"
+                return False, f"open failed (code {rc2})"
+            rc = _run(["open", str(folder)])
+            return (rc == 0), (None if rc == 0 else f"open failed (code {rc})")
+
+        # Linux / other
+        opener = None
+        for candidate in ("xdg-open", "gio", "kde-open5", "kde-open", "gnome-open", "exo-open"):
+            if shutil.which(candidate):
+                opener = candidate
+                break
+        if not opener:
+            return False, "No supported opener found (xdg-open/gio/kde-open/gnome-open)"
+
+        if opener == "gio":
+            rc = _run([opener, "open", str(folder)])
+        else:
+            rc = _run([opener, str(folder)])
+        if rc == 0:
+            return True, ("Opened folder (selection may not be supported on this OS)" if is_file else None)
+        return False, f"{opener} failed (code {rc})"
+    except Exception as exc:
+        return False, str(exc)
+
+
 def _format_size(num_bytes: int) -> str:
     if not isinstance(num_bytes, (int, float)) or num_bytes < 0:
         return ""
@@ -388,6 +451,14 @@ async def list_files(request: web.Request) -> web.Response:
                     rating, tags = _rating_tags_with_fallback(meta_target, kind)
                     f["rating"] = rating
                     f["tags"] = tags
+                    # Keep workflow dot accurate even when we mark __metaLoaded.
+                    has_wf = False
+                    if kind in ("image", "video"):
+                        try:
+                            has_wf = has_generation_workflow(meta_target)
+                        except Exception:
+                            has_wf = False
+                    f["has_workflow"] = has_wf
                     f["__metaLoaded"] = True
                 except Exception:
                     continue
@@ -530,6 +601,11 @@ async def delete_files(request: web.Request) -> web.Response:
 
 @PromptServer.instance.routes.post("/mjr/filemanager/open_explorer")
 async def open_explorer(request: web.Request) -> web.Response:
+    return await open_folder(request)
+
+
+@PromptServer.instance.routes.post("/mjr/filemanager/open_folder")
+async def open_folder(request: web.Request) -> web.Response:
     root = _get_output_root()
     try:
         payload = await request.json()
@@ -549,26 +625,13 @@ async def open_explorer(request: web.Request) -> web.Response:
     if not target.exists():
         return web.json_response({"ok": False, "error": "File not found"}, status=404)
 
-    if _open_in_explorer(target):
-        return web.json_response({"ok": True})
-
-    try:
-        subprocess.run(
-            ["explorer.exe", str(target.parent)],
-            shell=False,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return web.json_response(
-            {"ok": True, "warning": "Opened folder (selection may not be highlighted)"},
-            status=200,
-        )
-    except Exception as exc:
-        return web.json_response(
-            {"ok": False, "error": f"Failed to open explorer: {exc}"},
-            status=500,
-        )
+    ok, warning = _open_in_file_manager(target)
+    if ok:
+        resp = {"ok": True}
+        if warning:
+            resp["warning"] = warning
+        return web.json_response(resp, status=200)
+    return web.json_response({"ok": False, "error": warning or "Failed to open folder"}, status=500)
 
 
 # ---------------------------------------------------------------------------
