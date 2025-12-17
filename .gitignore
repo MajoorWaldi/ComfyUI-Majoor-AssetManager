@@ -4,3 +4,7 @@ server/__pycache__/generation_metadata.cpython-313.pyc
 server/__pycache__/routes.cpython-313.pyc
 server/__pycache__/utils.cpython-313.pyc
 __pycache__/__init__.cpython-313.pyc
+server/metadata/__pycache__/core.cpython-312.pyc
+server/__pycache__/utils.cpython-312.pyc
+server/__pycache__/routes.cpython-312.pyc
+server/__pycache__/hooks.cpython-312.pyc

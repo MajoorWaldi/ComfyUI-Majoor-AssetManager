@@ -101,6 +101,35 @@ def safe_import_win32com():
     return _WIN32COM
 
 
+def _set_windows_property_store(file_path: str, rating: int, tags, *, clear_tags: bool = False) -> bool:
+    """
+    Write rating/tags using the Windows Property System (more reliable than Shell column indices).
+    Returns True on success.
+    """
+    if platform.system().lower() != "windows":
+        return False
+    try:
+        import pythoncom  # type: ignore
+        from win32com.propsys import propsys, pscon  # type: ignore
+
+        pythoncom.CoInitialize()
+        store = propsys.SHGetPropertyStoreFromParsingName(file_path, None, pscon.GPS_READWRITE)
+        # System.Rating expects 0..99
+        store.SetValue(pscon.PKEY_Rating, rating_to_windows_percent(rating))
+
+        if tags is not None:
+            tags_list = _normalize_tags(tags)
+            if tags_list:
+                store.SetValue(pscon.PKEY_Keywords, tuple(tags_list))
+            elif clear_tags:
+                store.SetValue(pscon.PKEY_Keywords, tuple())
+
+        store.Commit()
+        return True
+    except Exception:
+        return False
+
+
 def _get_exiftool_path() -> Optional[str]:
     global _EXIFTOOL_PATH, _EXIFTOOL_CHECKED
     if _EXIFTOOL_CHECKED:
@@ -480,12 +509,33 @@ def set_exif_metadata(file_path: str, rating: int, tags: list) -> bool:
 
 def set_windows_metadata(file_path: str, rating: int, tags: list) -> bool:
     """Write metadata via the Windows Shell API."""
+    global _CACHE_EPOCH
     try:
         win32com = safe_import_win32com()
         if not win32com:
             return False
 
         original_mtime = _get_mtime_safe(file_path)
+
+        # Prefer the Windows Property System when possible (works better for media files like MP4)
+        tags_list = _normalize_tags(tags)
+        clear_tags = tags == []
+        if _set_windows_property_store(file_path, _coerce_rating_to_stars(rating), tags_list, clear_tags=clear_tags):
+            if original_mtime is not None:
+                try:
+                    os.utime(file_path, (original_mtime, original_mtime))
+                except Exception:
+                    pass
+
+            _CACHE_EPOCH += 1
+            epoch = _CACHE_EPOCH
+            _META_CACHE[file_path] = (
+                original_mtime if original_mtime is not None else _get_mtime_safe(file_path),
+                epoch,
+                {"rating": _coerce_rating_to_stars(rating), "tags": tags_list},
+            )
+            return True
+
         shell = win32com.Dispatch("Shell.Application")
         folder = shell.Namespace(os.path.dirname(file_path))
         file = folder.ParseName(os.path.basename(file_path))
@@ -499,7 +549,6 @@ def set_windows_metadata(file_path: str, rating: int, tags: list) -> bool:
             folder.GetDetailsOf(file, rating_idx)  # force index load
             folder.SetDetailsOf(file, rating_idx, str(rating_val))
 
-        tags_list = _normalize_tags(tags)
         if tags_list:
             folder.GetDetailsOf(file, tags_idx)
             folder.SetDetailsOf(file, tags_idx, "; ".join(tags_list))
@@ -514,7 +563,6 @@ def set_windows_metadata(file_path: str, rating: int, tags: list) -> bool:
             except Exception:
                 pass
 
-        global _CACHE_EPOCH
         _CACHE_EPOCH += 1
         epoch = _CACHE_EPOCH
         _META_CACHE[file_path] = (
@@ -615,6 +663,15 @@ def update_metadata_with_windows(file_path: str, updates: dict) -> dict:
         save_metadata(file_path, {"rating": rating if has_rating else current_rating, "tags": target_tags})
         sidecar_saved = True
 
+    # Video robustness: if Windows metadata fields are not supported and ExifTool is unavailable,
+    # still persist rating/tags for the manager via a sidecar JSON (even on Windows).
+    if (not ok_win and not ok_exif) and str(file_path).lower().endswith(VIDEO_EXTS):
+        try:
+            save_metadata(file_path, {"rating": rating if has_rating else current_rating, "tags": target_tags}, force=True)
+            sidecar_saved = True
+        except Exception:
+            pass
+
     effective_rating = (rating if has_rating else current_rating) if (ok_win or ok_exif or sidecar_saved) else current_rating
     effective_tags = target_tags
 
@@ -704,9 +761,13 @@ def is_image(fname: str):
     return f.endswith(IMAGE_EXTS)
 
 def metadata_path(image_path: str):
+    candidate = image_path + METADATA_EXT
+    # Always allow reading an existing sidecar (even when disabled by default on Windows)
+    if os.path.exists(candidate):
+        return candidate
     if not _sidecar_allowed_for(image_path):
         return None
-    return image_path + METADATA_EXT
+    return candidate
 
 def load_metadata(image_path):
     meta_file = metadata_path(image_path)
@@ -720,8 +781,8 @@ def load_metadata(image_path):
     except Exception:
         return {}
 
-def save_metadata(image_path, meta: dict):
-    meta_file = metadata_path(image_path)
+def save_metadata(image_path, meta: dict, force: bool = False):
+    meta_file = image_path + METADATA_EXT if force else metadata_path(image_path)
     if not meta_file:
         return
     with open(meta_file, "w", encoding="utf-8") as f:
