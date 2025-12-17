@@ -52,6 +52,13 @@ export function handleDragStart(file, ev) {
   ev.dataTransfer.effectAllowed = "copy";
   ev.dataTransfer.setData("text/uri-list", url);
   ev.dataTransfer.setData("DownloadURL", `${mime}:${filename}:${url}`);
+
+  if (kind === "video") {
+    ev.dataTransfer.setData(
+      "application/x-mjr-asset",
+      JSON.stringify({ filename, subfolder: file.subfolder || "", kind: "video" })
+    );
+  }
 }
 
 export function updateWorkflowDot(card, workflowState) {

@@ -1,4 +1,5 @@
 import os
+import sys
 import subprocess
 import asyncio
 import time
@@ -64,6 +65,49 @@ except Exception:
     _META_PREFETCH_COUNT = 80
 
 _CACHE_LOCK = threading.Lock()
+
+_ASYNCIO_SILENCER_INSTALLED = False
+
+
+def _install_windows_asyncio_connection_reset_silencer() -> None:
+    """
+    On Windows, aborted HTTP requests can produce noisy asyncio logs like:
+    "Exception in callback _ProactorBasePipeTransport._call_connection_lost()"
+    with ConnectionResetError([WinError 10054]).
+
+    This does not affect correctness, but it can confuse users and pollute logs.
+    """
+    global _ASYNCIO_SILENCER_INSTALLED
+    if _ASYNCIO_SILENCER_INSTALLED:
+        return
+    if sys.platform != "win32":
+        _ASYNCIO_SILENCER_INSTALLED = True
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    previous = loop.get_exception_handler()
+
+    def _handler(loop: asyncio.AbstractEventLoop, context: Dict[str, Any]) -> None:
+        exc = context.get("exception")
+        msg = context.get("message") or ""
+        if (
+            isinstance(exc, ConnectionResetError)
+            and getattr(exc, "winerror", None) == 10054
+            and "_call_connection_lost" in str(msg)
+        ):
+            return
+
+        if previous:
+            previous(loop, context)
+        else:
+            loop.default_exception_handler(context)
+
+    loop.set_exception_handler(_handler)
+    _ASYNCIO_SILENCER_INSTALLED = True
 
 
 def _folder_changed(root_path: Path) -> bool:
@@ -422,6 +466,7 @@ async def _scan_outputs_async(force: bool = False) -> List[Dict[str, Any]]:
 
 @PromptServer.instance.routes.get("/mjr/filemanager/files")
 async def list_files(request: web.Request) -> web.Response:
+    _install_windows_asyncio_connection_reset_silencer()
     force_param = (request.query.get("force") or "").lower()
     force = force_param in ("1", "true", "yes", "force")
 
@@ -471,9 +516,12 @@ async def list_files(request: web.Request) -> web.Response:
 
 @PromptServer.instance.routes.post("/mjr/filemanager/metadata/batch")
 async def batch_metadata(request: web.Request) -> web.Response:
+    _install_windows_asyncio_connection_reset_silencer()
     root = _get_output_root()
     try:
         payload = await request.json()
+    except ConnectionResetError:
+        return web.Response(status=499)
     except Exception:
         return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
 
@@ -541,7 +589,10 @@ async def batch_metadata(request: web.Request) -> web.Response:
             except Exception:
                 continue
 
-    return web.json_response({"ok": True, "metadatas": results, "errors": errors})
+    try:
+        return web.json_response({"ok": True, "metadatas": results, "errors": errors})
+    except ConnectionResetError:
+        return web.Response(status=499)
 
 
 @PromptServer.instance.routes.post("/mjr/filemanager/delete")
@@ -640,6 +691,7 @@ async def open_folder(request: web.Request) -> web.Response:
 
 @PromptServer.instance.routes.get("/mjr/filemanager/metadata")
 async def get_metadata(request: web.Request) -> web.Response:
+    _install_windows_asyncio_connection_reset_silencer()
     root = _get_output_root()
     filename = request.query.get("filename")
     subfolder = request.query.get("subfolder", "")
@@ -661,68 +713,73 @@ async def get_metadata(request: web.Request) -> web.Response:
             {"ok": False, "error": "File not found"}, status=404
         )
 
-    def _extract(path: Path) -> Dict[str, Any]:
-        try:
-            return extract_generation_params_from_png(path) or {}
-        except Exception as e:
-            print(f"[Majoor.AssetsManager] metadata parsing error for {path.name}: {e}")
-            return {}
+    def _extract_generation(path: Path) -> Dict[str, Any]:
+        def _extract_one(p: Path) -> Dict[str, Any]:
+            try:
+                return extract_generation_params_from_png(p) or {}
+            except Exception as e:
+                print(f"[Majoor.AssetsManager] metadata parsing error for {p.name}: {e}")
+                return {}
 
-    ext_lower = target.suffix.lower()
-    params: Dict[str, Any] = _extract(target)
-
-    def _has_wf(p: Dict[str, Any]) -> bool:
-        return bool(
-            p.get("has_workflow")
-            or p.get("workflow")
-            or p.get("prompt")
-            or p.get("positive_prompt")
-            or p.get("negative_prompt")
-            or p.get("sampler_name")
-            or p.get("model")
-            or p.get("loras")
-        )
-
-    if ext_lower in {".mp4", ".mov", ".m4v", ".webm", ".mkv"} and not _has_wf(params):
-        stem = target.stem
-        candidates = []
-        try:
-            for entry in target.parent.iterdir():
-                if not entry.is_file():
-                    continue
-                if entry.suffix.lower() != ".png":
-                    continue
-                if entry.stem == stem or entry.stem.startswith(f"{stem}_") or entry.stem.startswith(f"{stem}-"):
-                    candidates.append(entry)
-        except Exception:
-            candidates = []
-
-        if candidates:
-            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            for png in candidates:
-                sib_params = _extract(png)
-                if _has_wf(sib_params):
-                    params = sib_params
-                    params["generation_source"] = "sibling_png"
-                    break
-
-    if isinstance(params, dict):
-        if "has_workflow" not in params:
-            params["has_workflow"] = bool(
-                params.get("has_workflow")
-                or params.get("workflow")
-                or params.get("prompt")
-                or params.get("positive_prompt")
-                or params.get("negative_prompt")
-                or params.get("sampler_name")
-                or params.get("model")
-                or params.get("loras")
+        def _has_wf(p: Dict[str, Any]) -> bool:
+            return bool(
+                p.get("has_workflow")
+                or p.get("workflow")
+                or p.get("prompt")
+                or p.get("positive_prompt")
+                or p.get("negative_prompt")
+                or p.get("sampler_name")
+                or p.get("model")
+                or p.get("loras")
             )
+
+        ext_lower = path.suffix.lower()
+        params: Dict[str, Any] = _extract_one(path)
+
+        if ext_lower in {".mp4", ".mov", ".m4v", ".webm", ".mkv"} and not _has_wf(params):
+            stem = path.stem
+            candidates = []
+            try:
+                for entry in path.parent.iterdir():
+                    if not entry.is_file():
+                        continue
+                    if entry.suffix.lower() != ".png":
+                        continue
+                    if (
+                        entry.stem == stem
+                        or entry.stem.startswith(f"{stem}_")
+                        or entry.stem.startswith(f"{stem}-")
+                    ):
+                        candidates.append(entry)
+            except Exception:
+                candidates = []
+
+            if candidates:
+                candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                for png in candidates:
+                    sib_params = _extract_one(png)
+                    if _has_wf(sib_params):
+                        params = sib_params
+                        params["generation_source"] = "sibling_png"
+                        break
+
+        if isinstance(params, dict) and "has_workflow" not in params:
+            params["has_workflow"] = _has_wf(params)
+
+        return params
+
+    loop = asyncio.get_running_loop()
+    params = await loop.run_in_executor(None, _extract_generation, target)
 
     kind = classify_ext(filename.lower())
     rating, tags = _rating_tags_with_fallback(target, kind)
 
-    return web.json_response({"ok": True, "generation": params, "rating": rating, "tags": tags})
+    try:
+        return web.json_response(
+            {"ok": True, "generation": params, "rating": rating, "tags": tags}
+        )
+    except ConnectionResetError:
+        return web.Response(status=499)
 
 
 @PromptServer.instance.routes.get("/mjr/filemanager/capabilities")

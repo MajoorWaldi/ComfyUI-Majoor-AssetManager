@@ -15,6 +15,7 @@ import { createMetadataSidebar } from "./ui_sidebar.js";
 import { createGridView } from "./am_gridview.js";
 import {
   ensureGlobalAutoRefresh,
+  ensureVideoNodeDropBridge,
   ensureNewFilesListener,
   ensureQueueListener,
   mjrStartAutoRefreshTimer,
@@ -181,6 +182,7 @@ function renderAssetsManager(root) {
   const refreshCollections = () => populateCollectionsOptions(state, collectionFilterSelect);
 
   // Media drops on the ComfyUI canvas are handled natively by ComfyUI (this plugin does not intercept drop events).
+  cleanups.push(ensureVideoNodeDropBridge());
   cleanups.push(ensureQueueListener(refreshAllInstances));
   cleanups.push(ensureNewFilesListener());
   cleanups.push(ensureGlobalAutoRefresh(refreshAllInstances));

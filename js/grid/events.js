@@ -1,3 +1,4 @@
+import { app } from "../../../../scripts/app.js";
 import { api } from "../../../../scripts/api.js";
 import { buildViewUrl, detectKindFromExt, getExt, mjrSettings, mjrShowToast } from "../ui_settings.js";
 import { mjrGlobalState } from "../mjr_global.js";
@@ -5,12 +6,18 @@ import { sortFilesDeterministically } from "../am_data.js";
 
 let mjrGlobalRefreshTimer = null;
 let mjrFocusListenerAttached = false;
+let mjrVideoNodeDropBridgeBound = false;
 let mjrQueueListenerBound = false;
 let mjrNewFilesListenerBound = false;
 let mjrCapabilitiesCache = null;
+try {
+  if (typeof window !== "undefined" && window.MJR_DND_DEBUG === undefined) {
+    window.MJR_DND_DEBUG = true;
+  }
+} catch (_) {}
 const mjrDbg = (...args) => {
   try {
-    if (mjrSettings && mjrSettings.debugDnD) {
+    if ((mjrSettings && mjrSettings.debugDnD) || (typeof window !== "undefined" && window.MJR_DND_DEBUG)) {
       console.debug("[Majoor.DnD]", ...args);
     }
   } catch (_) {}
@@ -96,6 +103,273 @@ export function mjrDispatchSyntheticDrop(target, file) {
   } catch (err) {
     console.warn("[Majoor.AssetsManager] synthetic drop failed", err);
   }
+}
+
+let mjrHighlightedNode = null;
+let mjrHighlightedNodePrev = null;
+
+function getNodeUnderClientXY(clientX, clientY) {
+  const canvasEl = app?.canvas?.canvas || document.querySelector("canvas");
+  const graph = app?.canvas?.graph;
+  const ds = app?.canvas?.ds;
+  if (!canvasEl || !graph || !ds) return null;
+
+  const rect = canvasEl.getBoundingClientRect();
+  if (
+    clientX < rect.left ||
+    clientX > rect.right ||
+    clientY < rect.top ||
+    clientY > rect.bottom
+  ) {
+    return null;
+  }
+
+  const scale = Number(ds.scale) || 1;
+  const off = ds.offset || [0, 0];
+  const offX = Array.isArray(off) ? Number(off[0]) || 0 : Number(off?.x) || 0;
+  const offY = Array.isArray(off) ? Number(off[1]) || 0 : Number(off?.y) || 0;
+  const x = (clientX - rect.left) / scale - offX;
+  const y = (clientY - rect.top) / scale - offY;
+
+  if (typeof graph.getNodeOnPos === "function") return graph.getNodeOnPos(x, y);
+
+  const nodes = graph._nodes || [];
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const n = nodes[i];
+    if (!n?.pos || !n?.size) continue;
+    if (
+      x >= n.pos[0] &&
+      y >= n.pos[1] &&
+      x <= n.pos[0] + n.size[0] &&
+      y <= n.pos[1] + n.size[1]
+    ) {
+      return n;
+    }
+  }
+  return null;
+}
+
+function isVhsVideoNode(node) {
+  if (!node) return false;
+  const title = String(node.title || "");
+  const type = String(node.type || "");
+  if (/video/i.test(title)) return true;
+  if (type.includes("VHS_LoadVideo")) return true;
+
+  const widgets = node.widgets;
+  if (Array.isArray(widgets)) {
+    return widgets.some((w) => String(w?.name || "").toLowerCase() === "video");
+  }
+  return false;
+}
+
+function markCanvasDirty() {
+  try {
+    app?.graph?.setDirtyCanvas?.(true, true);
+  } catch (_) {}
+  try {
+    app?.canvas?.setDirty?.(true, true);
+  } catch (_) {}
+}
+
+function applyHighlight(node) {
+  if (!node) return;
+  if (mjrHighlightedNode === node) return;
+
+  clearHighlight();
+  mjrHighlightedNode = node;
+  mjrHighlightedNodePrev = { color: node.color, bgcolor: node.bgcolor };
+  node.bgcolor = "#3355ff";
+  node.color = "#a9c4ff";
+  markCanvasDirty();
+}
+
+function clearHighlight() {
+  if (!mjrHighlightedNode) return;
+  try {
+    if (mjrHighlightedNodePrev) {
+      mjrHighlightedNode.color = mjrHighlightedNodePrev.color;
+      mjrHighlightedNode.bgcolor = mjrHighlightedNodePrev.bgcolor;
+    }
+  } catch (_) {}
+  mjrHighlightedNode = null;
+  mjrHighlightedNodePrev = null;
+  markCanvasDirty();
+}
+
+function ensureComboHasValue(widget, value) {
+  if (!widget || widget.type !== "combo" || !widget.options) return;
+
+  let vals = null;
+  let target = null;
+  if (Array.isArray(widget.options.values)) {
+    vals = widget.options.values;
+    target = widget.options;
+  } else if (widget.options.values && Array.isArray(widget.options.values.values)) {
+    vals = widget.options.values.values;
+    target = widget.options.values;
+  }
+  if (!Array.isArray(vals) || !target) return;
+
+  const has = vals.some((v) => {
+    if (typeof v === "string") return v === value;
+    return (v?.content ?? v?.value ?? v?.text) === value;
+  });
+  if (has) return;
+
+  if (vals.length === 0 || typeof vals[0] === "string") vals.unshift(value);
+  else vals.unshift({ content: value, text: value, value });
+  target.values = vals;
+}
+
+function pickVideoWidget(node) {
+  const widgets = node?.widgets;
+  if (!Array.isArray(widgets) || !widgets.length) return null;
+  const exact = widgets.find((w) => String(w?.name || "").toLowerCase() === "video");
+  if (exact) return exact;
+  return (
+    widgets.find((w) => /video|file|path/i.test(String(w?.name || w?.label || ""))) || null
+  );
+}
+
+function comboHasValue(widget, value) {
+  if (!widget || widget.type !== "combo" || !widget.options) return false;
+  const vals =
+    (Array.isArray(widget.options.values) && widget.options.values) ||
+    (widget.options.values && Array.isArray(widget.options.values.values) && widget.options.values.values) ||
+    null;
+  if (!Array.isArray(vals)) return false;
+  return vals.some((v) => {
+    if (typeof v === "string") return v === value;
+    return (v?.content ?? v?.value ?? v?.text) === value;
+  });
+}
+
+export function ensureVideoNodeDropBridge() {
+  if (mjrVideoNodeDropBridgeBound) return () => {};
+
+  const onDragOver = (e) => {
+    const types = Array.from(e?.dataTransfer?.types || []);
+    if (!types.includes("application/x-mjr-asset")) return;
+
+    let payload = null;
+    try {
+      payload = JSON.parse(e.dataTransfer.getData("application/x-mjr-asset"));
+    } catch (_) {
+      payload = null;
+    }
+    if (!payload || payload.kind !== "video") return;
+
+    const node = getNodeUnderClientXY(e.clientX, e.clientY);
+    if (node && isVhsVideoNode(node)) {
+      e.preventDefault();
+      e.stopImmediatePropagation?.();
+      e.stopPropagation();
+      applyHighlight(node);
+      e.dataTransfer.dropEffect = "copy";
+      mjrDbg("DnD video dragover", { payload, nodeTitle: node?.title, nodeType: node?.type });
+      return;
+    }
+
+    clearHighlight();
+    // Pass-through: let ComfyUI handle canvas-friendly video drop (workflow embed).
+  };
+
+  const onDrop = async (e) => {
+    const types = Array.from(e?.dataTransfer?.types || []);
+    if (!types.includes("application/x-mjr-asset")) return;
+
+    let payload = null;
+    try {
+      payload = JSON.parse(e.dataTransfer.getData("application/x-mjr-asset"));
+    } catch (_) {
+      payload = null;
+    }
+    if (!payload || payload.kind !== "video") return;
+
+    const node = getNodeUnderClientXY(e.clientX, e.clientY);
+    if (!node || !isVhsVideoNode(node)) {
+      clearHighlight();
+      mjrDbg("DnD video drop pass-through", { payload, nodeTitle: node?.title, nodeType: node?.type });
+      return; // leave ComfyUI to load workflow from video metadata
+    }
+
+    e.preventDefault();
+    e.stopImmediatePropagation?.();
+    e.stopPropagation();
+    clearHighlight();
+
+    const filename = payload.filename;
+    const subfolder = payload.subfolder || "";
+    if (!filename) return;
+
+    let stageResp = null;
+    try {
+      const res = await api.fetchApi("/mjr/filemanager/stage_to_input", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename, subfolder, from_type: "output" }),
+      });
+      stageResp = res.ok ? await res.json().catch(() => null) : null;
+    } catch (_) {
+      stageResp = null;
+    }
+
+    const relativePath = stageResp?.relative_path;
+    const stagedName = stageResp?.filename || stageResp?.name || filename;
+    mjrDbg("DnD stage_to_input response", stageResp);
+
+    if (!relativePath && !stagedName) {
+      mjrShowToast("error", "Failed to stage video to input", "Drag & Drop");
+      return;
+    }
+
+    const w = pickVideoWidget(node);
+    if (!w) {
+      mjrShowToast("warn", "No compatible 'video' widget found", "Drag & Drop");
+      return;
+    }
+
+    const prefer = w.type === "combo" && comboHasValue(w, relativePath) ? relativePath : null;
+    const value =
+      prefer ||
+      (w.type === "combo" && comboHasValue(w, stagedName) ? stagedName : null) ||
+      relativePath ||
+      stagedName;
+
+    if (w.type === "combo") ensureComboHasValue(w, value);
+    w.value = value;
+    try {
+      w.callback?.(w.value);
+    } catch (_) {}
+
+    markCanvasDirty();
+
+    mjrDbg("DnD video injected", {
+      payload,
+      nodeTitle: node?.title,
+      nodeType: node?.type,
+      widget: { name: w?.name, type: w?.type },
+      value,
+    });
+  };
+
+  const onDragLeave = (_e) => {
+    clearHighlight();
+  };
+
+  window.addEventListener("dragover", onDragOver, true);
+  window.addEventListener("drop", onDrop, true);
+  window.addEventListener("dragleave", onDragLeave, true);
+  mjrVideoNodeDropBridgeBound = true;
+
+  return () => {
+    window.removeEventListener("dragover", onDragOver, true);
+    window.removeEventListener("drop", onDrop, true);
+    window.removeEventListener("dragleave", onDragLeave, true);
+    mjrVideoNodeDropBridgeBound = false;
+    clearHighlight();
+  };
 }
 
 export function mjrStartAutoRefreshTimer(refreshAllInstances) {

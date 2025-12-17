@@ -565,7 +565,7 @@ export function createMetadataSidebar(options) {
     params.set("filename", filename);
     if (file.subfolder) params.set("subfolder", file.subfolder);
 
-    showPanel(file, fallbackMeta, cachedEntry ? null : "Loading metadata…");
+    showPanel(file, fallbackMeta, cachedEntry ? null : "Loading metadata...");
 
     try {
       const res = await api.fetchApi(`/mjr/filemanager/metadata?${params.toString()}`);
@@ -594,6 +594,8 @@ export function createMetadataSidebar(options) {
         showPanel(file, null, data.error || "No metadata found for this file.");
       }
     } catch (err) {
+      if (seq !== metaRequestSeq) return; // ignore stale request failures
+      if (err?.name === "AbortError") return;
       console.error("[Majoor.AssetsManager] metadata error", err);
       showPanel(file, null, "Error while loading metadata (check console).");
     }
