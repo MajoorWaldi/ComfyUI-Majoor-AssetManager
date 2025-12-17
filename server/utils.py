@@ -553,17 +553,23 @@ def set_exif_metadata(file_path: str, rating: int, tags: list) -> bool:
 
         preserve_args = _collect_preserve_args_for_video() if is_video else []
 
-        cmd = [exe, "-overwrite_original", *preserve_args]
+        # Use a consistent list separator for tags when writing list-type fields.
+        cmd = [exe, "-overwrite_original", "-sep", "; ", *preserve_args]
         cmd += [
+            # Rating (write both generic + XMP for better compatibility)
+            f"-XMP:Rating={r}",
             f"-xmp:rating={r}",
             f"-rating={r}",
             f"-ratingpercent={win_r}",
             "-Subject=",
             "-Keywords=",
             "-XPKeywords=",
+            "-XMP:Subject=",
         ]
         if is_video:
             cmd.append(f"-Microsoft:SharedUserRating={win_r}")
+            # Windows Explorer commonly maps video tags to Microsoft:Category.
+            # Also write XMP:Subject using the same '; ' separator (matches ExifTool web tools).
             cat = tags_to_windows_category(tags)
             cmd.append(f"-Microsoft:Category={cat}")
 
@@ -572,11 +578,13 @@ def set_exif_metadata(file_path: str, rating: int, tags: list) -> bool:
         if is_video and not clean_tags:
             cmd.append(f"-Microsoft:Category=")
         if clean_tags:
+            joined = "; ".join(clean_tags)
+            cmd.append(f"-XMP:Subject={joined}")
+            # Keep a Windows-friendly field too (some apps read XPKeywords)
+            cmd.append(f"-xpkeywords={joined}")
+            # Optionally mirror to IPTC keywords (harmless for most containers)
             for t in clean_tags:
-                cmd.append(f"-xmp:subject+={t}")
                 cmd.append(f"-iptc:keywords+={t}")
-            # XPKeywords expects a semicolon-separated string on Windows
-            cmd.append(f"-xpkeywords={'; '.join(clean_tags)}")
 
         cmd.append(file_path)
         subprocess.run(cmd, check=True, capture_output=True, timeout=write_timeout_s)
@@ -749,8 +757,30 @@ def update_metadata_with_windows(file_path: str, updates: dict) -> dict:
     ok_win = False
     ok_exif = False
     if has_rating or has_tags:
-        ok_win = set_windows_metadata(file_path, rating if has_rating else current_rating, target_tags if has_tags else current_tags)
-        ok_exif = set_exif_metadata(file_path, rating if has_rating else current_rating, target_tags if has_tags else current_tags)
+        is_video = str(file_path).lower().endswith(VIDEO_EXTS)
+        # For videos, prefer ExifTool writes (more portable; also writes Microsoft:Category/SharedUserRating).
+        if is_video and _get_exiftool_path():
+            ok_exif = set_exif_metadata(
+                file_path,
+                rating if has_rating else current_rating,
+                target_tags if has_tags else current_tags,
+            )
+            ok_win = set_windows_metadata(
+                file_path,
+                rating if has_rating else current_rating,
+                target_tags if has_tags else current_tags,
+            )
+        else:
+            ok_win = set_windows_metadata(
+                file_path,
+                rating if has_rating else current_rating,
+                target_tags if has_tags else current_tags,
+            )
+            ok_exif = set_exif_metadata(
+                file_path,
+                rating if has_rating else current_rating,
+                target_tags if has_tags else current_tags,
+            )
 
     sidecar_saved = False
     if _sidecar_allowed_for(file_path):

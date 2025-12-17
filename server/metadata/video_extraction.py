@@ -9,7 +9,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from .workflow_normalize import _normalize_workflow_to_prompt_graph, _ensure_dict_from_json
+from .workflow_normalize import _normalize_workflow_to_prompt_graph, _ensure_dict_from_json, _json_loads_relaxed
 from .workflow_reconstruct import prompt_graph_to_workflow
 from ..logger import get_logger
 from ..utils import _get_exiftool_path
@@ -190,7 +190,7 @@ def _extract_json_from_video(path: Path) -> Tuple[Optional[Dict[str, Any]], Opti
     def parse_vhs_json(json_str: str):
         nonlocal found_prompt, found_workflow
         try:
-            payload = json.loads(json_str)
+            payload = _json_loads_relaxed(json_str)
             if not isinstance(payload, dict):
                 return
             if "workflow" in payload:
@@ -274,35 +274,10 @@ def _extract_json_from_video(path: Path) -> Tuple[Optional[Dict[str, Any]], Opti
                     if candidate:
                         parse_vhs_json(candidate)
 
-    if not found_prompt and not found_workflow:
-        ffprobe = shutil.which("ffprobe")
-        if ffprobe:
-            try:
-                cmd = [
-                    ffprobe,
-                    "-v",
-                    "error",
-                    "-print_format",
-                    "json",
-                    "-show_entries",
-                    "format_tags:stream_tags",
-                    str(path),
-                ]
-                out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=ffprobe_timeout)
-                data = json.loads(out) if out else {}
-                tags = (data.get("format") or {}).get("tags") or {}
-                recursive_scan(tags)
-                for stream in data.get("streams") or []:
-                    recursive_scan(stream.get("tags") or {})
-            except subprocess.TimeoutExpired:
-                log.warning(
-                    "[Majoor] ffprobe timeout on %s after %ss",
-                    path.name,
-                    ffprobe_timeout,
-                )
-            except Exception as e:
-                log.warning("[Majoor] ffprobe error on %s: %s", path.name, e)
-
+    # Preferred order for video metadata extraction:
+    # 1) ExifTool (best coverage for container/user metadata)
+    # 2) ffprobe (format/stream tags)
+    # 3) Windows Property System (Explorer properties like Comment)
     if exe and not (found_prompt and found_workflow):
         try:
             cmd = [
@@ -349,6 +324,61 @@ def _extract_json_from_video(path: Path) -> Tuple[Optional[Dict[str, Any]], Opti
             )
         except Exception as e:
             log.warning("[Majoor] ExifTool error on %s: %s", path.name, e)
+
+    if not found_prompt and not found_workflow:
+        ffprobe = shutil.which("ffprobe")
+        if ffprobe:
+            try:
+                cmd = [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-print_format",
+                    "json",
+                    "-show_entries",
+                    "format_tags:stream_tags",
+                    str(path),
+                ]
+                out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=ffprobe_timeout)
+                data = json.loads(out) if out else {}
+                tags = (data.get("format") or {}).get("tags") or {}
+                recursive_scan(tags)
+                for stream in data.get("streams") or []:
+                    recursive_scan(stream.get("tags") or {})
+            except subprocess.TimeoutExpired:
+                log.warning(
+                    "[Majoor] ffprobe timeout on %s after %ss",
+                    path.name,
+                    ffprobe_timeout,
+                )
+            except Exception as e:
+                log.warning("[Majoor] ffprobe error on %s: %s", path.name, e)
+
+    if not found_prompt and not found_workflow and os.name == "nt":
+        try:
+            import pythoncom  # type: ignore
+            from win32com.propsys import propsys, pscon  # type: ignore
+
+            pythoncom.CoInitialize()
+            store = propsys.SHGetPropertyStoreFromParsingName(str(path), None, pscon.GPS_BESTEFFORT)
+            props = {}
+            for kname in ("PKEY_Comment", "PKEY_Title", "PKEY_Subject", "PKEY_Keywords", "PKEY_Category"):
+                key = getattr(pscon, kname, None)
+                if key is None:
+                    continue
+                try:
+                    val = store.GetValue(key).GetValue()
+                except Exception:
+                    continue
+                if val is None:
+                    continue
+                if isinstance(val, tuple):
+                    val = list(val)
+                props[kname[5:].lower()] = val
+            if props:
+                recursive_scan(props)
+        except Exception:
+            pass
 
     if not found_prompt and not found_workflow:
         try:
