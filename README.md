@@ -40,6 +40,9 @@ GIFs are large; these are linked (not embedded) to keep the README fast. Full-re
 
 - ⚡ Fast browsing: [examples/fastbrowsing.gif](examples/fastbrowsing.gif)
 - ⭐ Ratings & 🏷️ tags: [examples/notations.gif](examples/notations.gif)
+- 🗂️ Smart collections: [examples/Smart_Collections.gif](examples/Smart_Collections.gif)
+- 🧩 Drag & drop workflow: [examples/Drop_Workflow.gif](examples/Drop_Workflow.gif)
+- 🎞️ Frame-by-frame (video): [examples/Frame_by_frame.gif](examples/Frame_by_frame.gif)
 - 🧩 UI rendering/integration: [examples/render.gif](examples/render.gif)
 
 ---
