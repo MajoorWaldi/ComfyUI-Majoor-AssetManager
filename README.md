@@ -36,11 +36,11 @@ External tools (recommended):
 
 ## 🎞️ Demos (GIF)
 
-GIFs are large; these are linked (not embedded) to keep the README fast:
+GIFs are large; these are linked (not embedded) to keep the README fast. Full-res captures are kept locally as `examples/*_full.gif` (gitignored):
 
-- ⚡ Fast browsing: [gif/fastbrowsing.gif](gif/fastbrowsing.gif)
-- ⭐ Ratings & 🏷️ tags: [gif/notations.gif](gif/notations.gif)
-- 🧩 UI rendering/integration: [gif/render.gif](gif/render.gif)
+- ⚡ Fast browsing: [examples/fastbrowsing.gif](examples/fastbrowsing.gif)
+- ⭐ Ratings & 🏷️ tags: [examples/notations.gif](examples/notations.gif)
+- 🧩 UI rendering/integration: [examples/render.gif](examples/render.gif)
 
 ---
 

@@ -13,7 +13,5 @@ server/metadata/__pycache__/core.cpython-313.pyc
 server/metadata/__pycache__/video_extraction.cpython-313.pyc
 server/metadata/__pycache__/workflow_normalize.cpython-313.pyc
 server/metadata/__pycache__/workflow_reconstruct.cpython-313.pyc
-gif/render.gif
-gif/notations.gif
-gif/fastbrowsing.gif
+examples/*_full.gif
 __pycache__/__init__.cpython-313.pyc
