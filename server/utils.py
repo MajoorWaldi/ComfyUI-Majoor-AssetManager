@@ -4,6 +4,7 @@ import platform
 import re
 import shutil
 import subprocess
+import time
 import unicodedata
 from typing import Dict, List, Optional
 from .config import ENABLE_JSON_SIDECAR, METADATA_EXT
@@ -423,28 +424,49 @@ def get_exif_metadata(file_path: str) -> dict:
         return {}
     try:
         timeout_s = _env_timeout("MJR_EXIFTOOL_READ_TIMEOUT", 2.0, min_s=0.5, max_s=60.0)
-        cmd = [
-            exe,
-            "-n",
-            "-json",
-            "-Rating",
-            "-RatingPercent",
-            "-Microsoft:SharedUserRating",
-            "-Microsoft:Category",
-            "-Subject",
-            "-Keywords",
-            "-XPKeywords",
-            file_path,
-        ]
+        is_video = file_path.lower().endswith(VIDEO_EXTS)
+
+        # For videos, prefer XMP tags (portable and consistent) then fall back to Microsoft tags.
+        # For images/others, keep the existing wide read set (Windows + XMP + common keyword fields).
+        if is_video:
+            cmd = [
+                exe,
+                "-n",
+                "-json",
+                "-XMP:Rating",
+                "-XMP:Subject",
+                "-Microsoft:SharedUserRating",
+                "-Microsoft:Category",
+                file_path,
+            ]
+        else:
+            cmd = [
+                exe,
+                "-n",
+                "-json",
+                "-Rating",
+                "-RatingPercent",
+                "-Microsoft:SharedUserRating",
+                "-Microsoft:Category",
+                "-Subject",
+                "-Keywords",
+                "-XPKeywords",
+                file_path,
+            ]
         out = subprocess.check_output(cmd, timeout=timeout_s)
         data = json.loads(out)[0]
-        is_video = file_path.lower().endswith((".mp4", ".mov", ".m4v", ".webm", ".mkv"))
 
-        rating_raw = data.get("Rating")
-        if rating_raw is None:
-            rating_raw = data.get("RatingPercent")
-        if rating_raw is None:
-            rating_raw = data.get("Microsoft:SharedUserRating")
+        rating_raw = None
+        if is_video:
+            rating_raw = data.get("XMP:Rating")
+            if rating_raw is None:
+                rating_raw = data.get("Microsoft:SharedUserRating") or data.get("SharedUserRating")
+        else:
+            rating_raw = data.get("Rating")
+            if rating_raw is None:
+                rating_raw = data.get("RatingPercent")
+            if rating_raw is None:
+                rating_raw = data.get("Microsoft:SharedUserRating")
         rating = 0
         if rating_raw is not None:
             try:
@@ -460,10 +482,17 @@ def get_exif_metadata(file_path: str) -> dict:
 
         tags: List[str] = []
         if is_video:
-            cat = data.get("Microsoft:Category")
-            if cat:
-                tags = windows_category_to_tags(cat)
-        if not tags:
+            subj = data.get("XMP:Subject")
+            if subj:
+                if isinstance(subj, list):
+                    tags = _normalize_tags(subj)
+                elif isinstance(subj, str):
+                    tags = _normalize_tags(subj)
+            if not tags:
+                cat = data.get("Microsoft:Category") or data.get("Category")
+                if cat:
+                    tags = _normalize_tags(cat)
+        else:
             for key in ("Subject", "Keywords", "XPKeywords"):
                 val = data.get(key)
                 if isinstance(val, list):
@@ -471,7 +500,7 @@ def get_exif_metadata(file_path: str) -> dict:
                 elif isinstance(val, str):
                     tags.extend([t.strip() for t in val.split(",") if t.strip()])
 
-        if tags:
+        if tags and not is_video:
             tags = sorted(set(tags))
 
         return {"rating": rating, "tags": tags}
@@ -506,88 +535,144 @@ def set_exif_metadata(file_path: str, rating: int, tags: list) -> bool:
     _CACHE_EPOCH += 1
     epoch = _CACHE_EPOCH
     original_mtime = _get_mtime_safe(file_path)
+    is_video = file_path.lower().endswith((".mp4", ".mov", ".m4v", ".webm", ".mkv"))
 
-    def _collect_preserve_args_for_video() -> list:
-        if not exe:
-            return []
-        try:
-            timeout_s = _env_timeout("MJR_EXIFTOOL_PRESERVE_TIMEOUT", 3.0, min_s=0.5, max_s=60.0)
-            cmd = [
-                exe,
-                "-j",
-                "-Comment",
-                "-UserComment",
-                "-Description",
-                "-UserData",
-                "-XMP:Comment",
-                "-XMP:Description",
-                "-ItemList:UserComment",
-                file_path,
-            ]
-            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=timeout_s)
-            data_list = json.loads(out) if out else []
-            if not data_list:
-                return []
-            entry = data_list[0]
-            preserve_args = []
-            for key in ("Comment", "UserComment", "Description", "UserData", "XMP:Comment", "XMP:Description", "ItemList:UserComment"):
-                val = entry.get(key)
-                if isinstance(val, list):
-                    val = " ".join(str(v) for v in val if str(v).strip())
-                if isinstance(val, str):
-                    val = val.strip()
-                if val:
-                    preserve_args.append(f"-{key}={val}")
-            return preserve_args
-        except subprocess.TimeoutExpired:
-            return []
-        except Exception:
-            return []
+    # Retry loop for "file not ready yet" cases on Windows: right after generation,
+    # the encoder can still be finalizing/locking the container. We treat common
+    # "cannot open/write" errors as retryable and back off exponentially.
+    def _exiftool_is_retryable(stderr: bytes) -> bool:
+        msg = (stderr or b"").decode("utf-8", errors="ignore").lower()
+        return any(
+            s in msg
+            for s in (
+                "cannot open",
+                "can't open",
+                "error opening file",
+                "permission denied",
+                "access is denied",
+                "being used by another process",
+                "used by another process",
+                "sharing violation",
+                "file is locked",
+                "cannot write",
+                "can't write",
+                "write error",
+            )
+        )
+
+    def _exiftool_run_with_retries(cmd: list, timeout_s: float, *, max_tries: int = 5) -> subprocess.CompletedProcess:
+        last = None
+        for attempt in range(max_tries):
+            last = subprocess.run(cmd, check=False, capture_output=True, timeout=timeout_s)
+            if last.returncode == 0:
+                return last
+            if not _exiftool_is_retryable(last.stderr):
+                return last
+            time.sleep(0.15 * (2**attempt))
+        return last  # type: ignore[return-value]
 
     try:
         write_timeout_s = _env_timeout("MJR_EXIFTOOL_WRITE_TIMEOUT", 3.0, min_s=0.5, max_s=120.0)
         r = _coerce_rating_to_stars(rating)
         win_r = rating_to_windows_percent(r)
 
-        is_video = file_path.lower().endswith((".mp4", ".mov", ".m4v", ".webm", ".mkv"))
+        clean_tags = _normalize_tags(tags)
+        joined = "; ".join(clean_tags)
 
-        preserve_args = _collect_preserve_args_for_video() if is_video else []
+        if not is_video:
+            # Keep existing behavior for images/other files: write rating + common keyword fields.
+            cmd = [exe, "-overwrite_original"]
+            cmd += [
+                f"-XMP:Rating={r}",
+                f"-xmp:rating={r}",
+                f"-rating={r}",
+                f"-ratingpercent={win_r}",
+                "-Subject=",
+                "-Keywords=",
+                "-XPKeywords=",
+                "-XMP:Subject=",
+            ]
+            if clean_tags:
+                cmd.append(f"-XMP:Subject={joined}")
+                cmd.append(f"-xpkeywords={joined}")
+                for t in clean_tags:
+                    cmd.append(f"-iptc:keywords+={t}")
+            cmd.append(file_path)
+            res = subprocess.run(cmd, check=False, capture_output=True, timeout=write_timeout_s)
+            if res.returncode != 0:
+                return False
 
-        # Use a consistent list separator for tags when writing list-type fields.
-        cmd = [exe, "-overwrite_original", "-sep", "; ", *preserve_args]
-        cmd += [
-            # Rating (write both generic + XMP for better compatibility)
+            if original_mtime is not None:
+                try:
+                    os.utime(file_path, (original_mtime, original_mtime))
+                except Exception:
+                    pass
+
+            _META_CACHE[file_path] = (
+                original_mtime if original_mtime is not None else _get_mtime_safe(file_path),
+                epoch,
+                {"rating": rating, "tags": tags},
+            )
+            return True
+
+        # Preserve embedded ComfyUI workflow JSON stored in Comment-like tags without putting large blobs on the
+        # command line: copy those tags from the original file (`@`) onto the rewritten file, then override rating/tags.
+        preserve_copy_args = [
+            "-tagsFromFile",
+            "@",
+            "-Comment",
+            "-UserComment",
+            "-Description",
+            "-XPComment",
+            "-Parameters",
+            "-UserData",
+            "-XMP:Comment",
+            "-XMP:Description",
+            "-XMP:UserComment",
+            "-ItemList:Comment",
+            "-ItemList:Description",
+            "-ItemList:UserComment",
+        ]
+
+        # Multi-namespace strategy for videos:
+        # - Always write XMP:Rating (0..5) and XMP:Subject (list of tags).
+        # - Best-effort write Microsoft:SharedUserRating (0..100-ish) and Microsoft:Category (semicolon list).
+        #   If the Microsoft tags are not writable for a given container/handler, we still succeed as long as
+        #   the XMP tags were written.
+        base_cmd = [exe, "-overwrite_original", "-sep", "; ", *preserve_copy_args]
+        base_cmd += [
             f"-XMP:Rating={r}",
-            f"-xmp:rating={r}",
-            f"-rating={r}",
-            f"-ratingpercent={win_r}",
-            "-Subject=",
-            "-Keywords=",
-            "-XPKeywords=",
             "-XMP:Subject=",
         ]
-        if is_video:
-            cmd.append(f"-Microsoft:SharedUserRating={win_r}")
-            # Windows Explorer commonly maps video tags to Microsoft:Category.
-            # Also write XMP:Subject using the same '; ' separator (matches ExifTool web tools).
-            cat = tags_to_windows_category(tags)
-            cmd.append(f"-Microsoft:Category={cat}")
+        if joined:
+            base_cmd.append(f"-XMP:Subject={joined}")
 
-        clean_tags = _normalize_tags(tags)
-        # Always write Category for video, even if empty, to clear stale values
-        if is_video and not clean_tags:
-            cmd.append(f"-Microsoft:Category=")
-        if clean_tags:
-            joined = "; ".join(clean_tags)
-            cmd.append(f"-XMP:Subject={joined}")
-            # Keep a Windows-friendly field too (some apps read XPKeywords)
-            cmd.append(f"-xpkeywords={joined}")
-            # Optionally mirror to IPTC keywords (harmless for most containers)
-            for t in clean_tags:
-                cmd.append(f"-iptc:keywords+={t}")
+        cmd_with_ms = list(base_cmd)
+        cat = tags_to_windows_category(clean_tags)
+        cmd_with_ms += [
+            f"-Microsoft:SharedUserRating={win_r}",
+            f"-Microsoft:Category={cat}",
+        ]
 
-        cmd.append(file_path)
-        subprocess.run(cmd, check=True, capture_output=True, timeout=write_timeout_s)
+        # Preflight: wait a bit for the file to become readable after generation (Windows lock/finalization).
+        for attempt in range(5):
+            try:
+                with open(file_path, "rb") as f:
+                    f.read(1)
+                break
+            except Exception:
+                time.sleep(0.15 * (2**attempt))
+
+        def _is_ms_write_issue(stderr: bytes) -> bool:
+            msg = (stderr or b"").decode("utf-8", errors="ignore").lower()
+            return ("microsoft:" in msg) and any(s in msg for s in ("not writable", "unsupported", "warning"))
+
+        res = _exiftool_run_with_retries(cmd_with_ms + [file_path], write_timeout_s)
+        if res.returncode != 0 and _is_ms_write_issue(res.stderr):
+            # Retry once without Microsoft namespace tags (XMP remains the source of truth).
+            res = _exiftool_run_with_retries(base_cmd + [file_path], write_timeout_s)
+        if res.returncode != 0:
+            return False
 
         # Restore mtime to avoid reordering the grid after rating/tag updates
         if original_mtime is not None:
@@ -841,6 +926,11 @@ def get_system_metadata(file_path: str) -> dict:
         return dict(cached[2])
 
     meta = get_exif_metadata(file_path)
+    # For videos, ExifTool is the source of truth (Explorer can be inconsistent across handlers).
+    if file_path.lower().endswith(VIDEO_EXTS) and meta:
+        _META_CACHE[file_path] = (mtime, _CACHE_EPOCH, meta)
+        return meta
+
     if meta.get("rating") or meta.get("tags"):
         _META_CACHE[file_path] = (mtime, _CACHE_EPOCH, meta)
         return meta
