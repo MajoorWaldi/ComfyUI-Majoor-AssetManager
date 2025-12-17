@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 import folder_paths
 
 from server import PromptServer
+from .logger import get_logger
 from .utils import (
     classify_ext,
     get_system_metadata,
@@ -12,6 +13,8 @@ from .utils import (
     set_exif_metadata,
     _get_exiftool_path,
 )
+
+log = get_logger(__name__)
 
 
 def _iter_generated_files(output_data: Dict[str, Any]) -> List[str]:
@@ -133,7 +136,7 @@ def on_executed(prompt_id, node_id, output_data):
             except Exception:
                 pass
     except Exception as e:
-        print(f"[Majoor Hook Error] {e}")
+        log.exception("[Majoor] hook error: %s", e)
 
 
 # Register hook once (only if supported)
@@ -141,6 +144,8 @@ try:
     if hasattr(PromptServer.instance, "add_on_executed"):
         PromptServer.instance.add_on_executed(on_executed)
     else:
-        print("[Majoor] add_on_executed not available on PromptServer (legacy frontend); hook disabled.")
+        log.warning(
+            "[Majoor] add_on_executed not available on PromptServer (legacy frontend); hook disabled."
+        )
 except Exception as e:
-    print(f"[Majoor] Failed to register on_executed hook: {e}")
+    log.exception("[Majoor] failed to register on_executed hook: %s", e)

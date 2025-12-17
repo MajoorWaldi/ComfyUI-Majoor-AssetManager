@@ -6,6 +6,7 @@ import subprocess
 import unicodedata
 from typing import Dict, List, Optional
 from .config import ENABLE_JSON_SIDECAR, METADATA_EXT
+from .logger import get_logger
 
 # Supported extensions
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
@@ -36,6 +37,24 @@ _EXIFTOOL_PATH: Optional[str] = None
 _EXIFTOOL_CHECKED = False
 _META_CACHE: Dict[str, tuple[Optional[float], int, dict]] = {}
 _CACHE_EPOCH = 0
+
+log = get_logger(__name__)
+
+
+def _env_timeout(name: str, default: float, min_s: float = 0.5, max_s: float = 60.0) -> float:
+    """
+    Parse a timeout value from env and clamp it to a safe range.
+    Keeps external metadata tools from hanging the server.
+    """
+    try:
+        raw = os.environ.get(name, None)
+        val = float(default) if raw is None else float(raw)
+    except Exception:
+        val = float(default)
+    try:
+        return max(float(min_s), min(float(val), float(max_s)))
+    except Exception:
+        return float(default)
 
 
 def _force_sidecar_enabled() -> bool:
@@ -74,7 +93,7 @@ def safe_import_win32com():
 
             _WIN32COM = win32com.client
         except ImportError:
-            print("Windows logic disabled (pywin32 not found)")
+            log.warning("Windows logic disabled (pywin32 not found)")
             _WIN32COM = None
     else:
         _WIN32COM = None
@@ -216,7 +235,7 @@ def get_windows_metadata(file_path: str) -> dict:
             "tags": tags,
         }
     except Exception as e:
-        print(f"Error reading metadata for {file_path}: {e}")
+        log.warning("Error reading metadata for %s: %s", file_path, e)
         return {"rating": 0, "tags": []}
 
 
@@ -230,6 +249,7 @@ def get_exif_metadata(file_path: str) -> dict:
     if not exe:
         return {}
     try:
+        timeout_s = _env_timeout("MJR_EXIFTOOL_READ_TIMEOUT", 2.0, min_s=0.5, max_s=60.0)
         cmd = [
             exe,
             "-n",
@@ -243,7 +263,7 @@ def get_exif_metadata(file_path: str) -> dict:
             "-XPKeywords",
             file_path,
         ]
-        out = subprocess.check_output(cmd, timeout=2)
+        out = subprocess.check_output(cmd, timeout=timeout_s)
         data = json.loads(out)[0]
         is_video = file_path.lower().endswith((".mp4", ".mov", ".m4v", ".webm", ".mkv"))
 
@@ -282,6 +302,8 @@ def get_exif_metadata(file_path: str) -> dict:
             tags = sorted(set(tags))
 
         return {"rating": rating, "tags": tags}
+    except subprocess.TimeoutExpired:
+        return {}
     except Exception:
         return {}
 
@@ -316,6 +338,7 @@ def set_exif_metadata(file_path: str, rating: int, tags: list) -> bool:
         if not exe:
             return []
         try:
+            timeout_s = _env_timeout("MJR_EXIFTOOL_PRESERVE_TIMEOUT", 3.0, min_s=0.5, max_s=60.0)
             cmd = [
                 exe,
                 "-j",
@@ -328,7 +351,7 @@ def set_exif_metadata(file_path: str, rating: int, tags: list) -> bool:
                 "-ItemList:UserComment",
                 file_path,
             ]
-            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=3)
+            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=timeout_s)
             data_list = json.loads(out) if out else []
             if not data_list:
                 return []
@@ -343,10 +366,13 @@ def set_exif_metadata(file_path: str, rating: int, tags: list) -> bool:
                 if val:
                     preserve_args.append(f"-{key}={val}")
             return preserve_args
+        except subprocess.TimeoutExpired:
+            return []
         except Exception:
             return []
 
     try:
+        write_timeout_s = _env_timeout("MJR_EXIFTOOL_WRITE_TIMEOUT", 3.0, min_s=0.5, max_s=120.0)
         r = max(0, min(int(rating), 5))
         win_r = rating_to_windows_percent(r)
 
@@ -380,7 +406,7 @@ def set_exif_metadata(file_path: str, rating: int, tags: list) -> bool:
             cmd.append(f"-xpkeywords={'; '.join(clean_tags)}")
 
         cmd.append(file_path)
-        subprocess.run(cmd, check=True, capture_output=True, timeout=3)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=write_timeout_s)
 
         # Restore mtime to avoid reordering the grid after rating/tag updates
         if original_mtime is not None:
@@ -396,6 +422,8 @@ def set_exif_metadata(file_path: str, rating: int, tags: list) -> bool:
             {"rating": rating, "tags": tags},
         )
         return True
+    except subprocess.TimeoutExpired:
+        return False
     except Exception:
         return False
 

@@ -20,6 +20,7 @@ from aiohttp import web
 
 import folder_paths
 from server import PromptServer
+from .logger import get_logger
 from .utils import (
     IMAGE_EXTS,
     VIDEO_EXTS,
@@ -41,6 +42,8 @@ from .mjr_collections import (
     add_to_collection,
     remove_from_collection,
 )
+
+log = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # In-memory cache for output listing
@@ -232,6 +235,11 @@ def _rating_tags_with_fallback(meta_target: Path, kind: str) -> tuple[int, List[
 def _open_in_explorer(path: Path) -> bool:
     """Open Windows Explorer selecting the given file."""
     try:
+        try:
+            fm_timeout = float(os.environ.get("MJR_FILE_MANAGER_TIMEOUT", "15"))
+        except Exception:
+            fm_timeout = 15.0
+        fm_timeout = max(1.0, min(fm_timeout, 60.0))
         start_cmd = f'start "" explorer.exe /select,"{str(path)}"'
         res_start = subprocess.run(
             start_cmd,
@@ -239,7 +247,7 @@ def _open_in_explorer(path: Path) -> bool:
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=15,
+            timeout=fm_timeout,
         )
         if res_start.returncode in (0, 1):
             return True
@@ -251,7 +259,7 @@ def _open_in_explorer(path: Path) -> bool:
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=15,
+            timeout=fm_timeout,
         )
         if res.returncode in (0, 1):
             return True
@@ -262,7 +270,7 @@ def _open_in_explorer(path: Path) -> bool:
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=15,
+            timeout=fm_timeout,
         )
         return res2.returncode in (0, 1)
     except Exception:
@@ -281,6 +289,11 @@ def _open_in_file_manager(path: Path) -> tuple[bool, Optional[str]]:
         system = platform.system()
         is_file = path.is_file()
         folder = path.parent if is_file else path
+        try:
+            fm_timeout = float(os.environ.get("MJR_FILE_MANAGER_TIMEOUT", "15"))
+        except Exception:
+            fm_timeout = 15.0
+        fm_timeout = max(1.0, min(fm_timeout, 60.0))
 
         def _run(cmd: List[str]) -> int:
             return subprocess.run(
@@ -289,7 +302,7 @@ def _open_in_file_manager(path: Path) -> tuple[bool, Optional[str]]:
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=15,
+                timeout=fm_timeout,
             ).returncode
 
         if system == "Windows":
@@ -442,21 +455,21 @@ def _scan_outputs_cached(force: bool = False) -> List[Dict[str, Any]]:
 
     now = time.time()
     if not force and _FILE_CACHE and (now - _LAST_SCAN_TS) < _SCAN_MIN_INTERVAL:
-        return list(_FILE_CACHE)
+        return _FILE_CACHE
 
     with _CACHE_LOCK:
         now = time.time()
         if not force and _FILE_CACHE and (now - _LAST_SCAN_TS) < _SCAN_MIN_INTERVAL:
-            return list(_FILE_CACHE)
+            return _FILE_CACHE
 
         root = _get_output_root()
         if not force and _FILE_CACHE and not _folder_changed(root):
-            return list(_FILE_CACHE)
+            return _FILE_CACHE
 
         files = _scan_outputs()
         _FILE_CACHE = files
         _LAST_SCAN_TS = now
-        return list(_FILE_CACHE)
+        return _FILE_CACHE
 
 
 async def _scan_outputs_async(force: bool = False) -> List[Dict[str, Any]]:
@@ -470,15 +483,44 @@ async def list_files(request: web.Request) -> web.Response:
     force_param = (request.query.get("force") or "").lower()
     force = force_param in ("1", "true", "yes", "force")
 
-    files = await _scan_outputs_async(force=force)
+    # Optional pagination
+    # Backward-compatible: if no limit is provided, return the full list.
+    try:
+        offset = int(request.query.get("offset") or "0")
+    except Exception:
+        offset = 0
+    try:
+        limit_raw = request.query.get("limit")
+        paged = limit_raw is not None
+        limit = int(limit_raw) if limit_raw is not None else 0
+    except Exception:
+        paged = False
+        limit = 0
 
-    # Prefetch metadata for the first N items without delaying the response
-    prefetch_count = min(len(files), _META_PREFETCH_COUNT)
+    offset = max(0, offset)
+    limit = max(0, limit)
+
+    files = await _scan_outputs_async(force=force)
+    total = len(files)
+
+    items = files
+    if limit > 0:
+        items = files[offset : offset + limit]
+    else:
+        offset = 0
+        limit = total
+
+    has_more = (offset + len(items)) < total
+    next_offset = (offset + len(items)) if has_more else None
+
+    # Prefetch metadata for the first N items without delaying the response.
+    # Only do this for the first paged request (offset=0, limit provided).
+    prefetch_count = min(len(items), _META_PREFETCH_COUNT) if (paged and offset == 0) else 0
     if prefetch_count > 0:
         root = _get_output_root()
 
         def _prefetch():
-            for f in files[:prefetch_count]:
+            for f in items[:prefetch_count]:
                 try:
                     filename = f.get("filename") or f.get("name")
                     subfolder = f.get("subfolder", "")
@@ -511,7 +553,16 @@ async def list_files(request: web.Request) -> web.Response:
         loop = asyncio.get_running_loop()
         loop.run_in_executor(None, _prefetch)
 
-    return web.json_response({"files": files})
+    return web.json_response(
+        {
+            "files": items,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "has_more": has_more,
+            "next_offset": next_offset,
+        }
+    )
 
 
 @PromptServer.instance.routes.post("/mjr/filemanager/metadata/batch")
@@ -639,7 +690,10 @@ async def delete_files(request: web.Request) -> web.Response:
             if send2trash:
                 send2trash(str(candidate))
             else:
-                print(f"[Majoor.AssetsManager] send2trash unavailable; deleting permanently: {candidate}")
+                log.warning(
+                    "[Majoor.AssetsManager] send2trash unavailable; deleting permanently: %s",
+                    candidate,
+                )
                 candidate.unlink()
             deleted.append({"filename": filename, "subfolder": subfolder})
         except Exception as exc:
@@ -718,7 +772,9 @@ async def get_metadata(request: web.Request) -> web.Response:
             try:
                 return extract_generation_params_from_png(p) or {}
             except Exception as e:
-                print(f"[Majoor.AssetsManager] metadata parsing error for {p.name}: {e}")
+                log.warning(
+                    "[Majoor.AssetsManager] metadata parsing error for %s: %s", p.name, e
+                )
                 return {}
 
         def _has_wf(p: Dict[str, Any]) -> bool:

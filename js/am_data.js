@@ -2,6 +2,7 @@ import { api } from "../../../../scripts/api.js";
 import {
   mjrPrefetchedFiles,
   mjrShowToast,
+  mjrSettings,
 } from "./ui_settings.js";
 import { normalizeMtimeOnList, normalizeMtimeValue } from "./am_filters.js";
 
@@ -72,6 +73,24 @@ export function sortFilesDeterministically(files) {
   });
 }
 
+function mjrPageSize() {
+  const cfg = Number(mjrSettings?.grid?.pageSize);
+  if (!Number.isFinite(cfg) || cfg <= 0) return 500;
+  return Math.max(50, Math.min(2000, Math.floor(cfg)));
+}
+
+async function fetchFilesPage({ force = false, offset = 0, limit = 0 } = {}) {
+  const params = new URLSearchParams();
+  params.set("t", Date.now().toString());
+  if (force) params.set("force", "1");
+  if (offset) params.set("offset", String(offset));
+  if (limit) params.set("limit", String(limit));
+
+  const res = await api.fetchApi(`/mjr/filemanager/files?${params.toString()}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
 export async function loadFiles(state, gridEl, applyFilterAndRender, opts = {}, refs) {
   const { silent = false, force = false, skipMetadataFetch = false } = opts;
   const { lastSignatureRef, mergeLoadOptsFn = mergeLoadOpts, setLoadingPromise } = refs;
@@ -84,24 +103,21 @@ export async function loadFiles(state, gridEl, applyFilterAndRender, opts = {}, 
   state.loadingPromise = (async () => {
     state.loading = true;
     if (!silent && gridEl.children.length === 0) {
-      gridEl.innerHTML = '<div style="opacity:.7;padding:10px;">Loading outputs…</div>';
+      gridEl.innerHTML = '<div style="opacity:.7;padding:10px;">Loading outputs...</div>';
     }
     try {
       if (!force && Array.isArray(mjrPrefetchedFiles) && mjrPrefetchedFiles.length) {
         normalizeMtimeOnList(mjrPrefetchedFiles);
         const sig = computeSignature(mjrPrefetchedFiles);
         state.files = mjrPrefetchedFiles;
+        state.filesTotal = mjrPrefetchedFiles.length;
+        state.filesHasMore = true;
+        state.filesNextOffset = mjrPrefetchedFiles.length;
         lastSignatureRef.value = sig;
         applyFilterAndRender({ skipMetadataFetch });
       }
 
-      const params = new URLSearchParams();
-      params.set("t", Date.now().toString());
-      if (force) params.set("force", "1");
-
-      const res = await api.fetchApi(`/mjr/filemanager/files?${params.toString()}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      const data = await fetchFilesPage({ force, offset: 0, limit: mjrPageSize() });
       const incoming = data.files || data.items || [];
 
       normalizeMtimeOnList(incoming);
@@ -124,13 +140,16 @@ export async function loadFiles(state, gridEl, applyFilterAndRender, opts = {}, 
         }
       });
 
-      const sig = computeSignature(incoming);
+      const sig = `${data.total ?? incoming.length}|${computeSignature(incoming)}`;
       if (!force && sig && sig === lastSignatureRef.value) {
         lastSignatureRef.value = sig;
         return;
       }
       state.files = incoming;
       lastSignatureRef.value = sig;
+      state.filesTotal = data.total ?? incoming.length;
+      state.filesHasMore = data.has_more ?? (incoming.length < (data.total ?? incoming.length));
+      state.filesNextOffset = data.next_offset ?? incoming.length;
       applyFilterAndRender({ skipMetadataFetch });
     } catch (err) {
       console.error("[Majoor.AssetsManager] load error", err);
@@ -149,6 +168,66 @@ export async function loadFiles(state, gridEl, applyFilterAndRender, opts = {}, 
 
   if (typeof setLoadingPromise === "function") setLoadingPromise(state.loadingPromise);
   return state.loadingPromise;
+}
+
+export async function loadMoreFiles(state, gridEl, applyFilterAndRender, opts = {}, refs = {}) {
+  const { silent = true, skipMetadataFetch = false } = opts;
+  const { setLoadingPromise } = refs;
+
+  if (state.loadingPromise) return state.loadingPromise;
+  if (!state.filesHasMore) return Promise.resolve();
+
+  if (state.loadingMorePromise) {
+    state.moreQueued = true;
+    return state.loadingMorePromise;
+  }
+
+  state.loadingMorePromise = (async () => {
+    const offset = Math.max(0, Number(state.filesNextOffset ?? state.files?.length ?? 0) || 0);
+    const data = await fetchFilesPage({ force: false, offset, limit: mjrPageSize() });
+    const incoming = data.files || data.items || [];
+
+    normalizeMtimeOnList(incoming);
+    sortFilesDeterministically(incoming);
+
+    const existing = new Set(
+      (state.files || []).map((f) => `${f.subfolder || ""}/${f.filename || f.name || ""}`)
+    );
+    const appended = [];
+    for (const f of incoming) {
+      const k = `${f.subfolder || ""}/${f.filename || f.name || ""}`;
+      if (!existing.has(k)) {
+        appended.push(f);
+        existing.add(k);
+      }
+    }
+
+    if (appended.length) {
+      state.files = (state.files || []).concat(appended);
+      applyFilterAndRender({ skipMetadataFetch });
+    } else if (!silent) {
+      mjrShowToast("info", "No more files to load", "Files");
+    }
+
+    state.filesTotal = data.total ?? state.filesTotal ?? state.files.length;
+    state.filesHasMore = data.has_more ?? (state.files.length < (state.filesTotal ?? state.files.length));
+    state.filesNextOffset = data.next_offset ?? (offset + incoming.length);
+  })()
+    .catch((err) => {
+      console.warn("[Majoor.AssetsManager] load more failed", err);
+      if (!silent) mjrShowToast("warn", "Failed to load more files", "Warning");
+    })
+    .finally(async () => {
+      const again = !!state.moreQueued;
+      state.moreQueued = false;
+      state.loadingMorePromise = null;
+      if (again && state.filesHasMore) {
+        await loadMoreFiles(state, gridEl, applyFilterAndRender, opts, refs);
+      }
+    });
+
+  if (typeof setLoadingPromise === "function") setLoadingPromise(state.loadingMorePromise);
+  return state.loadingMorePromise;
 }
 
 export function createRefreshInstance(state, fetchMetadataForVisible, loadFilesFn, refs) {

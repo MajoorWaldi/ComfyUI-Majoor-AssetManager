@@ -101,7 +101,7 @@ export const CONTEXT_MENU_STYLES = {
 export const mjrSettingsDefaults = {
   autoRefresh: { enabled: true, interval: 5000, focusOnly: true },
   metaPanel: { showByDefault: true, refreshInterval: 2000 },
-  grid: { cardSize: "medium", showTags: true, showRating: true },
+  grid: { cardSize: "medium", showTags: true, showRating: true, pageSize: 500 },
   viewer: {
     navEnabled: true,
     autoplayVideos: true,
@@ -172,8 +172,12 @@ export let mjrPrefetchedFiles = null;
 let mjrPrefetchPromise = null;
 export async function mjrPrefetchOutputs() {
   if (mjrPrefetchPromise) return mjrPrefetchPromise;
+  const pageSize = Math.max(50, Math.min(2000, Number(mjrSettings.grid?.pageSize) || 500));
+  const params = new URLSearchParams();
+  params.set("limit", String(pageSize));
+  params.set("offset", "0");
   mjrPrefetchPromise = api
-    .fetchApi("/mjr/filemanager/files")
+    .fetchApi(`/mjr/filemanager/files?${params.toString()}`)
     .then(async (res) => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();

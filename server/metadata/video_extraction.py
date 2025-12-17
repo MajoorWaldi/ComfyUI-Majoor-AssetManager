@@ -1,85 +1,128 @@
+import copy
 import json
 import os
 import shutil
 import subprocess
+import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from .workflow_normalize import _normalize_workflow_to_prompt_graph, _ensure_dict_from_json
+from .workflow_reconstruct import prompt_graph_to_workflow
+from ..logger import get_logger
 from ..utils import _get_exiftool_path
 
+log = get_logger(__name__)
 
-def _prompt_graph_to_workflow_video(prompt_graph: Dict[str, Any]) -> Dict[str, Any]:
+_VIDEO_META_CACHE_LOCK = threading.Lock()
+_VIDEO_META_CACHE: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+
+
+def _video_meta_cache_cfg() -> tuple[int, float, bool]:
     """
-    Minimal prompt-graph -> workflow reconstruction (duplicated here to avoid circular imports).
+    Returns (max_entries, ttl_seconds, debug).
+    - max_entries: 0 disables caching
+    - ttl_seconds: 0 disables TTL expiry (cache lives until eviction)
     """
-    nodes = []
-    links = []
-    max_id = -1
-    last_link_id = 0
+    try:
+        max_entries = int(os.environ.get("MJR_VIDEO_META_CACHE_SIZE", "256"))
+    except Exception:
+        max_entries = 256
+    max_entries = max(0, min(max_entries, 10_000))
 
-    def as_int(val, default=None):
-        try:
-            return int(val)
-        except Exception:
-            return default
+    try:
+        ttl = float(os.environ.get("MJR_VIDEO_META_CACHE_TTL", "0"))
+    except Exception:
+        ttl = 0.0
+    ttl = max(0.0, min(ttl, 24 * 60 * 60))
 
-    def extract_link(val):
-        if isinstance(val, (list, tuple)) and len(val) >= 2 and isinstance(val[0], (str, int)):
-            return val[0], val[1]
-        return None, None
+    dbg = (os.environ.get("MJR_VIDEO_META_CACHE_DEBUG", "") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    return max_entries, ttl, dbg
 
-    for nid, node in (prompt_graph or {}).items():
-        if not isinstance(node, dict):
-            continue
-        nid_int = as_int(nid, nid)
-        if isinstance(nid_int, int):
-            max_id = max(max_id, nid_int)
 
-        inputs_dict = node.get("inputs", {}) if isinstance(node.get("inputs"), dict) else {}
-        inputs_arr = []
-        for idx, (iname, ival) in enumerate(inputs_dict.items()):
-            entry = {"name": iname, "type": "ANY"}
-            src_id, src_slot = extract_link(ival)
-            if src_id is not None:
-                last_link_id += 1
-                link_id = last_link_id
-                try:
-                    src_id = int(src_id)
-                except Exception:
-                    pass
-                try:
-                    src_slot = int(src_slot)
-                except Exception:
-                    src_slot = 0
-                dest_id = nid_int if isinstance(nid_int, int) else (nid if nid is not None else 0)
-                links.append([link_id, src_id, src_slot, dest_id, idx, "ANY"])
-                entry["link"] = link_id
-            else:
-                entry["value"] = ival
-            inputs_arr.append(entry)
+def _video_meta_cache_key(path: Path) -> str:
+    try:
+        return os.path.normcase(os.path.abspath(str(path)))
+    except Exception:
+        return str(path)
 
-        node_entry = {
-            "id": nid_int,
-            "class_type": node.get("class_type"),
-            "type": node.get("class_type") or node.get("title") or "Unknown",
-            "inputs": inputs_arr,
-            "outputs": [],
+
+def _video_meta_signature(path: Path) -> Optional[tuple[int, int]]:
+    try:
+        st = path.stat()
+        mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))
+        size = int(st.st_size)
+        return int(mtime_ns), size
+    except Exception:
+        return None
+
+
+def _video_meta_cache_get(path: Path) -> Optional[Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]]:
+    max_entries, ttl, dbg = _video_meta_cache_cfg()
+    if max_entries <= 0:
+        return None
+
+    key = _video_meta_cache_key(path)
+    sig = _video_meta_signature(path)
+    if sig is None:
+        return None
+
+    now = time.time()
+    with _VIDEO_META_CACHE_LOCK:
+        entry = _VIDEO_META_CACHE.get(key)
+        if not entry:
+            return None
+        if entry.get("sig") != sig:
+            _VIDEO_META_CACHE.pop(key, None)
+            return None
+        if ttl > 0 and (now - float(entry.get("ts", 0.0))) > ttl:
+            _VIDEO_META_CACHE.pop(key, None)
+            return None
+        _VIDEO_META_CACHE.move_to_end(key)
+        if dbg:
+            log.debug("[Majoor] video meta cache hit: %s", path.name)
+        return copy.deepcopy(entry.get("prompt")), copy.deepcopy(entry.get("workflow"))
+
+
+def _video_meta_cache_put(
+    path: Path,
+    prompt: Optional[Dict[str, Any]],
+    workflow: Optional[Dict[str, Any]],
+) -> None:
+    max_entries, ttl, dbg = _video_meta_cache_cfg()
+    if max_entries <= 0:
+        return
+
+    key = _video_meta_cache_key(path)
+    sig = _video_meta_signature(path)
+    if sig is None:
+        return
+
+    with _VIDEO_META_CACHE_LOCK:
+        _VIDEO_META_CACHE[key] = {
+            "sig": sig,
+            "ts": time.time(),
+            "prompt": copy.deepcopy(prompt),
+            "workflow": copy.deepcopy(workflow),
         }
-        if node.get("title"):
-            node_entry["title"] = node.get("title")
-        if node.get("widgets_values") is not None:
-            node_entry["widgets_values"] = node.get("widgets_values")
-        nodes.append(node_entry)
+        _VIDEO_META_CACHE.move_to_end(key)
 
-    workflow = {
-        "last_node_id": max_id if max_id >= 0 else 0,
-        "last_link_id": last_link_id,
-        "links": links,
-        "nodes": nodes,
-        "version": 1,
-    }
-    return workflow
+        evicted = 0
+        while len(_VIDEO_META_CACHE) > max_entries:
+            _VIDEO_META_CACHE.popitem(last=False)
+            evicted += 1
+        if dbg:
+            msg = f"[Majoor] video meta cache store: {path.name}"
+            if evicted:
+                msg += f" (evicted {evicted})"
+            log.debug("%s", msg)
 
 
 def _balanced_json_from_text(text: str, start_idx: int, max_chars: int = 2_000_000) -> Optional[str]:
@@ -124,6 +167,10 @@ def _extract_json_from_video(path: Path) -> Tuple[Optional[Dict[str, Any]], Opti
     Extract prompt/workflow JSON from a video container using exiftool.
     Returns (prompt_graph, raw_workflow).
     """
+    cached = _video_meta_cache_get(path)
+    if cached is not None:
+        return cached
+
     exe = _get_exiftool_path() if callable(_get_exiftool_path) else None
     found_prompt = None
     found_workflow = None
@@ -248,9 +295,13 @@ def _extract_json_from_video(path: Path) -> Tuple[Optional[Dict[str, Any]], Opti
                 for stream in data.get("streams") or []:
                     recursive_scan(stream.get("tags") or {})
             except subprocess.TimeoutExpired:
-                print(f"[Majoor] ffprobe timeout on {path.name} after {ffprobe_timeout}s")
+                log.warning(
+                    "[Majoor] ffprobe timeout on %s after %ss",
+                    path.name,
+                    ffprobe_timeout,
+                )
             except Exception as e:
-                print(f"[Majoor] ffprobe error on {path.name}: {e}")
+                log.warning("[Majoor] ffprobe error on %s: %s", path.name, e)
 
     if exe and not (found_prompt and found_workflow):
         try:
@@ -275,7 +326,11 @@ def _extract_json_from_video(path: Path) -> Tuple[Optional[Dict[str, Any]], Opti
             if data_list:
                 recursive_scan(data_list[0])
         except subprocess.TimeoutExpired:
-            print(f"[Majoor] ExifTool (light) timeout on {path.name} after {exif_timeout}s")
+            log.warning(
+                "[Majoor] ExifTool (light) timeout on %s after %ss",
+                path.name,
+                exif_timeout,
+            )
         except Exception:
             pass
 
@@ -287,9 +342,13 @@ def _extract_json_from_video(path: Path) -> Tuple[Optional[Dict[str, Any]], Opti
             if data_list:
                 recursive_scan(data_list[0])
         except subprocess.TimeoutExpired:
-            print(f"[Majoor] ExifTool timeout on {path.name} after {exif_timeout}s")
+            log.warning(
+                "[Majoor] ExifTool timeout on %s after %ss",
+                path.name,
+                exif_timeout,
+            )
         except Exception as e:
-            print(f"[Majoor] ExifTool error on {path.name}: {e}")
+            log.warning("[Majoor] ExifTool error on %s: %s", path.name, e)
 
     if not found_prompt and not found_workflow:
         try:
@@ -315,7 +374,7 @@ def _extract_json_from_video(path: Path) -> Tuple[Optional[Dict[str, Any]], Opti
                     except Exception:
                         pass
         except Exception as e:
-            print(f"[Majoor] raw scan failed for {path.name}: {e}")
+            log.warning("[Majoor] raw scan failed for %s: %s", path.name, e)
             blob = b""
 
         if blob:
@@ -344,8 +403,9 @@ def _extract_json_from_video(path: Path) -> Tuple[Optional[Dict[str, Any]], Opti
         found_prompt = _normalize_workflow_to_prompt_graph(found_workflow)
     # Fallback: if only a prompt graph was found, reconstruct a minimal workflow
     if found_workflow is None and isinstance(found_prompt, dict):
-        found_workflow = _prompt_graph_to_workflow_video(found_prompt)
+        found_workflow = prompt_graph_to_workflow(found_prompt)
 
+    _video_meta_cache_put(path, found_prompt, found_workflow)
     return found_prompt, found_workflow
 
 

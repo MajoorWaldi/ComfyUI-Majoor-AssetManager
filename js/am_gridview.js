@@ -24,13 +24,18 @@ export function createGridView(deps) {
     loadMetadataForFile,
     openContextMenu,
     onRequestMetadata,
+    onNeedMoreFiles,
     isMetaVisible,
   } = deps;
 
   let lastRenderWindow = { startIndex: -1, endIndex: -1, cols: -1, version: -1 };
 
   const updateStatus = () => {
-    statusEl.textContent = `${state.filtered.length}/${state.files.length} items - ${state.selected.size} selected`;
+    const loaded = (state.files || []).length;
+    const total = Number.isFinite(state.filesTotal) ? state.filesTotal : loaded;
+    const totalText = total && total !== loaded ? `/${total}` : "";
+    const moreText = state.filesHasMore ? " (more...)" : "";
+    statusEl.textContent = `${state.filtered.length}/${loaded}${totalText} items${moreText} - ${state.selected.size} selected`;
   };
 
   const clearAllSelection = () => {
@@ -162,6 +167,26 @@ export function createGridView(deps) {
 
     if (onRequestMetadata) {
       onRequestMetadata(startIndex, endIndex);
+    }
+    if (typeof onNeedMoreFiles === "function") {
+      const threshold = cols * 6; // ~6 rows from the end
+      const canScroll =
+        (gridWrapper.scrollHeight || 0) > (gridWrapper.clientHeight || 0) + 10 ||
+        (gridWrapper.scrollTop || 0) > 0;
+      const filtersActive = !!(
+        (state.search && String(state.search).trim()) ||
+        (state.tagFilter && String(state.tagFilter).trim()) ||
+        Number(state.minRating || 0) > 0 ||
+        state.collectionSet ||
+        state.smartFilter ||
+        state.activeCollection
+      );
+
+      const nearEnd = state.filtered.length && endIndex >= state.filtered.length - threshold;
+      const underfilled = state.filtered.length && state.filtered.length < endIndex + threshold;
+      const shouldLoad = state.filesHasMore && (nearEnd || (!filtersActive && underfilled));
+
+      if ((canScroll || (!filtersActive && underfilled)) && shouldLoad) onNeedMoreFiles();
     }
     const totalRows = Math.ceil(state.filtered.length / cols) || 0;
     const rowsBefore = startRow;

@@ -14,6 +14,11 @@ export function createRefreshController(state, grid, applyFilterAndRender, fetch
 
   const loadFilesWrapper = (opts = {}) => loadFiles(opts.silent ?? true, opts.forceFiles ?? false, { skipMetadataFetch: opts.skipMetadataFetch ?? true });
 
+  const loadMoreFiles = (opts = {}) =>
+    import("../am_data.js").then(({ loadMoreFiles: fmLoadMoreFiles }) =>
+      fmLoadMoreFiles(state, grid, applyFilterAndRender, { silent: opts.silent ?? true, skipMetadataFetch: opts.skipMetadataFetch ?? false }, {})
+    );
+
   const refreshInstance = createRefreshInstance(state, fetchMetadataForVisible || (() => Promise.resolve()), loadFilesWrapper, {
     mjrRefreshDefaults,
     mergeRefreshOptionsFn: mergeRefreshOptions,
@@ -54,5 +59,5 @@ export function createRefreshController(state, grid, applyFilterAndRender, fetch
     return mjrGlobalRefreshPromise;
   }
 
-  return { refreshInstance, refreshAllInstances, loadFilesWrapper, loadFiles, lastSignatureRef };
+  return { refreshInstance, refreshAllInstances, loadFilesWrapper, loadFiles, loadMoreFiles, lastSignatureRef };
 }

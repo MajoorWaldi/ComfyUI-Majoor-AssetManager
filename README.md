@@ -13,6 +13,36 @@ Majoor Assets Manager is a UI extension (no custom nodes) to browse, inspect, an
 - macOS: `brew install exiftool`
 - Linux (Debian/Ubuntu): `sudo apt install libimage-exiftool-perl`
 - ffprobe is used when available; timeouts are configurable via `MJR_META_FFPROBE_TIMEOUT` and `MJR_META_EXIFTOOL_TIMEOUT`.
+- Additional safety timeouts:
+  - `MJR_EXIFTOOL_READ_TIMEOUT` (default: `2`)
+  - `MJR_EXIFTOOL_PRESERVE_TIMEOUT` (default: `3`)
+  - `MJR_EXIFTOOL_WRITE_TIMEOUT` (default: `3`)
+  - `MJR_FILE_MANAGER_TIMEOUT` (default: `15`)
+
+---
+
+## Scalability (Large Libraries)
+
+- The file listing endpoint supports pagination: `GET /mjr/filemanager/files?offset=0&limit=500` (omit `limit` to return everything for backward compatibility).
+- Frontend page size can be tuned via settings key `grid.pageSize` (default: `500`).
+
+---
+
+## Development (Formatting)
+
+This repo uses `ruff` for consistent Python formatting (and a small set of safe autofixes).
+
+```bash
+pip install -r requirements-dev.txt
+ruff format .
+ruff check --fix .
+```
+
+Optional (recommended): enable pre-commit hooks so formatting runs automatically before commits.
+
+```bash
+pre-commit install
+```
 
 ---
 
