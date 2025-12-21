@@ -1,6 +1,6 @@
 import json
 import os
-import platform
+import sys
 import re
 import shutil
 import subprocess
@@ -9,7 +9,7 @@ import unicodedata
 import threading
 from collections import OrderedDict
 from typing import Dict, List, Optional
-from .config import ENABLE_JSON_SIDECAR, METADATA_EXT
+from .config import ENABLE_JSON_SIDECAR, METADATA_EXT, IS_WINDOWS
 from .logger import get_logger
 
 # Supported extensions
@@ -58,7 +58,8 @@ try:
     _META_CACHE_MAX_SIZE = int(os.environ.get("MJR_META_CACHE_SIZE", "1000"))
     if _META_CACHE_MAX_SIZE <= 0:
         _META_CACHE_MAX_SIZE = 1000
-except Exception:
+except (ValueError, TypeError) as e:
+    log.warning("[Majoor] Invalid MJR_META_CACHE_SIZE, using default: %s", e)
     _META_CACHE_MAX_SIZE = 1000
 
 _META_CACHE: OrderedDict[str, tuple[Optional[float], int, dict]] = OrderedDict()
@@ -88,12 +89,17 @@ def _bump_cache_epoch_if(expected: int) -> int:
         return _CACHE_EPOCH
 
 
-def _cache_get(file_path: str, mtime: Optional[float], epoch: int) -> Optional[dict]:
+def _cache_get(file_path: str, mtime: Optional[float], epoch: int) -> Optional[tuple[Optional[dict], int]]:
+    """
+    FIX: Return both cached data and the epoch it was cached at to detect invalidation.
+    Returns (data_dict, cache_epoch) if valid, or (None, current_epoch) if invalid.
+    """
     with _CACHE_LOCK:
+        current_epoch = _CACHE_EPOCH
         cached = _META_CACHE.get(file_path)
-        if cached and cached[0] == mtime and cached[1] == epoch:
-            return dict(cached[2])
-    return None
+        if cached and cached[0] == mtime and cached[1] == current_epoch:
+            return (dict(cached[2]), current_epoch)
+    return (None, current_epoch)
 
 
 def _cache_set(file_path: str, mtime: Optional[float], epoch: int, meta: dict) -> None:
@@ -120,11 +126,11 @@ def _env_timeout(name: str, default: float, min_s: float = 0.5, max_s: float = 6
     try:
         raw = os.environ.get(name, None)
         val = float(default) if raw is None else float(raw)
-    except Exception:
+    except (ValueError, TypeError):
         val = float(default)
     try:
         return max(float(min_s), min(float(val), float(max_s)))
-    except Exception:
+    except (ValueError, TypeError, OverflowError):
         return float(default)
 
 
@@ -142,14 +148,16 @@ def _normalize_label(text) -> str:
         normalized = unicodedata.normalize("NFKD", str(text or ""))
         normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
         return normalized.lower().strip()
-    except Exception:
+    except (ValueError, TypeError, AttributeError):
+        # Fallback for non-normalizable text
         return str(text or "").lower().strip()
 
 
 def _get_mtime_safe(path: str) -> Optional[float]:
     try:
         return os.path.getmtime(path)
-    except Exception:
+    except (OSError, ValueError):
+        # File doesn't exist or path is invalid
         return None
 
 
@@ -158,7 +166,7 @@ def safe_import_win32com():
     if _WIN32COM_CHECKED:
         return _WIN32COM
     _WIN32COM_CHECKED = True
-    if platform.system().lower() == "windows":
+    if IS_WINDOWS:
         try:
             import win32com.client  # type: ignore
 
@@ -176,7 +184,7 @@ def _set_windows_property_store(file_path: str, rating: int, tags, *, clear_tags
     Write rating/tags using the Windows Property System (more reliable than Shell column indices).
     Returns True on success.
     """
-    if platform.system().lower() != "windows":
+    if not IS_WINDOWS:
         return False
     try:
         import pythoncom  # type: ignore
@@ -193,7 +201,8 @@ def _set_windows_property_store(file_path: str, rating: int, tags, *, clear_tags
             if media_key is not None:
                 try:
                     store.SetValue(media_key, percent)
-                except Exception:
+                except (OSError, AttributeError):
+                    # Media key not supported on this file type
                     pass
 
             if tags is not None:
@@ -204,14 +213,16 @@ def _set_windows_property_store(file_path: str, rating: int, tags, *, clear_tags
                     if cat_key is not None:
                         try:
                             store.SetValue(cat_key, tuple(tags_list))
-                        except Exception:
+                        except (OSError, AttributeError):
+                            # Category key not supported on this file type
                             pass
                     store.SetValue(pscon.PKEY_Keywords, tuple(tags_list))
                 elif clear_tags:
                     if cat_key is not None:
                         try:
                             store.SetValue(cat_key, tuple())
-                        except Exception:
+                        except (OSError, AttributeError):
+                            # Category key not supported on this file type
                             pass
                     store.SetValue(pscon.PKEY_Keywords, tuple())
 
@@ -220,9 +231,11 @@ def _set_windows_property_store(file_path: str, rating: int, tags, *, clear_tags
         finally:
             try:
                 pythoncom.CoUninitialize()
-            except Exception:
+            except (OSError, AttributeError):
+                # COM cleanup failed, not critical
                 pass
-    except Exception:
+    except (ImportError, OSError, AttributeError) as e:
+        log.debug("[Majoor] Failed to set Windows metadata: %s", e)
         return False
 
 
@@ -231,7 +244,7 @@ def _get_windows_property_store(file_path: str) -> dict:
     Read rating/tags using the Windows Property System.
     Helps when Shell column indices are missing or differ per file type (notably videos).
     """
-    if platform.system().lower() != "windows":
+    if not IS_WINDOWS:
         return {}
     try:
         import pythoncom  # type: ignore
@@ -265,7 +278,8 @@ def _get_windows_property_store(file_path: str) -> dict:
                         tags = _normalize_tags(list(cat_val))
                     elif isinstance(cat_val, str):
                         tags = _normalize_tags(cat_val)
-                except Exception:
+                except (OSError, AttributeError, TypeError):
+                    # Category property not available or invalid
                     tags = []
 
             if not tags:
@@ -275,16 +289,19 @@ def _get_windows_property_store(file_path: str) -> dict:
                         tags = _normalize_tags(list(kw_val))
                     elif isinstance(kw_val, str):
                         tags = _normalize_tags(kw_val)
-                except Exception:
+                except (OSError, AttributeError, TypeError):
+                    # Keywords property not available or invalid
                     tags = []
 
             return {"rating": rating, "tags": tags}
         finally:
             try:
                 pythoncom.CoUninitialize()
-            except Exception:
+            except (OSError, AttributeError):
+                # COM cleanup failed, not critical
                 pass
-    except Exception:
+    except (ImportError, OSError, AttributeError) as e:
+        log.debug("[Majoor] Failed to read Windows metadata: %s", e)
         return {}
 
 
@@ -987,12 +1004,14 @@ def apply_system_metadata(file_path: str, rating, tags: list) -> dict:
 def get_system_metadata(file_path: str) -> dict:
     """
     Prefer ExifTool metadata (Rating/Keywords), otherwise Windows API.
+    FIX: Use improved cache_get that returns epoch for validation.
     """
     mtime = _get_mtime_safe(file_path)
     epoch = _get_cache_epoch()
-    cached = _cache_get(file_path, mtime, epoch)
-    if cached is not None:
-        return cached
+    cached_data, cache_epoch = _cache_get(file_path, mtime, epoch)
+    # Verify epoch hasn't changed since cache fetch
+    if cached_data is not None and cache_epoch == _get_cache_epoch():
+        return cached_data
 
     meta = get_exif_metadata(file_path)
     # For videos, ExifTool is the source of truth (Explorer can be inconsistent across handlers).

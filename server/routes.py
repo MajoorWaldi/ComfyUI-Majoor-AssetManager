@@ -76,7 +76,8 @@ def _json_sanitize(obj: Any) -> Any:
     if isinstance(obj, (bytes, bytearray)):
         try:
             return bytes(obj).decode("utf-8", errors="replace")
-        except Exception:
+        except (UnicodeDecodeError, AttributeError) as e:
+            log.debug("[Majoor] Failed to decode bytes: %s", e)
             return repr(obj)
     if isinstance(obj, Path):
         return str(obj)
@@ -85,7 +86,8 @@ def _json_sanitize(obj: Any) -> Any:
         for k, v in obj.items():
             try:
                 key = str(k)
-            except Exception:
+            except (TypeError, ValueError) as e:
+                log.debug("[Majoor] Failed to convert key to string: %s", e)
                 key = repr(k)
             out[key] = _json_sanitize(v)
         return out
@@ -120,6 +122,51 @@ async def _validate_payload_size(request: web.Request, max_size_mb: float = 10.0
 
 
 # ---------------------------------------------------------------------------
+# File Request Validation Helpers (reduces code duplication)
+# ---------------------------------------------------------------------------
+
+async def _parse_json_payload(request: web.Request) -> tuple[Optional[dict], Optional[web.Response]]:
+    """
+    Parse JSON payload with proper error handling.
+    Returns (payload_dict, error_response). If error_response is not None, return it immediately.
+    """
+    try:
+        payload = await request.json()
+        return (payload, None)
+    except json.JSONDecodeError as e:
+        return (None, _json_response(
+            {"ok": False, "error": f"Invalid JSON: {str(e)}"},
+            status=400
+        ))
+    except Exception as e:
+        return (None, _json_response(
+            {"ok": False, "error": f"Failed to parse request: {str(e)}"},
+            status=400
+        ))
+
+
+def _validate_file_path(root: Path, filename: str, subfolder: str = "") -> tuple[Optional[Path], Optional[dict]]:
+    """
+    Validate and construct safe file path.
+    Returns (path, error_dict). If error_dict is not None, return error response.
+
+    Common validation pattern used across multiple endpoints.
+    """
+    if not filename:
+        return (None, {"ok": False, "error": "Missing filename"})
+
+    try:
+        target = _safe_target(root, subfolder, filename)
+    except ValueError as e:
+        return (None, {"ok": False, "error": f"Invalid path: {str(e)}"})
+
+    if not target.exists():
+        return (None, {"ok": False, "error": "File not found"})
+
+    return (target, None)
+
+
+# ---------------------------------------------------------------------------
 # In-memory cache for output listing
 # Avoids redoing a full os.scandir on every auto-refresh.
 # ---------------------------------------------------------------------------
@@ -135,24 +182,35 @@ _BATCH_ZIP_MAX_AGE_S = 3600.0
 
 try:
     _SCAN_MIN_INTERVAL = float(os.environ.get("MJR_SCAN_MIN_INTERVAL", "5.0"))
-except Exception:
+except (ValueError, TypeError) as e:
+    log.warning("[Majoor] Invalid MJR_SCAN_MIN_INTERVAL, using default: %s", e)
     _SCAN_MIN_INTERVAL = 5.0
 
 try:
     _FOLDER_CHECK_INTERVAL = float(os.environ.get("MJR_FOLDER_CHECK_INTERVAL", "2.0"))
-except Exception:
+except (ValueError, TypeError) as e:
+    log.warning("[Majoor] Invalid MJR_FOLDER_CHECK_INTERVAL, using default: %s", e)
     _FOLDER_CHECK_INTERVAL = 2.0
 
 try:
     _META_PREFETCH_COUNT = int(os.environ.get("MJR_META_PREFETCH_COUNT", "80"))
     if _META_PREFETCH_COUNT < 0:
         _META_PREFETCH_COUNT = 0
-except Exception:
+except (ValueError, TypeError) as e:
+    log.warning("[Majoor] Invalid MJR_META_PREFETCH_COUNT, using default: %s", e)
     _META_PREFETCH_COUNT = 80
 
 _CACHE_LOCK = threading.Lock()
 
 _ASYNCIO_SILENCER_INSTALLED = False
+_ASYNCIO_SILENCER_LOCK = threading.Lock()
+
+# Windows reserved filenames (security constant)
+_WINDOWS_RESERVED_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+})
 
 
 def _install_windows_asyncio_connection_reset_silencer() -> None:
@@ -162,38 +220,51 @@ def _install_windows_asyncio_connection_reset_silencer() -> None:
     with ConnectionResetError([WinError 10054]).
 
     This does not affect correctness, but it can confuse users and pollute logs.
+
+    FIX: Use lock to prevent race condition during handler installation.
     """
     global _ASYNCIO_SILENCER_INSTALLED
+
+    # Fast path: already installed
     if _ASYNCIO_SILENCER_INSTALLED:
         return
+
+    # Non-Windows fast path
     if sys.platform != "win32":
-        _ASYNCIO_SILENCER_INSTALLED = True
+        with _ASYNCIO_SILENCER_LOCK:
+            _ASYNCIO_SILENCER_INSTALLED = True
         return
 
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
-
-    previous = loop.get_exception_handler()
-
-    def _handler(loop: asyncio.AbstractEventLoop, context: Dict[str, Any]) -> None:
-        exc = context.get("exception")
-        msg = context.get("message") or ""
-        if (
-            isinstance(exc, ConnectionResetError)
-            and getattr(exc, "winerror", None) == 10054
-            and "_call_connection_lost" in str(msg)
-        ):
+    # Lock to prevent concurrent installation
+    with _ASYNCIO_SILENCER_LOCK:
+        # Double-check after acquiring lock
+        if _ASYNCIO_SILENCER_INSTALLED:
             return
 
-        if previous:
-            previous(loop, context)
-        else:
-            loop.default_exception_handler(context)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
 
-    loop.set_exception_handler(_handler)
-    _ASYNCIO_SILENCER_INSTALLED = True
+        previous = loop.get_exception_handler()
+
+        def _handler(loop: asyncio.AbstractEventLoop, context: Dict[str, Any]) -> None:
+            exc = context.get("exception")
+            msg = context.get("message") or ""
+            if (
+                isinstance(exc, ConnectionResetError)
+                and getattr(exc, "winerror", None) == 10054
+                and "_call_connection_lost" in str(msg)
+            ):
+                return
+
+            if previous:
+                previous(loop, context)
+            else:
+                loop.default_exception_handler(context)
+
+        loop.set_exception_handler(_handler)
+        _ASYNCIO_SILENCER_INSTALLED = True
 
 
 def _sanitize_batch_token(token: Optional[str]) -> Optional[str]:
@@ -218,8 +289,8 @@ def _cleanup_batch_zips(root: Path) -> None:
             try:
                 if isinstance(path, Path) and path.exists():
                     path.unlink()
-            except Exception:
-                pass
+            except (OSError, PermissionError) as e:
+                log.debug("[Majoor] Failed to delete batch zip cache file: %s", e)
             _BATCH_ZIP_CACHE.pop(token, None)
 
 
@@ -263,11 +334,13 @@ def _folder_changed(root_path: Path) -> bool:
                                 with os.scandir(entry.path) as sub:
                                     sub_count = sum(1 for _ in sub)
                                 sub_sig.append((entry.name, st.st_mtime, sub_count))
-                            except Exception:
+                            except (OSError, PermissionError):
+                                # Subdirectory inaccessible, use None for count
                                 sub_sig.append((entry.name, st.st_mtime, None))
                         else:
                             sub_sig.append((entry.name, st.st_mtime, None))
-            except Exception:
+            except (OSError, PermissionError) as e:
+                log.debug("[Majoor] Failed to read folder entry during signature: %s", e)
                 return None
             sub_sig.sort()
             return (total, max_m, tuple(sub_sig))
@@ -280,8 +353,9 @@ def _folder_changed(root_path: Path) -> bool:
             _LAST_FOLDER_SIGNATURE = sig
             return True
         return False
-    except Exception:
-        return True
+    except (OSError, PermissionError, AttributeError) as e:
+        log.debug("[Majoor] Error checking folder changes: %s", e)
+        return True  # Assume changed on error
 
 
 def _get_output_root() -> Path:
@@ -294,7 +368,9 @@ def _safe_target(root: Path, subfolder: str, filename: str) -> Path:
     Build a path under root while rejecting traversal/absolute components.
     - filename must be a plain name (no separators)
     - subfolder must be relative and free of '..'
-    - Additional security checks for null bytes, suspicious patterns, ADS
+    - Additional security checks for null bytes, suspicious patterns, ADS, UNC paths
+
+    FIX: Added UNC path detection to prevent bypassing is_absolute() check
     """
     if not filename:
         raise ValueError("Missing filename")
@@ -303,8 +379,13 @@ def _safe_target(root: Path, subfolder: str, filename: str) -> Path:
     if "\x00" in filename or (subfolder and "\x00" in subfolder):
         raise ValueError("Null byte in path")
 
+    # Security: Reject UNC paths (\\server\share or //server/share)
+    if (filename.startswith("\\\\") or filename.startswith("//") or
+        (subfolder and (subfolder.startswith("\\\\") or subfolder.startswith("//")))):
+        raise ValueError("UNC paths not allowed")
+
     # Security: Reject Windows Alternate Data Streams (ADS)
-    if platform.system() == "Windows":
+    if sys.platform == "win32":
         if ":" in filename or (subfolder and ":" in subfolder):
             # Allow drive letters in absolute paths but reject in filenames
             if not (len(filename) == 2 and filename[1] == ":"):
@@ -316,10 +397,7 @@ def _safe_target(root: Path, subfolder: str, filename: str) -> Path:
 
     # Security: Check for Windows reserved names
     base_name = filename.split('.')[0].upper()
-    windows_reserved = {"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4",
-                       "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2",
-                       "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"}
-    if base_name in windows_reserved:
+    if base_name in _WINDOWS_RESERVED_NAMES:
         raise ValueError("Invalid filename: Windows reserved name")
 
     sub = Path(subfolder) if subfolder else Path()
@@ -403,18 +481,19 @@ def _resolve_stage_collision(
     raise RuntimeError("Failed to generate a unique filename")
 
 
-def _metadata_target(path: Path, kind: str) -> Path:
-    """
-    Direct metadata target; no sidecar PNG fallback.
-    """
-    return path
-
-
-def _rating_tags_with_fallback(meta_target: Path, kind: str) -> tuple[int, List[str]]:
+def _rating_tags_with_fallback(meta_target: Path, kind: str, _cache: Optional[dict] = None) -> tuple[int, List[str]]:
     """
     Read rating/tags for a file, and for videos optionally fall back to a PNG sibling sidecar
     when both rating and tags are missing.
+
+    FIX: Added optional request-scoped cache parameter to prevent redundant reads within same request.
+    Pass a dict as _cache to enable caching for the request lifecycle.
     """
+    # Check request-scoped cache first
+    if _cache is not None:
+        cache_key = str(meta_target)
+        if cache_key in _cache:
+            return _cache[cache_key]
     sys_meta = get_system_metadata(str(meta_target)) or {}
     json_meta = load_metadata(str(meta_target)) or {}
 
@@ -445,7 +524,14 @@ def _rating_tags_with_fallback(meta_target: Path, kind: str) -> tuple[int, List[
         rating = 0
     if tags is None:
         tags = []
-    return rating, tags if isinstance(tags, list) else []
+
+    result = (rating, tags if isinstance(tags, list) else [])
+
+    # Store in request-scoped cache
+    if _cache is not None:
+        _cache[cache_key] = result
+
+    return result
 
 
 def _open_in_explorer(path: Path) -> bool:
@@ -622,6 +708,10 @@ def _scan_folder_recursive(base_path: str, subfolder: str, results: List[Dict[st
                         mtime = stat.st_mtime
                         size = stat.st_size
 
+                        # FIX: Convert mtime to milliseconds for frontend consistency
+                        # Frontend expects milliseconds (JavaScript Date uses ms)
+                        mtime_ms = int(mtime * 1000)
+
                         ext = (os.path.splitext(name)[1][1:] or "").upper()
 
                         rel_path = f"{subfolder}/{name}" if subfolder else name
@@ -633,7 +723,7 @@ def _scan_folder_recursive(base_path: str, subfolder: str, results: List[Dict[st
                             "name": name,
                             "subfolder": sub_clean,
                             "relpath": rel_path,
-                            "mtime": mtime,
+                            "mtime": mtime_ms,  # Send as milliseconds
                             "date": _format_date(mtime),
                             "size": size,
                             "size_readable": _format_size(size),
@@ -743,15 +833,20 @@ async def list_files(request: web.Request) -> web.Response:
     # Prefetch metadata for the first N items without delaying the response.
     # Only do this for the first paged request (offset=0, limit provided).
     # Uses asyncio.create_task for true non-blocking async execution.
+    # FIX: Create deep copy of items to avoid race condition with cache modifications
     prefetch_count = min(len(items), _META_PREFETCH_COUNT) if (paged and offset == 0) else 0
     if prefetch_count > 0:
         root = _get_output_root()
+        # Make a copy of items to prevent cache mutation race conditions
+        import copy
+        prefetch_items = copy.deepcopy(items[:prefetch_count])
 
         async def _prefetch_async():
             """Background task to prefetch metadata without blocking the response."""
             loop = asyncio.get_running_loop()
 
-            def _prefetch_one(f):
+            def _prefetch_one(f, original_f):
+                """Prefetch metadata and update original file dict with lock protection."""
                 try:
                     filename = f.get("filename") or f.get("name")
                     subfolder = f.get("subfolder", "")
@@ -763,12 +858,10 @@ async def list_files(request: web.Request) -> web.Response:
                     except ValueError:
                         return
                     kind = f.get("kind") or classify_ext(filename.lower())
-                    meta_target = _metadata_target(target, kind)
-                    if not meta_target.exists():
+                    # FIX: Removed dead code - _metadata_target was a no-op that just returned target
+                    if not target.exists():
                         return
-                    rating, tags = _rating_tags_with_fallback(meta_target, kind)
-                    f["rating"] = rating
-                    f["tags"] = tags
+                    rating, tags = _rating_tags_with_fallback(target, kind)
                     # Keep workflow dot accurate even when we mark __metaLoaded.
                     has_wf = False
                     if kind in ("image", "video"):
@@ -776,14 +869,20 @@ async def list_files(request: web.Request) -> web.Response:
                             has_wf = has_generation_workflow(meta_target)
                         except Exception:
                             has_wf = False
-                    f["has_workflow"] = has_wf
-                    f["__metaLoaded"] = True
+
+                    # Update original with lock to prevent race conditions
+                    with _CACHE_LOCK:
+                        original_f["rating"] = rating
+                        original_f["tags"] = tags
+                        original_f["has_workflow"] = has_wf
+                        original_f["__metaLoaded"] = True
                 except Exception:
                     pass
 
-            # Process items in parallel batches
-            for f in items[:prefetch_count]:
-                await loop.run_in_executor(None, _prefetch_one, f)
+            # Process items in parallel batches with reference to original
+            for idx, f in enumerate(prefetch_items):
+                if idx < len(items):
+                    await loop.run_in_executor(None, _prefetch_one, f, items[idx])
 
         # Schedule background task without blocking
         asyncio.create_task(_prefetch_async())
@@ -811,10 +910,11 @@ async def batch_metadata(request: web.Request) -> web.Response:
         return size_error
 
     root = _get_output_root()
-    try:
-        payload = await request.json()
-    except Exception:
-        return _json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+
+    # FIX: Use specific exception types instead of bare except
+    payload, error_response = await _parse_json_payload(request)
+    if error_response:
+        return error_response
 
     items = payload.get("items") or []
 
@@ -827,6 +927,9 @@ async def batch_metadata(request: web.Request) -> web.Response:
         )
 
     loop = asyncio.get_running_loop()
+
+    # FIX: Create request-scoped cache to prevent redundant metadata reads
+    request_cache: Dict[str, tuple[int, List[str]]] = {}
 
     def _fetch_one(item: Dict[str, Any]) -> Dict[str, Any]:
         filename = (item or {}).get("filename")
@@ -848,13 +951,13 @@ async def batch_metadata(request: web.Request) -> web.Response:
             return result
 
         kind = classify_ext(filename.lower())
-        meta_target = _metadata_target(target, kind)
-        rating, tags = _rating_tags_with_fallback(meta_target, kind)
+        # FIX: Pass request-scoped cache to prevent redundant reads in batch
+        rating, tags = _rating_tags_with_fallback(target, kind, _cache=request_cache)
 
         has_wf = False
         if kind in ("image", "video"):
             try:
-                has_wf = has_generation_workflow(meta_target)
+                has_wf = has_generation_workflow(target)
             except Exception:
                 has_wf = False
 
@@ -873,21 +976,33 @@ async def batch_metadata(request: web.Request) -> web.Response:
     max_workers_env = os.environ.get("MJR_META_BATCH_WORKERS")
     try:
         max_workers_cfg = int(max_workers_env) if max_workers_env is not None else None
-    except Exception:
+    except (ValueError, TypeError):
         max_workers_cfg = None
     max_workers = max(1, max_workers_cfg) if max_workers_cfg else 4
 
+    # FIX: Track exceptions properly and log failures
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(_fetch_one, itm) for itm in items]
-        for fut in concurrent.futures.as_completed(futures):
+        # Map futures to original items for better error reporting
+        future_to_item = {pool.submit(_fetch_one, itm): itm for itm in items}
+
+        for fut in concurrent.futures.as_completed(future_to_item):
+            item = future_to_item[fut]
             try:
                 res = fut.result()
                 if res.get("error"):
                     errors.append({"filename": res.get("filename"), "error": res.get("error")})
                 elif res.get("filename"):
                     results.append(res)
-            except Exception:
-                continue
+            except Exception as e:
+                # Log the exception and add to errors instead of silently continuing
+                filename = item.get("filename", "unknown")
+                error_msg = f"Worker exception: {type(e).__name__}: {str(e)}"
+                log.warning("[Majoor] Batch metadata worker failed for %s: %s", filename, error_msg)
+                errors.append({"filename": filename, "error": error_msg})
+
+    # Log summary if there were failures
+    if errors:
+        log.info("[Majoor] Batch metadata completed: %d success, %d errors", len(results), len(errors))
 
     return _json_response({"ok": True, "metadatas": results, "errors": errors})
 
@@ -1271,16 +1386,12 @@ async def get_metadata(request: web.Request) -> web.Response:
     filename = request.query.get("filename")
     subfolder = request.query.get("subfolder", "")
 
-    if not filename:
-        return _json_response({"ok": False, "error": "missing filename"}, status=400)
-
-    try:
-        target = _safe_target(root, subfolder, filename)
-    except ValueError:
-        return _json_response({"ok": False, "error": "File is outside output directory"}, status=400)
-
-    if not target.exists():
-        return _json_response({"ok": False, "error": "File not found"}, status=404)
+    # FIX: Use validation helper to reduce code duplication
+    target, error = _validate_file_path(root, filename, subfolder)
+    if error:
+        # Map error to appropriate status code
+        status = 404 if "not found" in error["error"].lower() else 400
+        return _json_response(error, status=status)
 
     def _extract_generation(path: Path) -> Dict[str, Any]:
         def _extract_one(p: Path) -> Dict[str, Any]:

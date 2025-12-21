@@ -16,12 +16,14 @@ from .metadata.workflow_reconstruct import prompt_graph_to_workflow as _prompt_g
 
 try:
     from PIL import Image  # type: ignore
-except Exception:  # Pillow non dispo -> pas de parsing PNG
+except ImportError:
+    # Pillow not available - PNG parsing will be disabled
     Image = None
 try:
     from .utils import load_metadata, _get_exiftool_path  # type: ignore
-except Exception:
-    load_metadata = None  # sidecar fallback option
+except ImportError:
+    # Utils not available - sidecar fallback disabled
+    load_metadata = None
     _get_exiftool_path = None
 
 
@@ -158,7 +160,8 @@ def _extract_json_like_from_text(text: str) -> List[str]:
 def _parse_candidate_json(s: str):
     try:
         return json.loads(s)
-    except Exception:
+    except (json.JSONDecodeError, ValueError, TypeError):
+        # Not valid JSON or wrong type
         pass
 
     # Some tools stash JSON into a text field but escape quotes, e.g.:
@@ -191,14 +194,14 @@ def _parse_candidate_json(s: str):
     for _ in range(2):
         try:
             unescaped = json.loads(_wrap_as_json_string(candidate))
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             return None
         if not isinstance(unescaped, str) or not unescaped:
             return None
         candidate = unescaped
         try:
             return json.loads(candidate)
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             continue
 
     return None
@@ -225,7 +228,28 @@ def _detect_workflow(obj) -> Optional[Dict[str, Any]]:
 
 def _scan_png_info_for_generation(info: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
-    Scan all info entries for prompt/workflow JSON stored in alternative fields.
+    Scan PNG metadata for ComfyUI prompt/workflow by recursively searching all fields.
+
+    This function handles various storage formats:
+    - Standard ComfyUI fields: 'prompt', 'workflow', 'extra_pnginfo'
+    - Alternative fields: 'parameters', 'comment', 'description', 'usercomment'
+    - Nested JSON: Handles escaped JSON strings (e.g., "{\"prompt\": ...}")
+    - Multiple layers: Recursively scans up to reasonable depth
+
+    Args:
+        info: PNG metadata dictionary from PIL Image.info or similar
+
+    Returns:
+        Tuple of (prompt_graph, workflow):
+        - prompt_graph: Dict with node IDs as keys, containing 'class_type' and 'inputs'
+        - workflow: Dict with 'nodes', 'links', 'last_node_id', etc.
+
+    Example:
+        >>> from PIL import Image
+        >>> img = Image.open("output.png")
+        >>> prompt, workflow = _scan_png_info_for_generation(img.info)
+        >>> if prompt:
+        ...     print(f"Found {len(prompt)} nodes in prompt graph")
     """
     prompt_found = None
     workflow_found = None
@@ -459,16 +483,37 @@ def _resolve_through_reroutes(
     max_depth: int = 50
 ) -> Optional[str]:
     """
-    Resolve through Reroute, SetNode, and GetNode to find the actual source node.
+    Resolve ComfyUI graph indirections (Reroute, SetNode, GetNode) to find actual source node.
+
+    ComfyUI workflows can use indirection nodes:
+    - Reroute: Simple passthrough that redirects connections
+    - SetNode/GetNode: Variable storage (Set stores, Get retrieves by name)
+    - Primitive: Value nodes that may wrap other connections
+
+    This function traverses the graph following these connections until it finds
+    a concrete node (like KSampler, CLIPTextEncode, etc.) or hits max depth.
 
     Args:
-        prompt_graph: The workflow graph
-        node_id: Starting node ID
-        input_name: Input field to follow (default "value" for Reroute)
-        max_depth: Maximum traversal depth to prevent infinite loops
+        prompt_graph: ComfyUI prompt graph (dict of node_id -> node_data)
+        node_id: Starting node ID to resolve from
+        input_name: Which input field to follow (default "value" for Reroute)
+        max_depth: Maximum traversal depth to prevent infinite loops (default 50)
 
     Returns:
-        The resolved node ID, or None if not resolvable
+        The resolved node ID (str) pointing to actual node, or None if unresolvable
+
+    Example:
+        >>> prompt = {"1": {"class_type": "Reroute", "inputs": {"value": ["2", 0]}},
+        ...           "2": {"class_type": "KSampler", "inputs": {...}}}
+        >>> _resolve_through_reroutes(prompt, "1")
+        "2"  # Resolved through Reroute to KSampler
+
+    Graph Traversal:
+        Node 1 (GetNode "my_model")
+          ↓
+        Node 5 (SetNode "my_model" <- ["10", 0])
+          ↓
+        Node 10 (CheckpointLoaderSimple)  ← Final resolution
     """
     if node_id is None:
         return None

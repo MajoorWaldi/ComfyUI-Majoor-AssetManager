@@ -278,7 +278,9 @@ def _extract_json_from_video(path: Path) -> Tuple[Optional[Dict[str, Any]], Opti
     # 1) ExifTool (best coverage for container/user metadata)
     # 2) ffprobe (format/stream tags)
     # 3) Windows Property System (Explorer properties like Comment)
+    # FIX: Use subprocess.run with proper cleanup instead of check_output
     if exe and not (found_prompt and found_workflow):
+        proc = None
         try:
             cmd = [
                 exe,
@@ -296,11 +298,20 @@ def _extract_json_from_video(path: Path) -> Tuple[Optional[Dict[str, Any]], Opti
                 "-ItemList:UserComment",
                 str(path),
             ]
-            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=exif_timeout)
-            data_list = json.loads(out) if out else []
-            if data_list:
-                recursive_scan(data_list[0])
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=exif_timeout,
+                check=False
+            )
+            if proc.returncode == 0 and proc.stdout:
+                data_list = json.loads(proc.stdout)
+                if data_list:
+                    recursive_scan(data_list[0])
         except subprocess.TimeoutExpired:
+            if proc:
+                proc.kill()
+                proc.wait()
             log.warning(
                 "[Majoor] ExifTool (light) timeout on %s after %ss",
                 path.name,
@@ -308,26 +319,53 @@ def _extract_json_from_video(path: Path) -> Tuple[Optional[Dict[str, Any]], Opti
             )
         except Exception:
             pass
+        finally:
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                    proc.wait()
+                except Exception:
+                    pass
 
     if exe and not (found_prompt and found_workflow):
+        proc = None
         try:
             cmd = [exe, "-j", "-g", "-ee", str(path)]
-            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=exif_timeout)
-            data_list = json.loads(out) if out else []
-            if data_list:
-                recursive_scan(data_list[0])
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=exif_timeout,
+                check=False
+            )
+            if proc.returncode == 0 and proc.stdout:
+                data_list = json.loads(proc.stdout)
+                if data_list:
+                    recursive_scan(data_list[0])
         except subprocess.TimeoutExpired:
+            if proc:
+                proc.kill()
+                proc.wait()
             log.warning(
                 "[Majoor] ExifTool timeout on %s after %ss",
                 path.name,
                 exif_timeout,
             )
-        except Exception as e:
+        except (json.JSONDecodeError, OSError) as e:
             log.warning("[Majoor] ExifTool error on %s: %s", path.name, e)
+        except Exception as e:
+            log.warning("[Majoor] ExifTool unexpected error on %s: %s", path.name, e)
+        finally:
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                    proc.wait()
+                except Exception:
+                    pass
 
     if not found_prompt and not found_workflow:
         ffprobe = shutil.which("ffprobe")
         if ffprobe:
+            proc = None
             try:
                 cmd = [
                     ffprobe,
@@ -339,20 +377,38 @@ def _extract_json_from_video(path: Path) -> Tuple[Optional[Dict[str, Any]], Opti
                     "format_tags:stream_tags",
                     str(path),
                 ]
-                out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=ffprobe_timeout)
-                data = json.loads(out) if out else {}
-                tags = (data.get("format") or {}).get("tags") or {}
-                recursive_scan(tags)
-                for stream in data.get("streams") or []:
-                    recursive_scan(stream.get("tags") or {})
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    timeout=ffprobe_timeout,
+                    check=False
+                )
+                if proc.returncode == 0 and proc.stdout:
+                    data = json.loads(proc.stdout)
+                    tags = (data.get("format") or {}).get("tags") or {}
+                    recursive_scan(tags)
+                    for stream in data.get("streams") or []:
+                        recursive_scan(stream.get("tags") or {})
             except subprocess.TimeoutExpired:
+                if proc:
+                    proc.kill()
+                    proc.wait()
                 log.warning(
                     "[Majoor] ffprobe timeout on %s after %ss",
                     path.name,
                     ffprobe_timeout,
                 )
-            except Exception as e:
+            except (json.JSONDecodeError, OSError) as e:
                 log.warning("[Majoor] ffprobe error on %s: %s", path.name, e)
+            except Exception as e:
+                log.warning("[Majoor] ffprobe unexpected error on %s: %s", path.name, e)
+            finally:
+                if proc and proc.returncode is None:
+                    try:
+                        proc.kill()
+                        proc.wait()
+                    except Exception:
+                        pass
 
     if not found_prompt and not found_workflow and os.name == "nt":
         try:

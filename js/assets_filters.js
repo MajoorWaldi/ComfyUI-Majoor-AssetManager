@@ -1,14 +1,19 @@
 import { detectKindFromExt, getExt } from "./ui_settings.js";
 
+// FIX: Backend now sends mtime in milliseconds, so no conversion needed
+// Keep function for compatibility but make it simpler
 export const normalizeMtimeValue = (mtime) => {
-  const n = Number(mtime || 0);
-  return n < 100000000000 ? n * 1000 : n;
+  // Backend sends milliseconds since epoch, just ensure it's a number
+  return Number(mtime || 0);
 };
 
 export const normalizeMtimeOnList = (files) => {
+  // No longer needed since backend sends correct format, but keep for compatibility
   if (!Array.isArray(files)) return;
   files.forEach((f) => {
-    f.mtime = normalizeMtimeValue(f.mtime);
+    if (f.mtime) {
+      f.mtime = normalizeMtimeValue(f.mtime);
+    }
   });
 };
 
