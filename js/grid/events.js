@@ -472,7 +472,7 @@ export function ensureVideoNodeDropBridge() {
           filename,
           subfolder,
           from_type: "output",
-          dest_subfolder: "_mjr_drop",
+          dest_subfolder: "",
           collision_policy: "rename",
         }),
       });
@@ -491,8 +491,8 @@ export function ensureVideoNodeDropBridge() {
 
     const relativePath = String(stageResp?.relative_path || "");
     const stagedName = stageResp?.filename || stageResp?.name || filename;
-    const respSub = stageResp?.dest_subfolder || "_mjr_drop";
-    const injectedPath = relativePath || `${respSub}/${stagedName}`;
+    const respSub = stageResp?.dest_subfolder ?? "";
+    const injectedPath = relativePath || (respSub ? `${respSub}/${stagedName}` : stagedName);
     mjrDbg("DnD stage_to_input response", stageResp);
 
     if (!injectedPath) {

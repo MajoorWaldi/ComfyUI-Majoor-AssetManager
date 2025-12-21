@@ -940,7 +940,7 @@ async def stage_to_input(request: web.Request) -> web.Response:
         "filename": "xxx.mp4",
         "subfolder": "optional/subfolder",
         "from_type": "output",
-        "dest_subfolder": "_mjr_drop",
+        "dest_subfolder": "_mjr_drop" | "",
         "collision_policy": "rename" | "overwrite" | "error"
       }
     """
@@ -953,7 +953,11 @@ async def stage_to_input(request: web.Request) -> web.Response:
     filename = payload.get("filename")
     subfolder = payload.get("subfolder", "") or ""
     from_type = (payload.get("from_type") or "output").lower().strip()
-    dest_subfolder = payload.get("dest_subfolder", "_mjr_drop") or "_mjr_drop"
+    dest_subfolder = payload.get("dest_subfolder", None)
+    if dest_subfolder is None:
+        dest_subfolder = "_mjr_drop"
+    else:
+        dest_subfolder = str(dest_subfolder)
     collision_policy = payload.get("collision_policy", "rename") or "rename"
 
     if not filename:
