@@ -24,6 +24,7 @@ import {
   mjrStepVideos,
   mjrApplyOpenViewerSettings,
   mjrUpdateNavVisibility,
+  mjrCleanupViewerGlobalListeners,
 } from "./ui_viewer.js";
 import { createMetadataSidebar } from "./ui_sidebar.js";
 import { createGridView } from "./ui_gridview.js";
@@ -715,6 +716,13 @@ function renderAssetsManager(root) {
   root.__mjrCleanup = () => {
     root.__mjrCleanup = null;
     mjrGlobalState.instances.delete(instance);
+    if (mjrGlobalState.instances.size === 0) {
+      try {
+        mjrCleanupViewerGlobalListeners?.();
+      } catch (err) {
+        console.warn("[Majoor.AssetsManager] viewer cleanup failed", err);
+      }
+    }
     cleanups.forEach(c => c());
     cleanupsExternal.forEach((c) => c());
   };

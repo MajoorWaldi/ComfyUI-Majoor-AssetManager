@@ -35,7 +35,13 @@ export function createGridView(deps) {
     const total = Number.isFinite(state.filesTotal) ? state.filesTotal : loaded;
     const totalText = total && total !== loaded ? `/${total}` : "";
     const moreText = state.filesHasMore ? " (more...)" : "";
-    statusEl.textContent = `${state.filtered.length}/${loaded}${totalText} items${moreText} - ${state.selected.size} selected`;
+
+    // Add metadata hydration indicator
+    const hydratingText = state.metaHydrating
+      ? ` - Hydrating metadata ${state.metaHydrationPercent || 0}%`
+      : "";
+
+    statusEl.textContent = `${state.filtered.length}/${loaded}${totalText} items${moreText} - ${state.selected.size} selected${hydratingText}`;
   };
 
   const clearAllSelection = () => {

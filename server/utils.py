@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import time
 import unicodedata
+import threading
 from collections import OrderedDict
 from typing import Dict, List, Optional
 from .config import ENABLE_JSON_SIDECAR, METADATA_EXT
@@ -62,23 +63,53 @@ except Exception:
 
 _META_CACHE: OrderedDict[str, tuple[Optional[float], int, dict]] = OrderedDict()
 _CACHE_EPOCH = 0
+_CACHE_LOCK = threading.Lock()
 
 log = get_logger(__name__)
+
+
+def _get_cache_epoch() -> int:
+    with _CACHE_LOCK:
+        return _CACHE_EPOCH
+
+
+def _next_cache_epoch() -> int:
+    global _CACHE_EPOCH
+    with _CACHE_LOCK:
+        _CACHE_EPOCH += 1
+        return _CACHE_EPOCH
+
+
+def _bump_cache_epoch_if(expected: int) -> int:
+    global _CACHE_EPOCH
+    with _CACHE_LOCK:
+        if _CACHE_EPOCH == expected:
+            _CACHE_EPOCH += 1
+        return _CACHE_EPOCH
+
+
+def _cache_get(file_path: str, mtime: Optional[float], epoch: int) -> Optional[dict]:
+    with _CACHE_LOCK:
+        cached = _META_CACHE.get(file_path)
+        if cached and cached[0] == mtime and cached[1] == epoch:
+            return dict(cached[2])
+    return None
 
 
 def _cache_set(file_path: str, mtime: Optional[float], epoch: int, meta: dict) -> None:
     """
     Add or update an entry in the LRU metadata cache with automatic eviction.
     """
-    # Move to end if already exists (LRU update)
-    if file_path in _META_CACHE:
-        _META_CACHE.move_to_end(file_path)
+    with _CACHE_LOCK:
+        # Move to end if already exists (LRU update)
+        if file_path in _META_CACHE:
+            _META_CACHE.move_to_end(file_path)
 
-    _META_CACHE[file_path] = (mtime, epoch, meta)
+        _META_CACHE[file_path] = (mtime, epoch, meta)
 
-    # Evict oldest entries if cache exceeds max size
-    while len(_META_CACHE) > _META_CACHE_MAX_SIZE:
-        _META_CACHE.popitem(last=False)  # Remove oldest (FIFO when not accessed)
+        # Evict oldest entries if cache exceeds max size
+        while len(_META_CACHE) > _META_CACHE_MAX_SIZE:
+            _META_CACHE.popitem(last=False)  # Remove oldest (FIFO when not accessed)
 
 
 def _env_timeout(name: str, default: float, min_s: float = 0.5, max_s: float = 60.0) -> float:
@@ -152,39 +183,45 @@ def _set_windows_property_store(file_path: str, rating: int, tags, *, clear_tags
         from win32com.propsys import propsys, pscon  # type: ignore
 
         pythoncom.CoInitialize()
-        store = propsys.SHGetPropertyStoreFromParsingName(file_path, None, pscon.GPS_READWRITE)
-        # System.Rating expects 0..99
-        percent = rating_to_windows_percent(rating)
-        store.SetValue(pscon.PKEY_Rating, percent)
-        # Explorer's "Shared User Rating" can map to different property keys depending on handlers.
-        media_key = getattr(pscon, "PKEY_ShareUserRating", None) or getattr(pscon, "PKEY_Media_UserRating", None)
-        if media_key is not None:
+        try:
+            store = propsys.SHGetPropertyStoreFromParsingName(file_path, None, pscon.GPS_READWRITE)
+            # System.Rating expects 0..99
+            percent = rating_to_windows_percent(rating)
+            store.SetValue(pscon.PKEY_Rating, percent)
+            # Explorer's "Shared User Rating" can map to different property keys depending on handlers.
+            media_key = getattr(pscon, "PKEY_ShareUserRating", None) or getattr(pscon, "PKEY_Media_UserRating", None)
+            if media_key is not None:
+                try:
+                    store.SetValue(media_key, percent)
+                except Exception:
+                    pass
+
+            if tags is not None:
+                tags_list = _normalize_tags(tags)
+                cat_key = getattr(pscon, "PKEY_Category", None)
+                if tags_list:
+                    # For videos, Explorer commonly shows tags under "Category/Categories".
+                    if cat_key is not None:
+                        try:
+                            store.SetValue(cat_key, tuple(tags_list))
+                        except Exception:
+                            pass
+                    store.SetValue(pscon.PKEY_Keywords, tuple(tags_list))
+                elif clear_tags:
+                    if cat_key is not None:
+                        try:
+                            store.SetValue(cat_key, tuple())
+                        except Exception:
+                            pass
+                    store.SetValue(pscon.PKEY_Keywords, tuple())
+
+            store.Commit()
+            return True
+        finally:
             try:
-                store.SetValue(media_key, percent)
+                pythoncom.CoUninitialize()
             except Exception:
                 pass
-
-        if tags is not None:
-            tags_list = _normalize_tags(tags)
-            cat_key = getattr(pscon, "PKEY_Category", None)
-            if tags_list:
-                # For videos, Explorer commonly shows tags under "Category/Categories".
-                if cat_key is not None:
-                    try:
-                        store.SetValue(cat_key, tuple(tags_list))
-                    except Exception:
-                        pass
-                store.SetValue(pscon.PKEY_Keywords, tuple(tags_list))
-            elif clear_tags:
-                if cat_key is not None:
-                    try:
-                        store.SetValue(cat_key, tuple())
-                    except Exception:
-                        pass
-                store.SetValue(pscon.PKEY_Keywords, tuple())
-
-        store.Commit()
-        return True
     except Exception:
         return False
 
@@ -201,46 +238,52 @@ def _get_windows_property_store(file_path: str) -> dict:
         from win32com.propsys import propsys, pscon  # type: ignore
 
         pythoncom.CoInitialize()
-        store = propsys.SHGetPropertyStoreFromParsingName(file_path, None, pscon.GPS_BESTEFFORT)
-
-        rating_raw = None
         try:
-            rating_raw = store.GetValue(pscon.PKEY_Rating).GetValue()
-        except Exception:
+            store = propsys.SHGetPropertyStoreFromParsingName(file_path, None, pscon.GPS_BESTEFFORT)
+
             rating_raw = None
-        if rating_raw is None:
-            media_key = getattr(pscon, "PKEY_ShareUserRating", None) or getattr(pscon, "PKEY_Media_UserRating", None)
-            if media_key is not None:
+            try:
+                rating_raw = store.GetValue(pscon.PKEY_Rating).GetValue()
+            except Exception:
+                rating_raw = None
+            if rating_raw is None:
+                media_key = getattr(pscon, "PKEY_ShareUserRating", None) or getattr(pscon, "PKEY_Media_UserRating", None)
+                if media_key is not None:
+                    try:
+                        rating_raw = store.GetValue(media_key).GetValue()
+                    except Exception:
+                        rating_raw = None
+
+            rating = windows_percent_to_stars(int(rating_raw)) if rating_raw is not None else 0
+
+            tags: List[str] = []
+            cat_key = getattr(pscon, "PKEY_Category", None)
+            if cat_key is not None:
                 try:
-                    rating_raw = store.GetValue(media_key).GetValue()
+                    cat_val = store.GetValue(cat_key).GetValue()
+                    if isinstance(cat_val, (list, tuple)):
+                        tags = _normalize_tags(list(cat_val))
+                    elif isinstance(cat_val, str):
+                        tags = _normalize_tags(cat_val)
                 except Exception:
-                    rating_raw = None
+                    tags = []
 
-        rating = windows_percent_to_stars(int(rating_raw)) if rating_raw is not None else 0
+            if not tags:
+                try:
+                    kw_val = store.GetValue(pscon.PKEY_Keywords).GetValue()
+                    if isinstance(kw_val, (list, tuple)):
+                        tags = _normalize_tags(list(kw_val))
+                    elif isinstance(kw_val, str):
+                        tags = _normalize_tags(kw_val)
+                except Exception:
+                    tags = []
 
-        tags: List[str] = []
-        cat_key = getattr(pscon, "PKEY_Category", None)
-        if cat_key is not None:
+            return {"rating": rating, "tags": tags}
+        finally:
             try:
-                cat_val = store.GetValue(cat_key).GetValue()
-                if isinstance(cat_val, (list, tuple)):
-                    tags = _normalize_tags(list(cat_val))
-                elif isinstance(cat_val, str):
-                    tags = _normalize_tags(cat_val)
+                pythoncom.CoUninitialize()
             except Exception:
-                tags = []
-
-        if not tags:
-            try:
-                kw_val = store.GetValue(pscon.PKEY_Keywords).GetValue()
-                if isinstance(kw_val, (list, tuple)):
-                    tags = _normalize_tags(list(kw_val))
-                elif isinstance(kw_val, str):
-                    tags = _normalize_tags(kw_val)
-            except Exception:
-                tags = []
-
-        return {"rating": rating, "tags": tags}
+                pass
     except Exception:
         return {}
 
@@ -557,9 +600,7 @@ def set_exif_metadata(file_path: str, rating: int, tags: list) -> bool:
     if not exe:
         return False
 
-    global _CACHE_EPOCH
-    _CACHE_EPOCH += 1
-    epoch = _CACHE_EPOCH
+    epoch = _next_cache_epoch()
     original_mtime = _get_mtime_safe(file_path)
     is_video = file_path.lower().endswith((".mp4", ".mov", ".m4v", ".webm", ".mkv"))
 
@@ -724,7 +765,6 @@ def set_exif_metadata(file_path: str, rating: int, tags: list) -> bool:
 
 def set_windows_metadata(file_path: str, rating: int, tags: list) -> bool:
     """Write metadata via the Windows Shell API."""
-    global _CACHE_EPOCH
     try:
         win32com = safe_import_win32com()
         if not win32com:
@@ -742,8 +782,7 @@ def set_windows_metadata(file_path: str, rating: int, tags: list) -> bool:
                 except Exception:
                     pass
 
-            _CACHE_EPOCH += 1
-            epoch = _CACHE_EPOCH
+            epoch = _next_cache_epoch()
             _cache_set(
                 file_path,
                 original_mtime if original_mtime is not None else _get_mtime_safe(file_path),
@@ -779,8 +818,7 @@ def set_windows_metadata(file_path: str, rating: int, tags: list) -> bool:
             except Exception:
                 pass
 
-        _CACHE_EPOCH += 1
-        epoch = _CACHE_EPOCH
+        epoch = _next_cache_epoch()
         _cache_set(
             file_path,
             original_mtime if original_mtime is not None else _get_mtime_safe(file_path),
@@ -848,8 +886,7 @@ def update_metadata_with_windows(file_path: str, updates: dict) -> dict:
     Update rating/tags via Windows + sidecar (if enabled).
     Returns final metadata.
     """
-    global _CACHE_EPOCH
-    start_epoch = _CACHE_EPOCH
+    start_epoch = _get_cache_epoch()
 
     # Load current values (prefer system metadata, fallback to sidecar)
     sys_meta = get_system_metadata(file_path) or {}
@@ -915,12 +952,14 @@ def update_metadata_with_windows(file_path: str, updates: dict) -> dict:
     effective_tags = target_tags
 
     # Ensure cache invalidates even when mtime is preserved (Windows/ExifTool writes).
-    if (ok_win or ok_exif or sidecar_saved) and _CACHE_EPOCH == start_epoch:
-        _CACHE_EPOCH += 1
+    if ok_win or ok_exif or sidecar_saved:
+        epoch = _bump_cache_epoch_if(start_epoch)
+    else:
+        epoch = _get_cache_epoch()
     _cache_set(
         file_path,
         _get_mtime_safe(file_path),
-        _CACHE_EPOCH,
+        epoch,
         {"rating": _coerce_rating_to_stars(effective_rating), "tags": _normalize_tags(effective_tags)},
     )
     return {"rating": effective_rating, "tags": effective_tags}
@@ -930,8 +969,7 @@ def apply_system_metadata(file_path: str, rating, tags: list) -> dict:
     """
     Try exiftool first (if installed), otherwise Windows Shell.
     """
-    global _CACHE_EPOCH
-    start_epoch = _CACHE_EPOCH
+    start_epoch = _get_cache_epoch()
     rating_int = _coerce_rating_to_stars(rating)
     tags_list = _normalize_tags(tags)
 
@@ -941,9 +979,8 @@ def apply_system_metadata(file_path: str, rating, tags: list) -> dict:
 
     # fallback shell API
     meta = apply_windows_metadata(file_path, rating_int, tags_list)
-    if _CACHE_EPOCH == start_epoch:
-        _CACHE_EPOCH += 1
-        _cache_set(file_path, _get_mtime_safe(file_path), _CACHE_EPOCH, meta)
+    epoch = _bump_cache_epoch_if(start_epoch)
+    _cache_set(file_path, _get_mtime_safe(file_path), epoch, meta)
     return meta
 
 
@@ -952,23 +989,24 @@ def get_system_metadata(file_path: str) -> dict:
     Prefer ExifTool metadata (Rating/Keywords), otherwise Windows API.
     """
     mtime = _get_mtime_safe(file_path)
-    cached = _META_CACHE.get(file_path)
-    if cached and cached[0] == mtime and cached[1] == _CACHE_EPOCH:
-        return dict(cached[2])
+    epoch = _get_cache_epoch()
+    cached = _cache_get(file_path, mtime, epoch)
+    if cached is not None:
+        return cached
 
     meta = get_exif_metadata(file_path)
     # For videos, ExifTool is the source of truth (Explorer can be inconsistent across handlers).
     if file_path.lower().endswith(VIDEO_EXTS) and meta:
-        _cache_set(file_path, mtime, _CACHE_EPOCH, meta)
+        _cache_set(file_path, mtime, _get_cache_epoch(), meta)
         return meta
 
     if meta.get("rating") or meta.get("tags"):
-        _cache_set(file_path, mtime, _CACHE_EPOCH, meta)
+        _cache_set(file_path, mtime, _get_cache_epoch(), meta)
         return meta
 
     meta = get_windows_metadata(file_path)
     if (meta.get("rating") or meta.get("tags")) and not (meta.get("rating") == 0 and not meta.get("tags")):
-        _cache_set(file_path, mtime, _CACHE_EPOCH, meta)
+        _cache_set(file_path, mtime, _get_cache_epoch(), meta)
         return meta
 
     # Sidecar fallback only when enabled/forced
@@ -978,10 +1016,10 @@ def get_system_metadata(file_path: str) -> dict:
             r = sidecar.get("rating", 0)
             t = sidecar.get("tags", [])
             meta = {"rating": r if isinstance(r, int) else 0, "tags": t if isinstance(t, list) else []}
-            _cache_set(file_path, mtime, _CACHE_EPOCH, meta)
+            _cache_set(file_path, mtime, _get_cache_epoch(), meta)
             return meta
 
-    _cache_set(file_path, mtime, _CACHE_EPOCH, meta)
+    _cache_set(file_path, mtime, _get_cache_epoch(), meta)
     return meta
 
 

@@ -452,6 +452,94 @@ def parse_a1111_parameters(text: str) -> Dict[str, Any]:
     return result
 
 
+def _resolve_through_reroutes(
+    prompt_graph: Dict[str, Any],
+    node_id: Optional[str],
+    input_name: str = "value",
+    max_depth: int = 50
+) -> Optional[str]:
+    """
+    Resolve through Reroute, SetNode, and GetNode to find the actual source node.
+
+    Args:
+        prompt_graph: The workflow graph
+        node_id: Starting node ID
+        input_name: Input field to follow (default "value" for Reroute)
+        max_depth: Maximum traversal depth to prevent infinite loops
+
+    Returns:
+        The resolved node ID, or None if not resolvable
+    """
+    if node_id is None:
+        return None
+
+    visited = set()
+    current_id = str(node_id)
+    depth = 0
+
+    while depth < max_depth and current_id not in visited:
+        visited.add(current_id)
+        node = prompt_graph.get(current_id)
+
+        if not node:
+            return current_id  # Node not found, return what we have
+
+        node_type = str(node.get("class_type", "")).lower()
+
+        # Reroute node: follows the input connection
+        if node_type == "reroute":
+            inputs = node.get("inputs", {}) or {}
+            next_val = inputs.get("value") or inputs.get("input") or inputs.get("link")
+            next_id = _extract_link_node_id(next_val)
+            if next_id is None:
+                return current_id
+            current_id = next_id
+            depth += 1
+            continue
+
+        # GetNode: resolves to the corresponding SetNode's input
+        if node_type == "getnode" or "get" in node_type:
+            inputs = node.get("inputs", {}) or {}
+            # GetNode stores the variable name, find matching SetNode
+            var_name = inputs.get("variable") or inputs.get("name") or inputs.get("key")
+            if var_name:
+                # Search for SetNode with same variable name
+                for search_id, search_node in prompt_graph.items():
+                    search_type = str(search_node.get("class_type", "")).lower()
+                    if search_type == "setnode" or "set" in search_type:
+                        search_inputs = search_node.get("inputs", {}) or {}
+                        search_var = search_inputs.get("variable") or search_inputs.get("name") or search_inputs.get("key")
+                        if search_var == var_name:
+                            # Found matching SetNode, follow its input
+                            value_input = search_inputs.get("value") or search_inputs.get("input")
+                            next_id = _extract_link_node_id(value_input)
+                            if next_id:
+                                current_id = next_id
+                                depth += 1
+                                break
+                else:
+                    # No matching SetNode found
+                    return current_id
+                continue
+
+        # SetNode: follow the input value
+        if node_type == "setnode" or "set" in node_type:
+            inputs = node.get("inputs", {}) or {}
+            next_val = inputs.get("value") or inputs.get("input")
+            next_id = _extract_link_node_id(next_val)
+            if next_id is None:
+                return current_id
+            current_id = next_id
+            depth += 1
+            continue
+
+        # Not a reroute/set/get node, this is the final node
+        return current_id
+
+    # Max depth reached or loop detected
+    return current_id
+
+
 def _extract_link_node_id(val: Any) -> Optional[str]:
     """
     Extract a node id from inputs shaped like:
@@ -1026,6 +1114,8 @@ def _walk_model_chain(
                 loras.append(l_entry)
 
             next_id = _extract_link_node_id(inputs.get("model"))
+            # Resolve through reroutes/set/get nodes
+            next_id = _resolve_through_reroutes(prompt_graph, next_id)
             if next_id is None:
                 break
             current_id = next_id
@@ -1033,6 +1123,8 @@ def _walk_model_chain(
 
         # --- Other links in the 'model' chain ---
         next_id = _extract_link_node_id(inputs.get("model"))
+        # Resolve through reroutes/set/get nodes
+        next_id = _resolve_through_reroutes(prompt_graph, next_id)
         if next_id is None:
             break
         current_id = next_id
@@ -1099,11 +1191,16 @@ def extract_generation_params_from_prompt_graph(
     return_with_leftover_noise = inputs.get("return_with_leftover_noise")
     add_noise = inputs.get("add_noise")
 
-    # Prompts
+    # Prompts - resolve through reroutes first
     pos_input = inputs.get("positive")
     neg_input = inputs.get("negative")
     pos_id = _extract_link_node_id(pos_input)
     neg_id = _extract_link_node_id(neg_input)
+
+    # Resolve through reroute/set/get nodes
+    pos_id = _resolve_through_reroutes(prompt_graph, pos_id)
+    neg_id = _resolve_through_reroutes(prompt_graph, neg_id)
+
     if pos_id is None and isinstance(pos_input, str):
         positive_prompt = pos_input
     else:
@@ -1121,11 +1218,13 @@ def extract_generation_params_from_prompt_graph(
         if not negative_prompt and collected.get("negative"):
             negative_prompt = " | ".join(collected["negative"])
 
-    # Model chain
+    # Model chain - resolve through reroutes first
     model_link_id = (
         _extract_link_node_id(inputs.get("model"))
         or _extract_link_node_id(inputs.get("guider"))
     )
+    # Resolve through reroute/set/get nodes
+    model_link_id = _resolve_through_reroutes(prompt_graph, model_link_id)
     model_name, vae_name, loras = _walk_model_chain(prompt_graph, model_link_id)
 
     reconstructed_from_prompt = False

@@ -39,6 +39,7 @@ const fileManagerStore = {
       );
 
       let added = false;
+      let addedCount = 0;
       newFiles.forEach((nf) => {
         const filename = nf?.filename;
         if (!filename || nf?.type !== "output") return;
@@ -64,10 +65,22 @@ const fileManagerStore = {
         state.files.push(fileObj);
         existingKeys.add(key);
         added = true;
+        addedCount += 1;
       });
 
       if (added) {
         sortFilesDeterministically(state.files);
+        if (Number.isFinite(state.filesTotal)) {
+          state.filesTotal += addedCount;
+        } else {
+          state.filesTotal = state.files.length;
+        }
+        if (Number.isFinite(state.filesNextOffset)) {
+          state.filesNextOffset += addedCount;
+        }
+        if (typeof state.filesHasMore !== "boolean") {
+          state.filesHasMore = state.files.length < state.filesTotal;
+        }
         if (typeof inst.applyFilterAndRender === "function") {
           inst.applyFilterAndRender();
         }
