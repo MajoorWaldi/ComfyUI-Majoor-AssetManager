@@ -1,3 +1,5 @@
+__pycache__/
+**/__pycache__/
 server/__pycache__/__init__.cpython-313.pyc
 server/__pycache__/config.cpython-312.pyc
 server/__pycache__/config.cpython-313.pyc
@@ -18,3 +20,19 @@ __pycache__/__init__.cpython-313.pyc
 server/__pycache__/collections_store.cpython-313.pyc
 server/__pycache__/metadata_generation.cpython-313.pyc
 .claude/settings.local.json
+server/__pycache__/workflow_hash.cpython-313.pyc
+server/__pycache__/index_db.cpython-313.pyc
+BUGFIXES_APPLIED.md
+IMPLEMENTATION_PLAN.md
+INTEGRATION_GUIDE.md
+PROGRESS_REPORT.md
+QUICKSTART.md
+README_V2.md
+test_api.ps1
+test_api.sh
+test_backend.py
+TESTING_GUIDE.md
+METADATA_CONFIG.md
+METADATA_IMPROVEMENTS_SUMMARY.md
+test_metadata_parsers.py
+BUGFIXES_METADATA_V2.md

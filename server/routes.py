@@ -47,6 +47,13 @@ from .collections_store import (
     remove_from_collection,
     save_collection,
 )
+from .index_db import (
+    get_index_status,
+    query_assets,
+    start_background_reindex,
+    reindex_paths,
+)
+from .workflow_hash import get_hash_algorithm_info
 
 log = get_logger(__name__)
 
@@ -1887,3 +1894,263 @@ async def health_check_collection_route(request: web.Request) -> web.Response:
     except Exception as e:
         log.error("[Majoor] Collection health check failed for '%s': %s", name, e)
         return _json_response({"ok": False, "error": str(e)}, status=500)
+
+
+# ===== Index Routes (SQLite Asset Index) =====
+
+@PromptServer.instance.routes.get("/mjr/filemanager/index/status")
+async def index_status_route(request: web.Request) -> web.Response:
+    """
+    Get current index status.
+
+    Returns:
+      {
+        "status": "idle|indexing|error",
+        "fts_available": true|false,
+        "last_scan": "2025-12-22T10:30:00" or null,
+        "total_assets": 50234,
+        "indexed_assets": 50234,
+        "backlog": 0,
+        "errors": [],
+        "freshness": "up_to_date|stale|unknown"
+      }
+    """
+    try:
+        status = await asyncio.to_thread(get_index_status)
+        return _json_response(status)
+    except Exception as e:
+        log.error("[Majoor] Failed to get index status: %s", e)
+        return _json_response({"status": "error", "error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.post("/mjr/filemanager/index/reindex")
+async def index_reindex_route(request: web.Request) -> web.Response:
+    """
+    Trigger reindexing of assets.
+
+    Payload:
+      {
+        "scope": "all" | "paths",
+        "paths": ["path1", "path2", ...]  // optional, required if scope="paths"
+      }
+
+    Returns:
+      {
+        "status": "started",
+        "job_id": "reindex_20251222_103045"
+      }
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return _json_response({"ok": False, "error": "Invalid JSON body"}, status=400)
+
+    scope = data.get("scope", "all")
+
+    if scope == "all":
+        # Start background reindex
+        await asyncio.to_thread(start_background_reindex)
+        return _json_response({
+            "status": "started",
+            "job_id": f"reindex_all_{int(time.time())}"
+        })
+    elif scope == "paths":
+        paths = data.get("paths", [])
+        if not paths:
+            return _json_response({"ok": False, "error": "No paths provided"}, status=400)
+
+        # Reindex specific paths (synchronous, but fast)
+        result = await asyncio.to_thread(reindex_paths, paths)
+        return _json_response({
+            "status": "completed",
+            "indexed": result["indexed"],
+            "skipped": result["skipped"],
+            "errors": result["errors"]
+        })
+    else:
+        return _json_response({"ok": False, "error": f"Invalid scope: {scope}"}, status=400)
+
+
+@PromptServer.instance.routes.get("/mjr/filemanager/index/query")
+async def index_query_route(request: web.Request) -> web.Response:
+    """
+    Query assets with filters and full-text search.
+
+    Query params:
+      - q: Full-text search query (requires FTS5)
+      - kind: Filter by type (image, video, audio, model3d, other)
+      - type: Filter by type (output, input, temp)
+      - subfolder: Filter by subfolder
+      - tags: Comma-separated tags (AND filter)
+      - rating_min: Minimum rating (0-5)
+      - has_workflow: 1 or 0
+      - workflow_hash: Exact workflow hash match
+      - sort: Sort order (mtime_desc, rating_desc, filename_asc, etc.)
+      - limit: Max results (default 100)
+      - offset: Pagination offset (default 0)
+
+    Returns:
+      {
+        "assets": [...],
+        "total": 1234,
+        "limit": 100,
+        "offset": 0
+      }
+    """
+    try:
+        params = request.rel_url.query
+
+        # Extract filters
+        filters = {}
+
+        if params.get("kind"):
+            filters["kind"] = params["kind"]
+
+        if params.get("type"):
+            filters["type"] = params["type"]
+
+        if params.get("subfolder") is not None:
+            filters["subfolder"] = params["subfolder"]
+
+        if params.get("rating_min"):
+            try:
+                filters["rating_min"] = float(params["rating_min"])
+            except:
+                pass
+
+        if params.get("has_workflow"):
+            try:
+                filters["has_workflow"] = int(params["has_workflow"])
+            except:
+                pass
+
+        if params.get("workflow_hash"):
+            filters["workflow_hash"] = params["workflow_hash"]
+
+        if params.get("tags"):
+            filters["tags"] = params["tags"].split(",")
+
+        # Query parameters
+        q = params.get("q")
+        sort = params.get("sort", "mtime_desc")
+
+        try:
+            limit = int(params.get("limit", "100"))
+        except:
+            limit = 100
+
+        try:
+            offset = int(params.get("offset", "0"))
+        except:
+            offset = 0
+
+        # Execute query
+        result = await asyncio.to_thread(
+            query_assets,
+            filters=filters,
+            q=q,
+            sort=sort,
+            limit=limit,
+            offset=offset
+        )
+
+        return _json_response(result)
+
+    except Exception as e:
+        log.error("[Majoor] Failed to query index: %s", e)
+        return _json_response({"error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.post("/mjr/filemanager/index/sync_from_metadata")
+async def index_sync_metadata_route(request: web.Request) -> web.Response:
+    """
+    Push metadata changes to the index.
+    Called automatically after batch_update to keep index in sync.
+
+    Payload:
+      {
+        "assets": [
+          {"filename": "img.png", "subfolder": "", "rating": 5, "tags": ["favorite"]},
+          ...
+        ]
+      }
+
+    Returns:
+      {
+        "ok": true,
+        "synced": 10
+      }
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return _json_response({"ok": False, "error": "Invalid JSON body"}, status=400)
+
+    assets = data.get("assets", [])
+    if not assets:
+        return _json_response({"ok": False, "error": "No assets provided"}, status=400)
+
+    try:
+        # Build file paths from assets
+        root = _get_output_root()
+        paths = []
+        for asset in assets:
+            filename = asset.get("filename")
+            subfolder = asset.get("subfolder", "")
+            if filename:
+                file_path = str(_safe_target(root, subfolder, filename))
+                paths.append(file_path)
+
+        # Reindex those specific paths
+        result = await asyncio.to_thread(reindex_paths, paths)
+
+        return _json_response({
+            "ok": True,
+            "synced": result["indexed"]
+        })
+
+    except Exception as e:
+        log.error("[Majoor] Failed to sync metadata to index: %s", e)
+        return _json_response({"ok": False, "error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.get("/mjr/filemanager/workflow/hash_info")
+async def workflow_hash_info_route(request: web.Request) -> web.Response:
+    """
+    Get information about the workflow hashing algorithm.
+    Used by frontend to implement client-side hashing.
+
+    Returns:
+      {
+        "algorithm": "SHA1",
+        "exclude_keys": ["id", "pos", "size", ...],
+        "description": "Canonical JSON (sorted keys, no whitespace) -> SHA1 hex"
+      }
+    """
+    try:
+        info = get_hash_algorithm_info()
+        return _json_response(info)
+    except Exception as e:
+        log.error("[Majoor] Failed to get workflow hash info: %s", e)
+        return _json_response({"error": str(e)}, status=500)
+
+
+# ===== Initialize Index After Routes Loaded =====
+
+def _init_index_after_server_ready():
+    """Initialize index after ComfyUI server is ready (avoids race condition)."""
+    try:
+        from .index_db import auto_init_index
+        # Small delay to ensure server is fully up
+        import threading
+        def delayed_init():
+            import time
+            time.sleep(2)  # Wait 2 seconds
+            auto_init_index()
+        threading.Thread(target=delayed_init, daemon=True).start()
+        log.info("[Majoor] Index initialization scheduled")
+    except Exception as e:
+        log.error(f"[Majoor] Failed to schedule index init: {e}")
+
+# Call init after routes are registered
+_init_index_after_server_ready()
