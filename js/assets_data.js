@@ -85,6 +85,10 @@ async function fetchFilesPage({ force = false, offset = 0, limit = 0 } = {}) {
   if (force) params.set("force", "1");
   if (offset) params.set("offset", String(offset));
   if (limit) params.set("limit", String(limit));
+  const source = String(mjrSettings?.index?.source || "auto").toLowerCase();
+  if (source) {
+    params.set("source", source === "filesystem" ? "scan" : source);
+  }
 
   const res = await api.fetchApi(`/mjr/filemanager/files?${params.toString()}`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);

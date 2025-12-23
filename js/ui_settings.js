@@ -102,6 +102,7 @@ export const mjrSettingsDefaults = {
   autoRefresh: { enabled: true, interval: 5000, focusOnly: true },
   metaPanel: { showByDefault: true, refreshInterval: 2000 },
   grid: { cardSize: "medium", showTags: true, showRating: true, pageSize: 500, hoverInfo: true },
+  index: { source: "auto" }, // auto | index | filesystem
   integration: { panel: "both" }, // "both" | "sidebar" | "bottom"
   viewer: {
     navEnabled: true,
@@ -177,6 +178,8 @@ export async function mjrPrefetchOutputs() {
   const params = new URLSearchParams();
   params.set("limit", String(pageSize));
   params.set("offset", "0");
+  const source = String(mjrSettings?.index?.source || "auto").toLowerCase();
+  if (source) params.set("source", source === "filesystem" ? "scan" : source);
   mjrPrefetchPromise = api
     .fetchApi(`/mjr/filemanager/files?${params.toString()}`)
     .then(async (res) => {
@@ -228,6 +231,10 @@ export function mjrShowToast(kind = "info", message = "", title = null, duration
     life: duration || Number(mjrSettings.toasts.duration) || 3000,
     closable: true,
   });
+}
+
+export function showToast(message, kind = "info", title = null, duration = null) {
+  mjrShowToast(kind, message, title, duration);
 }
 
 export function mjrAttachHoverFeedback(el, message, delay = 3000) {

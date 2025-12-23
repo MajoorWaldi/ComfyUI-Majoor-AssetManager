@@ -774,8 +774,8 @@ def load_prompt_graph_from_png(path: str | Path) -> Optional[Dict[str, Any]]:
     if Image is None:
         return None
 
-    img = Image.open(p)
-    info = getattr(img, "info", {}) or {}
+    with Image.open(p) as img:
+        info = getattr(img, "info", {}) or {}
 
     def _as_text(v: Any) -> Any:
         if isinstance(v, (bytes, bytearray)):
@@ -910,8 +910,8 @@ def load_raw_workflow_from_png(path: str | Path) -> Optional[Dict[str, Any]]:
     if Image is None:
         return None
 
-    img = Image.open(p)
-    info = getattr(img, "info", {}) or {}
+    with Image.open(p) as img:
+        info = getattr(img, "info", {}) or {}
 
     def _as_text(v: Any) -> Any:
         if isinstance(v, (bytes, bytearray)):
@@ -1401,8 +1401,8 @@ def extract_generation_params_from_png(path: str | Path) -> Dict[str, Any]:
     # Fallback: A1111/SD-WebUI Parameters block (no workflow)
     if prompt_graph is None and original_ext == ".png" and Image is not None:
         try:
-            img = Image.open(p)
-            info = getattr(img, "info", {}) or {}
+            with Image.open(p) as img:
+                info = getattr(img, "info", {}) or {}
             params_val = None
             for k, v in info.items():
                 try:
@@ -1457,8 +1457,8 @@ def has_generation_workflow(path: str | Path) -> bool:
         prompt_graph = None
         raw_workflow = None
         try:
-            img = Image.open(p)
-            info = getattr(img, "info", {}) or {}
+            with Image.open(p) as img:
+                info = getattr(img, "info", {}) or {}
             prompt_graph, raw_workflow = _scan_png_info_for_generation(info)
         except Exception:
             prompt_graph = None

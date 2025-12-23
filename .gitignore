@@ -36,3 +36,5 @@ METADATA_CONFIG.md
 METADATA_IMPROVEMENTS_SUMMARY.md
 test_metadata_parsers.py
 BUGFIXES_METADATA_V2.md
+node_mapping.json.example
+AGENTS.md

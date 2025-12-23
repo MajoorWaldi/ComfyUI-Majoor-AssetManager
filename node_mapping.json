@@ -2,7 +2,7 @@
   "_comment": "Custom node type mappings for metadata extraction configuration",
   "_description": "Add your custom ComfyUI node class names here to extend metadata extraction support",
   "_usage": "Restart ComfyUI after editing this file. Custom classes are merged with built-in defaults.",
-  "_documentation": "See FIXES_APPLIED.md section 18 for details",
+  "_documentation": "See README.md for details",
 
   "_sampler_classes_comment": "Add custom sampler node class names (lowercase). Examples: customsampler, mysampler, advancedsampler",
   "sampler_classes": [],

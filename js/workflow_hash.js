@@ -45,6 +45,26 @@ function deepCopyWithout(obj, excludeKeys) {
 }
 
 /**
+ * Recursively sort object keys to match server-side canonicalization.
+ */
+function sortKeysDeep(obj) {
+    if (obj === null || obj === undefined) {
+        return obj;
+    }
+    if (typeof obj !== 'object') {
+        return obj;
+    }
+    if (Array.isArray(obj)) {
+        return obj.map(item => sortKeysDeep(item));
+    }
+    const sorted = {};
+    Object.keys(obj).sort().forEach((key) => {
+        sorted[key] = sortKeysDeep(obj[key]);
+    });
+    return sorted;
+}
+
+/**
  * Canonicalize workflow for hashing.
  * - Removes volatile fields (id, pos, size, etc.)
  * - Sorts all object keys recursively
@@ -59,7 +79,7 @@ export function canonicalizeWorkflow(workflow) {
     const clean = deepCopyWithout(workflow, EXCLUDE_KEYS);
 
     // Sort keys recursively and stringify
-    const canonical = JSON.stringify(clean, Object.keys(clean).sort(), 0);
+    const canonical = JSON.stringify(sortKeysDeep(clean));
     return canonical;
 }
 

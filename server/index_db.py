@@ -43,6 +43,7 @@ _index_status = {
     "backlog": 0,
     "errors": [],
     "fts_available": False,
+    "json1_available": False,
     "freshness": "unknown",  # up_to_date|stale|unknown
 }
 _status_lock = threading.Lock()
@@ -50,6 +51,7 @@ _status_lock = threading.Lock()
 # Indexing worker state
 _indexing_thread: Optional[threading.Thread] = None
 _stop_indexing = threading.Event()
+_JSON1_AVAILABLE: Optional[bool] = None
 
 
 # ===== Database Initialization =====
@@ -72,6 +74,7 @@ def init_db(db_path: Optional[str] = None) -> None:
         _configure_db(conn)
         _create_schema(conn)
         _detect_fts5(conn)
+        _detect_json1(conn)
         conn.commit()
         log.info(f"[Majoor] Index database initialized at {db_path}")
     except Exception as e:
@@ -167,6 +170,24 @@ def _detect_fts5(conn: sqlite3.Connection) -> None:
         log.warning("[Majoor] FTS5 not available, instant search disabled")
         return
 
+    def _fts_columns() -> List[str]:
+        try:
+            rows = conn.execute("PRAGMA table_info(assets_fts)").fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [row[1] for row in rows]
+
+    existing_cols = _fts_columns()
+    needs_rebuild = bool(existing_cols) and "tags_text" not in existing_cols
+
+    if needs_rebuild:
+        log.warning("[Majoor] FTS schema outdated (missing tags_text); rebuilding index")
+        conn.execute("DROP TRIGGER IF EXISTS assets_fts_insert")
+        conn.execute("DROP TRIGGER IF EXISTS assets_fts_update")
+        conn.execute("DROP TRIGGER IF EXISTS assets_fts_delete")
+        conn.execute("DROP TABLE IF EXISTS assets_fts")
+        existing_cols = []
+
     # Create FTS5 virtual table
     try:
         conn.execute("""
@@ -215,11 +236,37 @@ def _detect_fts5(conn: sqlite3.Connection) -> None:
             END
         """)
 
+        if needs_rebuild or not existing_cols:
+            try:
+                conn.execute("""
+                    INSERT INTO assets_fts(
+                        rowid, id, filename, subfolder, prompt, negative, tags_text, notes, model, sampler
+                    )
+                    SELECT
+                        rowid, id, filename, subfolder, prompt, negative,
+                        replace(replace(tags_json, '["', ''), '"]', ''), notes, model, sampler
+                    FROM assets
+                """)
+            except Exception as e:
+                log.warning(f"[Majoor] Failed to seed FTS index: {e}")
+
         log.info("[Majoor] FTS5 search enabled")
     except Exception as e:
         log.warning(f"[Majoor] Failed to create FTS5 table: {e}")
         with _status_lock:
             _index_status["fts_available"] = False
+
+
+def _detect_json1(conn: sqlite3.Connection) -> None:
+    """Detect JSON1 availability for efficient tag filtering."""
+    global _JSON1_AVAILABLE
+    try:
+        conn.execute("SELECT json('[]')")
+        _JSON1_AVAILABLE = True
+    except Exception:
+        _JSON1_AVAILABLE = False
+    with _status_lock:
+        _index_status["json1_available"] = bool(_JSON1_AVAILABLE)
 
 
 def get_db() -> sqlite3.Connection:
@@ -284,6 +331,9 @@ def upsert_asset(record: Dict[str, Any]) -> None:
     # Ensure tags_json is properly serialized
     if "tags" in record and "tags_json" not in record:
         record["tags_json"] = json.dumps(record["tags"], ensure_ascii=False)
+    # Remove non-schema keys to avoid insert errors
+    if "tags" in record:
+        record.pop("tags", None)
 
     # Build SQL dynamically based on provided fields
     fields = list(record.keys())
@@ -369,9 +419,16 @@ def query_assets(
             JOIN assets_fts ON assets.rowid = assets_fts.rowid
             WHERE assets_fts MATCH ?
         """
+        count_query = """
+            SELECT COUNT(*)
+            FROM assets
+            JOIN assets_fts ON assets.rowid = assets_fts.rowid
+            WHERE assets_fts MATCH ?
+        """
         params.append(q)
     else:
         base_query = "SELECT * FROM assets WHERE 1=1"
+        count_query = "SELECT COUNT(*) FROM assets WHERE 1=1"
 
         # Fallback simple search on filename
         if q:
@@ -380,8 +437,16 @@ def query_assets(
 
     # Apply filters
     if filters.get("kind"):
-        where_clauses.append("kind = ?")
-        params.append(filters["kind"])
+        kind_filter = filters["kind"]
+        if isinstance(kind_filter, (list, tuple, set)):
+            kinds = [k for k in kind_filter if k]
+            if kinds:
+                placeholders = ", ".join(["?"] * len(kinds))
+                where_clauses.append(f"kind IN ({placeholders})")
+                params.extend(kinds)
+        else:
+            where_clauses.append("kind = ?")
+            params.append(kind_filter)
 
     if filters.get("type"):
         where_clauses.append("type = ?")
@@ -409,13 +474,22 @@ def query_assets(
         tag_list = filters["tags"] if isinstance(filters["tags"], list) else filters["tags"].split(",")
         for tag in tag_list:
             tag = tag.strip()
-            if tag:
+            if not tag:
+                continue
+            if _JSON1_AVAILABLE:
+                where_clauses.append(
+                    "EXISTS (SELECT 1 FROM json_each(assets.tags_json) WHERE value = ?)"
+                )
+                params.append(tag)
+            else:
                 where_clauses.append("tags_json LIKE ?")
                 params.append(f'%"{tag}"%')
 
     # Add WHERE clauses
     if where_clauses:
-        base_query += " AND " + " AND ".join(where_clauses)
+        clause = " AND " + " AND ".join(where_clauses)
+        base_query += clause
+        count_query += clause
 
     # Sort order
     sort_map = {
@@ -435,10 +509,6 @@ def query_assets(
     base_query += f" ORDER BY {order_by}"
 
     # Count total (without limit)
-    count_query = base_query.replace("SELECT assets.*", "SELECT COUNT(*)", 1)
-    if use_fts:
-        count_query = count_query.replace(", rank", "", 1)
-
     try:
         cursor = conn.execute(count_query, params)
         total = cursor.fetchone()[0]

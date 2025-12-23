@@ -307,7 +307,13 @@ def inject_metadata(
             return False
 
         # Create backup if requested (or force on Windows for safety)
-        from ..config import IS_WINDOWS
+        try:
+            from ..config import IS_WINDOWS
+        except Exception:
+            try:
+                from config import IS_WINDOWS  # type: ignore
+            except Exception:
+                IS_WINDOWS = False
         if IS_WINDOWS and not backup:
             log.debug("[Majoor] Forcing backup on Windows for data safety")
             backup = True

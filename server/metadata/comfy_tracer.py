@@ -22,14 +22,53 @@ Usage:
 """
 
 import logging
+import json
+from pathlib import Path
 from typing import Dict, List, Any, Set, Optional, Tuple
 from collections import deque
 
 log = logging.getLogger(__name__)
 
 
-# Known output node types
-OUTPUT_NODE_TYPES = {
+def _load_custom_node_mappings() -> Dict[str, List[str]]:
+    """
+    Load custom node type mappings from node_mapping.json.
+
+    Returns:
+        Dict with keys like 'clip_text_encode_classes', 'conditioning_classes', etc.
+        Empty dict if config file doesn't exist or is invalid.
+
+    Example node_mapping.json:
+    {
+        "_comment": "Custom node type mappings for ComfyUI metadata extraction",
+        "clip_text_encode_classes": ["MyCustomTextEncode", "SpecialPromptNode"],
+        "conditioning_classes": ["MyConditioningMix"],
+        "controlnet_classes": ["CustomControlNet"],
+        "lora_classes": ["PowerfulLoraLoader"],
+        "sampler_classes": ["MyAdvancedSampler"]
+    }
+    """
+    config_path = Path(__file__).parent.parent / "node_mapping.json"
+    if not config_path.exists():
+        return {}
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            # Remove comment fields (keys starting with _)
+            return {k: v for k, v in data.items() if not k.startswith("_")}
+    except (json.JSONDecodeError, OSError, ValueError) as e:
+        log.debug(f"[Majoor] Failed to load node_mapping.json: {e}")
+        return {}
+
+
+# Load custom mappings once at module import
+_custom_mappings = _load_custom_node_mappings()
+
+
+# Default node type sets (can be extended via node_mapping.json)
+
+_DEFAULT_OUTPUT_NODE_TYPES = {
     "SaveImage",
     "PreviewImage",
     "VHS_VideoCombine",
@@ -37,41 +76,120 @@ OUTPUT_NODE_TYPES = {
     "SaveAnimatedWEBP",
     "SaveAnimatedPNG",
     "ImageUploadS3",
-    # Add custom output nodes here
 }
 
-# Known reroute node types
-REROUTE_NODE_TYPES = {
+_DEFAULT_REROUTE_NODE_TYPES = {
     "Reroute",
     "RerouteNode",
 }
 
-# Known CLIP text encode node types
-CLIP_TEXT_ENCODE_TYPES = {
+_DEFAULT_CLIP_TEXT_ENCODE_TYPES = {
+    # Core ComfyUI
     "CLIPTextEncode",
     "CLIPTextEncodeSDXL",
     "CLIPTextEncodeSDXLRefiner",
+
+    # SDXL/Flux/SD3 encoders
+    "DualCLIPTextEncode",
+    "FluxGuidance",
+    "SD3TextEncoder",
+    "T5TextEncode",
+
+    # Advanced/Custom encoders
     "BNK_CLIPTextEncodeAdvanced",
+    "AdvancedCLIPTextEncode",
+    "CLIPTextEncodeAdvanced",
     "smZ CLIPTextEncode",
-    # Add custom text encode nodes here
+    "CLIPSetLastLayer",
+
+    # Text processing nodes
+    "TextConcatenate",
+    "StringConcatenate",
+    "Text_Multiline",
+    "StringLiteral",
+    "TextMultiline",
+    "text_multiline",
+
+    # Prompt builders
+    "PromptBuilder",
+    "PromptComposer",
+    "DynamicPrompt",
+    "WildcardProcessor",
+    "CustomText",
+    "Text_Node",
 }
 
-# Known checkpoint loader types
-CHECKPOINT_LOADER_TYPES = {
+_DEFAULT_CONDITIONING_NODE_TYPES = {
+    "ConditioningAverage",
+    "ConditioningCombine",
+    "ConditioningConcat",
+    "ConditioningSetArea",
+    "ConditioningSetMask",
+    "ConditioningSetAreaPercentage",
+    "ConditioningSetAreaStrength",
+    "ConditioningSetTimestepRange",
+}
+
+_DEFAULT_CONTROLNET_NODE_TYPES = {
+    "ControlNetApply",
+    "ControlNetApplyAdvanced",
+    "ControlNetApplySD3",
+    "ACN_AdvancedControlNetApply",
+}
+
+_DEFAULT_LORA_LOADER_TYPES = {
+    "LoraLoader",
+    "LoraLoaderModelOnly",
+    "PowerLoraLoader",
+    "LoraLoaderAdvanced",
+}
+
+_DEFAULT_CHECKPOINT_LOADER_TYPES = {
     "CheckpointLoaderSimple",
     "CheckpointLoader",
     "CheckpointLoaderSDXL",
     "unCLIPCheckpointLoader",
-    # Add custom loaders here
 }
 
-# Known sampler node types
-SAMPLER_NODE_TYPES = {
+_DEFAULT_SAMPLER_NODE_TYPES = {
     "KSampler",
     "KSamplerAdvanced",
     "SamplerCustom",
     "SamplerCustomAdvanced",
 }
+
+# Merge custom mappings with defaults
+OUTPUT_NODE_TYPES = _DEFAULT_OUTPUT_NODE_TYPES | set(
+    _custom_mappings.get("output_node_classes", [])
+)
+
+REROUTE_NODE_TYPES = _DEFAULT_REROUTE_NODE_TYPES | set(
+    _custom_mappings.get("reroute_classes", [])
+)
+
+CLIP_TEXT_ENCODE_TYPES = _DEFAULT_CLIP_TEXT_ENCODE_TYPES | set(
+    _custom_mappings.get("clip_text_encode_classes", [])
+)
+
+CONDITIONING_NODE_TYPES = _DEFAULT_CONDITIONING_NODE_TYPES | set(
+    _custom_mappings.get("conditioning_classes", [])
+)
+
+CONTROLNET_NODE_TYPES = _DEFAULT_CONTROLNET_NODE_TYPES | set(
+    _custom_mappings.get("controlnet_classes", [])
+)
+
+LORA_LOADER_TYPES = _DEFAULT_LORA_LOADER_TYPES | set(
+    _custom_mappings.get("lora_classes", [])
+)
+
+CHECKPOINT_LOADER_TYPES = _DEFAULT_CHECKPOINT_LOADER_TYPES | set(
+    _custom_mappings.get("checkpoint_loader_classes", [])
+)
+
+SAMPLER_NODE_TYPES = _DEFAULT_SAMPLER_NODE_TYPES | set(
+    _custom_mappings.get("sampler_classes", [])
+)
 
 
 class WorkflowGraph:
@@ -208,7 +326,7 @@ def extract_text_from_node(
     """
     Extract text from a node's input.
 
-    Follows reroute nodes if necessary.
+    Follows reroute nodes, conditioning nodes, and ControlNet if necessary.
 
     Args:
         graph: Workflow graph
@@ -247,12 +365,98 @@ def extract_text_from_node(
         if source_type in CLIP_TEXT_ENCODE_TYPES:
             return extract_text_from_node(graph, source_node_id, "text")
 
+        # Follow conditioning nodes (try multiple input names)
+        if source_type in CONDITIONING_NODE_TYPES:
+            for cond_input in ["conditioning_1", "conditioning_2", "conditioning_from", "conditioning"]:
+                result = extract_text_from_node(graph, source_node_id, cond_input)
+                if result:
+                    return result
+
+        # Follow ControlNet nodes
+        if source_type in CONTROLNET_NODE_TYPES:
+            return extract_text_from_node(graph, source_node_id, "conditioning")
+
     return None
+
+
+def trace_conditioning_to_texts(
+    graph: WorkflowGraph,
+    sampler_id: str,
+    input_name: str  # 'positive' or 'negative'
+) -> List[str]:
+    """
+    Trace from sampler's positive/negative input back to ALL text nodes.
+
+    Handles conditioning combiners, ControlNet, reroutes, etc. using BFS.
+
+    Args:
+        graph: Workflow graph
+        sampler_id: Sampler node ID
+        input_name: Input to trace ('positive' or 'negative')
+
+    Returns:
+        List of text strings found by tracing backward
+    """
+    texts = []
+    visited = set()
+
+    sampler = graph.get_node(sampler_id)
+    if not sampler:
+        return texts
+
+    input_value = sampler.get("inputs", {}).get(input_name)
+    if not isinstance(input_value, list) or len(input_value) < 1:
+        return texts
+
+    # BFS from conditioning input
+    queue = deque([str(input_value[0])])
+
+    while queue:
+        node_id = queue.popleft()
+        if node_id in visited:
+            continue
+        visited.add(node_id)
+
+        node = graph.get_node(node_id)
+        if not node:
+            continue
+
+        node_type = node.get("class_type")
+
+        # Text encoder - extract text
+        if node_type in CLIP_TEXT_ENCODE_TYPES:
+            text = extract_text_from_node(graph, node_id, "text")
+            if text:
+                texts.append(text)
+
+        # Conditioning combiner - traverse all conditioning inputs
+        elif node_type in CONDITIONING_NODE_TYPES:
+            inputs = node.get("inputs", {})
+            for key, value in inputs.items():
+                if key.startswith("conditioning") and isinstance(value, list) and len(value) >= 1:
+                    queue.append(str(value[0]))
+
+        # ControlNet - follow conditioning input
+        elif node_type in CONTROLNET_NODE_TYPES:
+            inputs = node.get("inputs", {})
+            cond = inputs.get("conditioning")
+            if isinstance(cond, list) and len(cond) >= 1:
+                queue.append(str(cond[0]))
+
+        # Reroute - follow upstream
+        elif node_type in REROUTE_NODE_TYPES:
+            for upstream_id in graph.get_upstream_nodes(node_id):
+                queue.append(upstream_id)
+
+    return texts
 
 
 def extract_prompts(graph: WorkflowGraph) -> Tuple[List[str], List[str]]:
     """
     Extract positive and negative prompts from workflow.
+
+    Uses improved multi-hop resolution from samplers to text nodes,
+    properly handling conditioning combiners and ControlNet.
 
     Returns:
         (positive_prompts, negative_prompts)
@@ -260,52 +464,91 @@ def extract_prompts(graph: WorkflowGraph) -> Tuple[List[str], List[str]]:
     positive_prompts = []
     negative_prompts = []
 
-    # Find all CLIP text encode nodes
+    # Find all samplers
+    sampler_nodes = graph.find_nodes_by_type(SAMPLER_NODE_TYPES)
+
+    if sampler_nodes:
+        # Trace from each sampler to text nodes
+        for sampler_id in sampler_nodes:
+            try:
+                pos = trace_conditioning_to_texts(graph, sampler_id, "positive")
+                neg = trace_conditioning_to_texts(graph, sampler_id, "negative")
+
+                positive_prompts.extend(pos)
+                negative_prompts.extend(neg)
+            except Exception as e:
+                log.debug(f"[Majoor] Failed to trace conditioning from sampler {sampler_id}: {e}")
+                continue
+
+        # Deduplicate while preserving order
+        positive_prompts = list(dict.fromkeys(positive_prompts))
+        negative_prompts = list(dict.fromkeys(negative_prompts))
+
+    else:
+        # Fallback: no samplers found, use heuristic classification
+        positive_prompts, negative_prompts = _collect_text_nodes_with_heuristics(graph)
+
+    return positive_prompts, negative_prompts
+
+
+def _collect_text_nodes_with_heuristics(graph: WorkflowGraph) -> Tuple[List[str], List[str]]:
+    """
+    Fallback method: collect all text nodes when sampler-based tracing fails.
+
+    Uses multiple heuristics for positive/negative classification.
+
+    Returns:
+        (positive_prompts, negative_prompts)
+    """
+    positive = []
+    negative = []
+
     text_nodes = graph.find_nodes_by_type(CLIP_TEXT_ENCODE_TYPES)
 
     for node_id in text_nodes:
-        node = graph.get_node(node_id)
-        if not node:
+        try:
+            node = graph.get_node(node_id)
+            if not node:
+                continue
+
+            text = extract_text_from_node(graph, node_id, "text")
+            if not text:
+                continue
+
+            # Heuristic 1: Check node title
+            meta = node.get("_meta", {})
+            title = meta.get("title", "").lower()
+
+            # Heuristic 2: Check input field names
+            inputs = node.get("inputs", {})
+            input_keys = " ".join(inputs.keys()).lower()
+
+            # Heuristic 3: Check text content patterns
+            text_lower = text.lower()
+            negative_patterns = {
+                "worst quality", "low quality", "blurry", "bad", "ugly",
+                "nsfw", "poorly", "amateur", "distorted", "deformed"
+            }
+
+            is_negative = (
+                "negative" in title or
+                "neg" in title or
+                "bad" in title or
+                "unwanted" in title or
+                "negative" in input_keys or
+                any(pattern in text_lower for pattern in negative_patterns)
+            )
+
+            if is_negative:
+                negative.append(text)
+            else:
+                positive.append(text)
+
+        except Exception as e:
+            log.debug(f"[Majoor] Failed to extract text from node {node_id}: {e}")
             continue
 
-        # Extract text
-        text = extract_text_from_node(graph, node_id, "text")
-        if not text:
-            continue
-
-        # Heuristic: determine if positive or negative
-        # Check node title/meta for "negative" keyword
-        is_negative = False
-
-        meta = node.get("_meta", {})
-        title = meta.get("title", "").lower()
-
-        if "negative" in title:
-            is_negative = True
-        else:
-            # Check if this node feeds into a sampler's negative_conditioning
-            for downstream_id in graph.get_downstream_nodes(node_id):
-                downstream = graph.get_node(downstream_id)
-                if not downstream:
-                    continue
-
-                # Check if downstream is a sampler
-                if downstream.get("class_type") in SAMPLER_NODE_TYPES:
-                    # Check if connection is to negative input
-                    inputs = downstream.get("inputs", {})
-                    negative_input = inputs.get("negative")
-
-                    if isinstance(negative_input, list) and len(negative_input) >= 1:
-                        if str(negative_input[0]) == node_id:
-                            is_negative = True
-                            break
-
-        if is_negative:
-            negative_prompts.append(text)
-        else:
-            positive_prompts.append(text)
-
-    return positive_prompts, negative_prompts
+    return positive, negative
 
 
 def extract_model(graph: WorkflowGraph) -> Optional[str]:
@@ -381,6 +624,43 @@ def extract_sampler_params(graph: WorkflowGraph) -> Dict[str, Any]:
     return params
 
 
+def extract_loras(graph: WorkflowGraph) -> List[Dict[str, Any]]:
+    """
+    Extract LoRA information from workflow.
+
+    Returns:
+        List of LoRA dictionaries with name and strength values
+    """
+    loras = []
+
+    # Find LoRA loader nodes
+    lora_nodes = graph.find_nodes_by_type(LORA_LOADER_TYPES)
+
+    for node_id in lora_nodes:
+        node = graph.get_node(node_id)
+        if not node:
+            continue
+
+        inputs = node.get("inputs", {})
+
+        # Try common input names
+        lora_name = inputs.get("lora_name") or inputs.get("lora") or inputs.get("name")
+
+        if lora_name and isinstance(lora_name, str):
+            lora_info = {
+                "name": lora_name.strip(),
+                "strength_model": inputs.get("strength_model"),
+                "strength_clip": inputs.get("strength_clip"),
+            }
+
+            # Remove None values
+            lora_info = {k: v for k, v in lora_info.items() if v is not None}
+
+            loras.append(lora_info)
+
+    return loras
+
+
 def extract_comfy_params(workflow_json: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extract all metadata from ComfyUI workflow.
@@ -400,6 +680,7 @@ def extract_comfy_params(workflow_json: Dict[str, Any]) -> Dict[str, Any]:
             "sampler_name": str or None,
             "scheduler": str or None,
             "seed": int or None,
+            "loras": [{"name": str, "strength_model": float, ...}, ...],
             "output_nodes": [str, ...],  # Node IDs
             "node_count": int
         }
@@ -420,6 +701,7 @@ def extract_comfy_params(workflow_json: Dict[str, Any]) -> Dict[str, Any]:
             "sampler_name": None,
             "scheduler": None,
             "seed": None,
+            "loras": [],
             "output_nodes": [],
             "node_count": 0
         }
@@ -437,6 +719,9 @@ def extract_comfy_params(workflow_json: Dict[str, Any]) -> Dict[str, Any]:
         # Extract sampler params
         sampler_params = extract_sampler_params(graph)
 
+        # Extract LoRAs
+        loras = extract_loras(graph)
+
         # Find output nodes
         output_nodes = graph.find_nodes_by_type(OUTPUT_NODE_TYPES)
 
@@ -449,6 +734,7 @@ def extract_comfy_params(workflow_json: Dict[str, Any]) -> Dict[str, Any]:
             "sampler_name": sampler_params.get("sampler_name"),
             "scheduler": sampler_params.get("scheduler"),
             "seed": sampler_params.get("seed"),
+            "loras": loras,
             "output_nodes": output_nodes,
             "node_count": len(graph.nodes)
         }
@@ -465,6 +751,7 @@ def extract_comfy_params(workflow_json: Dict[str, Any]) -> Dict[str, Any]:
             "sampler_name": None,
             "scheduler": None,
             "seed": None,
+            "loras": [],
             "output_nodes": [],
             "node_count": 0
         }

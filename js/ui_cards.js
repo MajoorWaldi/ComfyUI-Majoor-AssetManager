@@ -377,7 +377,7 @@ export function createFileThumb(kind, ext, file, card) {
 
   if (kind === "image") {
     const img = document.createElement("img");
-    img.loading = "lazy";
+    img.loading = "eager";
     img.src = file.url || buildViewUrl(file);
     img.style.width = "100%";
     img.style.height = "100%";

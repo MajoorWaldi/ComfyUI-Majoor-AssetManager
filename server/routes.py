@@ -14,6 +14,7 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from functools import wraps
+from collections import OrderedDict
 
 try:
     from send2trash import send2trash  # type: ignore
@@ -212,6 +213,15 @@ _CACHE_LOCK = threading.Lock()
 
 _ASYNCIO_SILENCER_INSTALLED = False
 _ASYNCIO_SILENCER_LOCK = threading.Lock()
+
+# LRU cache for has_workflow checks (prevents repeated PNG/video parsing)
+_HAS_WORKFLOW_CACHE: "OrderedDict[str, tuple[float, bool]]" = OrderedDict()
+_HAS_WORKFLOW_CACHE_LOCK = threading.Lock()
+try:
+    _HAS_WORKFLOW_CACHE_MAX = int(os.environ.get("MJR_HAS_WORKFLOW_CACHE_SIZE", "2000"))
+except Exception:
+    _HAS_WORKFLOW_CACHE_MAX = 2000
+_HAS_WORKFLOW_CACHE_MAX = max(0, min(_HAS_WORKFLOW_CACHE_MAX, 20000))
 
 # Windows reserved filenames (security constant)
 _WINDOWS_RESERVED_NAMES = frozenset({
@@ -542,6 +552,42 @@ def _rating_tags_with_fallback(meta_target: Path, kind: str, _cache: Optional[di
     return result
 
 
+def _has_workflow_cached(target: Path) -> bool:
+    """
+    Cache has_generation_workflow by (path, mtime) to avoid repeated parsing.
+    """
+    if _HAS_WORKFLOW_CACHE_MAX <= 0:
+        try:
+            return has_generation_workflow(target)
+        except Exception:
+            return False
+
+    try:
+        mtime = target.stat().st_mtime
+    except Exception:
+        return False
+
+    key = str(target)
+    with _HAS_WORKFLOW_CACHE_LOCK:
+        cached = _HAS_WORKFLOW_CACHE.get(key)
+        if cached and cached[0] == mtime:
+            _HAS_WORKFLOW_CACHE.move_to_end(key)
+            return cached[1]
+
+    try:
+        has_wf = has_generation_workflow(target)
+    except Exception:
+        has_wf = False
+
+    with _HAS_WORKFLOW_CACHE_LOCK:
+        _HAS_WORKFLOW_CACHE[key] = (mtime, has_wf)
+        _HAS_WORKFLOW_CACHE.move_to_end(key)
+        while len(_HAS_WORKFLOW_CACHE) > _HAS_WORKFLOW_CACHE_MAX:
+            _HAS_WORKFLOW_CACHE.popitem(last=False)
+
+    return has_wf
+
+
 def _open_in_explorer(path: Path) -> bool:
     """Open Windows Explorer selecting the given file."""
     try:
@@ -761,6 +807,55 @@ def _scan_outputs() -> List[Dict[str, Any]]:
     return files
 
 
+def _list_files_from_index(offset: int, limit: int) -> Dict[str, Any]:
+    """
+    List files from the SQLite index (output only), preserving the /files response shape.
+    """
+    limit = max(0, int(limit or 0))
+    offset = max(0, int(offset or 0))
+    # Match filesystem scanner behavior: output + known media kinds only.
+    filters = {"type": "output", "kind": ["image", "video", "audio", "model3d"]}
+    result = query_assets(filters=filters, sort="mtime_desc", limit=limit or 10**9, offset=offset)
+    items = []
+    for asset in result.get("assets", []):
+        filename = asset.get("filename") or ""
+        subfolder = (asset.get("subfolder") or "").replace("\\", "/")
+        rel_path = f"{subfolder}/{filename}" if subfolder else filename
+        rel_path = rel_path.replace("\\", "/")
+        ext = (asset.get("ext") or os.path.splitext(filename)[1].lstrip(".") or "").upper()
+        mtime_ms = int(asset.get("mtime") or 0)
+        mtime_s = (mtime_ms / 1000.0) if mtime_ms else 0.0
+        size = int(asset.get("size") or 0)
+        kind = asset.get("kind") or classify_ext(filename.lower())
+        items.append(
+            {
+                "filename": filename,
+                "name": filename,
+                "subfolder": subfolder,
+                "relpath": rel_path,
+                "mtime": mtime_ms,
+                "date": _format_date(mtime_s) if mtime_s else "",
+                "size": size,
+                "size_readable": _format_size(size),
+                "kind": kind,
+                "ext": ext,
+                "url": _build_view_url(filename, subfolder),
+                "rating": asset.get("rating", 0),
+                "tags": asset.get("tags", []),
+                "has_workflow": asset.get("has_workflow", 0),
+            }
+        )
+
+    total = int(result.get("total") or 0)
+    has_more = (offset + len(items)) < total
+    next_offset = (offset + len(items)) if has_more else None
+    return {"files": items, "total": total, "has_more": has_more, "next_offset": next_offset}
+
+
+async def _list_files_from_index_async(offset: int, limit: int) -> Dict[str, Any]:
+    return await asyncio.to_thread(_list_files_from_index, offset, limit)
+
+
 def _scan_outputs_cached(force: bool = False) -> List[Dict[str, Any]]:
     """
     Wrapper around _scan_outputs with in-memory cache.
@@ -807,6 +902,7 @@ async def list_files(request: web.Request) -> web.Response:
     _install_windows_asyncio_connection_reset_silencer()
     force_param = (request.query.get("force") or "").lower()
     force = force_param in ("1", "true", "yes", "force")
+    source = (request.query.get("source") or "scan").strip().lower()
 
     # Optional pagination
     # Backward-compatible: if no limit is provided, return the full list.
@@ -825,24 +921,65 @@ async def list_files(request: web.Request) -> web.Response:
     offset = max(0, offset)
     limit = max(0, limit)
 
-    files = await _scan_outputs_async(force=force)
-    total = len(files)
+    using_index = False
+    index_payload: Optional[Dict[str, Any]] = None
 
-    items = files
-    if limit > 0:
-        items = files[offset : offset + limit]
+    if paged and source in ("auto", "index"):
+        try:
+            status = await asyncio.to_thread(get_index_status)
+            freshness = status.get("freshness")
+            status_state = status.get("status")
+            ready = freshness == "up_to_date" and status_state != "error"
+            if source == "index":
+                using_index = ready
+            else:
+                using_index = ready
+        except Exception:
+            using_index = False
+
+    if using_index:
+        index_payload = await _list_files_from_index_async(offset, limit)
+        items = index_payload.get("files", [])
+        total = int(index_payload.get("total") or 0)
+        has_more = bool(index_payload.get("has_more"))
+        next_offset = index_payload.get("next_offset")
+
+        # Safety fallback: if index is empty but filesystem has outputs, use scan.
+        # This avoids "No outputs found" when index is stale but marked up_to_date.
+        if source == "auto" and total == 0 and paged and offset == 0:
+            try:
+                scan_files = await _scan_outputs_async(force=False)
+            except Exception:
+                scan_files = []
+            if scan_files:
+                using_index = False
+                items = scan_files[:limit] if limit > 0 else scan_files
+                total = len(scan_files)
+                has_more = (offset + len(items)) < total
+                next_offset = (offset + len(items)) if has_more else None
+                try:
+                    await asyncio.to_thread(start_background_reindex)
+                except Exception:
+                    pass
     else:
-        offset = 0
-        limit = total
+        files = await _scan_outputs_async(force=force)
+        total = len(files)
 
-    has_more = (offset + len(items)) < total
-    next_offset = (offset + len(items)) if has_more else None
+        items = files
+        if limit > 0:
+            items = files[offset : offset + limit]
+        else:
+            offset = 0
+            limit = total
+
+        has_more = (offset + len(items)) < total
+        next_offset = (offset + len(items)) if has_more else None
 
     # Prefetch metadata for the first N items without delaying the response.
     # Only do this for the first paged request (offset=0, limit provided).
     # Uses asyncio.create_task for true non-blocking async execution.
     # FIX: Create deep copy of items to avoid race condition with cache modifications
-    prefetch_count = min(len(items), _META_PREFETCH_COUNT) if (paged and offset == 0) else 0
+    prefetch_count = min(len(items), _META_PREFETCH_COUNT) if (paged and offset == 0 and not using_index) else 0
     if prefetch_count > 0:
         root = _get_output_root()
         # Make a copy of items to prevent cache mutation race conditions
@@ -874,7 +1011,7 @@ async def list_files(request: web.Request) -> web.Response:
                     has_wf = False
                     if kind in ("image", "video"):
                         try:
-                            has_wf = has_generation_workflow(meta_target)
+                            has_wf = _has_workflow_cached(target)
                         except Exception:
                             has_wf = False
 
@@ -887,10 +1024,20 @@ async def list_files(request: web.Request) -> web.Response:
                 except Exception:
                     pass
 
-            # Process items in parallel batches with reference to original
-            for idx, f in enumerate(prefetch_items):
-                if idx < len(items):
-                    await loop.run_in_executor(None, _prefetch_one, f, items[idx])
+            # Process items in parallel with bounded workers
+            max_workers_env = os.environ.get("MJR_META_PREFETCH_WORKERS")
+            try:
+                max_workers_cfg = int(max_workers_env) if max_workers_env is not None else None
+            except (ValueError, TypeError):
+                max_workers_cfg = None
+            max_workers = max(1, min(prefetch_count, max_workers_cfg or 4))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+                tasks = []
+                for idx, f in enumerate(prefetch_items):
+                    if idx < len(items):
+                        tasks.append(loop.run_in_executor(pool, _prefetch_one, f, items[idx]))
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
 
         # Schedule background task without blocking
         asyncio.create_task(_prefetch_async())
@@ -903,6 +1050,7 @@ async def list_files(request: web.Request) -> web.Response:
             "limit": limit,
             "has_more": has_more,
             "next_offset": next_offset,
+            "source": "index" if using_index else "scan",
         }
     )
 
@@ -965,7 +1113,7 @@ async def batch_metadata(request: web.Request) -> web.Response:
         has_wf = False
         if kind in ("image", "video"):
             try:
-                has_wf = has_generation_workflow(target)
+                has_wf = _has_workflow_cached(target)
             except Exception:
                 has_wf = False
 
@@ -1959,8 +2107,42 @@ async def index_reindex_route(request: web.Request) -> web.Response:
         if not paths:
             return _json_response({"ok": False, "error": "No paths provided"}, status=400)
 
+        output_root = Path(OUTPUT_ROOT).resolve()
+        normalized_paths: List[str] = []
+        invalid_paths: List[str] = []
+
+        for raw in paths:
+            try:
+                raw_str = str(raw)
+            except Exception:
+                invalid_paths.append(repr(raw))
+                continue
+            if not raw_str:
+                invalid_paths.append(raw_str)
+                continue
+
+            candidate = Path(raw_str)
+            if not candidate.is_absolute():
+                candidate = (output_root / candidate)
+            try:
+                resolved = candidate.resolve()
+                resolved.relative_to(output_root)
+            except Exception:
+                invalid_paths.append(raw_str)
+                continue
+
+            normalized_paths.append(str(resolved))
+
+        if invalid_paths:
+            return _json_response(
+                {"ok": False, "error": "Invalid paths (outside output directory)", "paths": invalid_paths},
+                status=400,
+            )
+        if not normalized_paths:
+            return _json_response({"ok": False, "error": "No valid paths provided"}, status=400)
+
         # Reindex specific paths (synchronous, but fast)
-        result = await asyncio.to_thread(reindex_paths, paths)
+        result = await asyncio.to_thread(reindex_paths, normalized_paths)
         return _json_response({
             "status": "completed",
             "indexed": result["indexed"],

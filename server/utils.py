@@ -12,6 +12,8 @@ from typing import Dict, List, Optional
 from .config import ENABLE_JSON_SIDECAR, METADATA_EXT, IS_WINDOWS
 from .logger import get_logger
 
+log = get_logger(__name__)
+
 # Supported extensions
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 VIDEO_EXTS = (".mp4", ".mov", ".webm", ".mkv")
@@ -65,8 +67,6 @@ except (ValueError, TypeError) as e:
 _META_CACHE: OrderedDict[str, tuple[Optional[float], int, dict]] = OrderedDict()
 _CACHE_EPOCH = 0
 _CACHE_LOCK = threading.Lock()
-
-log = get_logger(__name__)
 
 
 def _get_cache_epoch() -> int:
@@ -458,42 +458,57 @@ def get_windows_metadata(file_path: str) -> dict:
         if not win32com:
             return {"rating": 0, "tags": []}
 
-        shell = win32com.Dispatch("Shell.Application")
-        folder = shell.Namespace(os.path.dirname(file_path))
-        file = folder.ParseName(os.path.basename(file_path))
-
-        rating_idx, tags_idx = _resolve_shell_indices(folder)
-
-        rating_raw = folder.GetDetailsOf(file, rating_idx)
-        tags_raw = folder.GetDetailsOf(file, tags_idx)
-
-        rating = 0
-        # Windows may expose either stars or SharedUserRating percent; normalize to stars
+        pythoncom = None
         try:
-            numeric = float(str(rating_raw).strip())
-            if 0 <= numeric <= 100 and numeric > 5:
-                rating = windows_percent_to_stars(int(round(numeric)))
-            else:
-                rating = _parse_rating_value(numeric)
+            import pythoncom  # type: ignore
+
+            pythoncom.CoInitialize()
         except Exception:
-            rating = _parse_rating_value(rating_raw)
+            pythoncom = None
 
-        tags = []
-        if tags_raw:
-            tag_text = str(tags_raw)
-            for sep in [",", ";"]:
-                if sep in tag_text:
-                    tags = [t.strip() for t in tag_text.split(sep) if t.strip()]
-                    break
-            else:
-                t = tag_text.strip()
-                if t:
-                    tags = [t]
+        try:
+            shell = win32com.Dispatch("Shell.Application")
+            folder = shell.Namespace(os.path.dirname(file_path))
+            file = folder.ParseName(os.path.basename(file_path))
 
-        return {
-            "rating": rating,
-            "tags": tags,
-        }
+            rating_idx, tags_idx = _resolve_shell_indices(folder)
+
+            rating_raw = folder.GetDetailsOf(file, rating_idx)
+            tags_raw = folder.GetDetailsOf(file, tags_idx)
+
+            rating = 0
+            # Windows may expose either stars or SharedUserRating percent; normalize to stars
+            try:
+                numeric = float(str(rating_raw).strip())
+                if 0 <= numeric <= 100 and numeric > 5:
+                    rating = windows_percent_to_stars(int(round(numeric)))
+                else:
+                    rating = _parse_rating_value(numeric)
+            except Exception:
+                rating = _parse_rating_value(rating_raw)
+
+            tags = []
+            if tags_raw:
+                tag_text = str(tags_raw)
+                for sep in [",", ";"]:
+                    if sep in tag_text:
+                        tags = [t.strip() for t in tag_text.split(sep) if t.strip()]
+                        break
+                else:
+                    t = tag_text.strip()
+                    if t:
+                        tags = [t]
+
+            return {
+                "rating": rating,
+                "tags": tags,
+            }
+        finally:
+            if pythoncom is not None:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
     except Exception as e:
         log.warning("Error reading metadata for %s: %s", file_path, e)
         return {"rating": 0, "tags": []}
@@ -808,41 +823,56 @@ def set_windows_metadata(file_path: str, rating: int, tags: list) -> bool:
             )
             return True
 
-        shell = win32com.Dispatch("Shell.Application")
-        folder = shell.Namespace(os.path.dirname(file_path))
-        file = folder.ParseName(os.path.basename(file_path))
+        pythoncom = None
+        try:
+            import pythoncom  # type: ignore
 
-        rating_idx, tags_idx = _resolve_shell_indices(folder)
+            pythoncom.CoInitialize()
+        except Exception:
+            pythoncom = None
 
-        # Rating (SharedUserRating percent 0..99); accept stars or percent and normalize
-        if rating is not None:
-            stars = _coerce_rating_to_stars(rating)
-            rating_val = rating_to_windows_percent(stars)
-            folder.GetDetailsOf(file, rating_idx)  # force index load
-            folder.SetDetailsOf(file, rating_idx, str(rating_val))
+        try:
+            shell = win32com.Dispatch("Shell.Application")
+            folder = shell.Namespace(os.path.dirname(file_path))
+            file = folder.ParseName(os.path.basename(file_path))
 
-        if tags_list:
-            folder.GetDetailsOf(file, tags_idx)
-            folder.SetDetailsOf(file, tags_idx, "; ".join(tags_list))
-        elif tags == []:
-            folder.GetDetailsOf(file, tags_idx)
-            folder.SetDetailsOf(file, tags_idx, "")
+            rating_idx, tags_idx = _resolve_shell_indices(folder)
 
-        # Restore mtime to avoid reordering the grid after rating/tag updates
-        if original_mtime is not None:
-            try:
-                os.utime(file_path, (original_mtime, original_mtime))
-            except Exception:
-                pass
+            # Rating (SharedUserRating percent 0..99); accept stars or percent and normalize
+            if rating is not None:
+                stars = _coerce_rating_to_stars(rating)
+                rating_val = rating_to_windows_percent(stars)
+                folder.GetDetailsOf(file, rating_idx)  # force index load
+                folder.SetDetailsOf(file, rating_idx, str(rating_val))
 
-        epoch = _next_cache_epoch()
-        _cache_set(
-            file_path,
-            original_mtime if original_mtime is not None else _get_mtime_safe(file_path),
-            epoch,
-            {"rating": _coerce_rating_to_stars(rating), "tags": tags_list},
-        )
-        return True
+            if tags_list:
+                folder.GetDetailsOf(file, tags_idx)
+                folder.SetDetailsOf(file, tags_idx, "; ".join(tags_list))
+            elif tags == []:
+                folder.GetDetailsOf(file, tags_idx)
+                folder.SetDetailsOf(file, tags_idx, "")
+
+            # Restore mtime to avoid reordering the grid after rating/tag updates
+            if original_mtime is not None:
+                try:
+                    os.utime(file_path, (original_mtime, original_mtime))
+                except Exception:
+                    pass
+
+            epoch = _next_cache_epoch()
+            _cache_set(
+                file_path,
+                original_mtime if original_mtime is not None else _get_mtime_safe(file_path),
+                epoch,
+                {"rating": _coerce_rating_to_stars(rating), "tags": tags_list},
+            )
+            return True
+        finally:
+            if pythoncom is not None:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
     except Exception:
         return False
 

@@ -29,6 +29,7 @@ import {
 } from "./ui_viewer.js";
 import { createMetadataSidebar } from "./ui_sidebar.js";
 import { createGridView } from "./ui_gridview.js";
+import { createStatusDot, injectStatusDotStyles } from "./ui_status_dot.js";
 import {
   ensureGlobalAutoRefresh,
   ensureVideoNodeDropBridge,
@@ -98,6 +99,12 @@ function renderAssetsManager(root) {
   const title = createEl("div", "mjr-fm-title", "Majoor Assets Manager");
   Object.assign(title.style, { fontWeight: "600", fontSize: "0.85rem", opacity: "0.9" });
   headerRow.append(title);
+
+  // Status dot (index health + click to reindex)
+  injectStatusDotStyles();
+  const statusDot = createStatusDot(api);
+  headerRow.appendChild(statusDot.element);
+  cleanups.push(() => statusDot.cleanup());
 
   const searchRow = createEl("div", "mjr-fm-search-row");
   Object.assign(searchRow.style, { display: "flex", alignItems: "center", gap: "6px" });
@@ -680,8 +687,11 @@ app.registerExtension({
       options: ["both", "sidebar", "bottom"],
       defaultValue: mjrSettings.integration?.panel || mjrSettingsDefaults.integration.panel,
       onChange: (val) => {
+        const next = String(val || "both");
+        const current = String(mjrSettings.integration?.panel || "both");
+        if (next === current) return;
         mjrSettings.integration = mjrSettings.integration || {};
-        mjrSettings.integration.panel = String(val || "both");
+        mjrSettings.integration.panel = next;
         mjrSaveSettings(mjrSettings);
         mjrShowToast("info", "Reload the ComfyUI page to apply the new panel placement.", "Assets Manager");
       },
@@ -714,6 +724,21 @@ app.registerExtension({
         mjrSaveSettings(mjrSettings);
         mjrResetPrefetch();
         mjrPrefetchOutputs();
+        refreshAllInstances({ silent: true, forceFiles: true });
+      },
+    });
+
+    app.ui.settings.addSetting({
+      id: `${SETTINGS_PREFIX}.Index.Source`,
+      name: "Majoor: File Source",
+      tooltip: "auto uses the SQLite index when fresh; filesystem always scans.",
+      type: "combo",
+      options: ["auto", "index", "filesystem"],
+      defaultValue: mjrSettings.index?.source || mjrSettingsDefaults.index.source,
+      onChange: (val) => {
+        mjrSettings.index = mjrSettings.index || {};
+        mjrSettings.index.source = String(val || "auto");
+        mjrSaveSettings(mjrSettings);
         refreshAllInstances({ silent: true, forceFiles: true });
       },
     });

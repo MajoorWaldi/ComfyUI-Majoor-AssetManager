@@ -127,19 +127,6 @@ Main ones to know:
 
 ---
 
-## 🧪 Development (Formatting)
-
-This repo uses `ruff` for formatting and a small set of safe autofixes.
-
-```bash
-pip install -r requirements-dev.txt
-ruff format .
-ruff check --fix .
-```
-
-Optional: `pre-commit install`
-
----
 
 ## 📝 Notes
 
