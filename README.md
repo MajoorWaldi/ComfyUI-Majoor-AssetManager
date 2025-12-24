@@ -77,13 +77,7 @@ Sometimes you need custom nodes. Sometimes external logic makes sense. But jumpi
 
 ## 📦 Installation
 
-### Method 1: ComfyUI Manager (recommended)
-
-1. Open ComfyUI Manager
-2. Search for "Majoor Assets Manager" or install via Git URL
-3. Install and restart ComfyUI
-
-### Method 2: Manual
+### Method 1: Manual
 
 ```bash
 cd ComfyUI/custom_nodes
