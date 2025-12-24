@@ -102,7 +102,7 @@ export const mjrSettingsDefaults = {
   autoRefresh: { enabled: true, interval: 5000, focusOnly: true },
   metaPanel: { showByDefault: true, refreshInterval: 2000 },
   grid: { cardSize: "medium", showTags: true, showRating: true, pageSize: 500, hoverInfo: true },
-  index: { source: "auto" }, // auto | index | filesystem
+  index: { source: "filesystem" }, // auto | index | filesystem
   integration: { panel: "both" }, // "both" | "sidebar" | "bottom"
   viewer: {
     navEnabled: true,
