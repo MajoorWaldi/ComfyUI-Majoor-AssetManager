@@ -1,5 +1,5 @@
-import { app } from "../../../../scripts/app.js";
-import { api } from "../../../../scripts/api.js";
+import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
 import { applyStyles, CONTEXT_MENU_STYLES, createEl, mjrShowToast } from "./ui_settings.js";
 import { mjrOpenABViewer } from "./ui_viewer.js";
 

@@ -1,4 +1,4 @@
-import { api } from "../../../../scripts/api.js";
+import { api } from "../../../scripts/api.js";
 import {
   mjrPrefetchedFiles,
   mjrShowToast,

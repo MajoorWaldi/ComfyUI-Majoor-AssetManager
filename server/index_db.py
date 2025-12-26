@@ -28,11 +28,20 @@ from .utils import (
 )
 from .logger import get_logger
 from .workflow_hash import hash_workflow_robust
+from .metadata_generation import has_generation_workflow
 
 log = get_logger(__name__)
 
+# ===== Constants =====
+DB_SCHEMA_VERSION = 3
+
+# ===== Threading and Globals =====
+
 # Thread-local storage for DB connections (one per thread)
 _thread_local = threading.local()
+
+# Lock for thread-safe initialization
+_init_lock = threading.Lock()
 
 # Global index status
 _index_status = {
@@ -56,6 +65,16 @@ _JSON1_AVAILABLE: Optional[bool] = None
 
 # ===== Database Initialization =====
 
+def _configure_db(conn: sqlite3.Connection) -> None:
+    """
+    Configure database connection with optimal settings.
+    Enables WAL mode for better concurrency.
+    """
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute("PRAGMA cache_size=-64000")  # 64MB cache
+
 def init_db(db_path: Optional[str] = None) -> None:
     """
     Initialize the SQLite database with schema and indexes.
@@ -67,194 +86,522 @@ def init_db(db_path: Optional[str] = None) -> None:
     # Ensure directory exists
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
+    with _init_lock:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
 
-    try:
-        _configure_db(conn)
-        _create_schema(conn)
+        try:
+            _configure_db(conn)
+            _run_migrations(conn)
+            conn.commit()
+            log.info(f"📁✅ [Majoor] Index database initialized at {db_path}")
+        except Exception as e:
+            log.error(f"📁❌ [Majoor] Failed to initialize database: {e}")
+            raise
+        finally:
+            conn.close()
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    """
+    Apply database migrations sequentially.
+    """
+    current_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    log.info(f"📁 [Majoor] DB schema version: {current_version}")
+
+    if current_version >= DB_SCHEMA_VERSION:
+        # Also run feature detection on every startup, not just on migration
         _detect_fts5(conn)
         _detect_json1(conn)
-        conn.commit()
-        log.info(f"[Majoor] Index database initialized at {db_path}")
-    except Exception as e:
-        log.error(f"[Majoor] Failed to initialize database: {e}")
-        raise
-    finally:
-        conn.close()
+        return
 
+    log.info(f"📁🔄 [Majoor] Migrating database from v{current_version} to v{DB_SCHEMA_VERSION}...")
 
-def _configure_db(conn: sqlite3.Connection) -> None:
-    """Apply performance optimizations to the database."""
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA temp_store=MEMORY")
-    conn.execute("PRAGMA cache_size=-64000")  # 64MB cache
-    conn.execute("PRAGMA mmap_size=268435456")  # 256MB memory-mapped I/O
-    conn.execute("PRAGMA foreign_keys=ON")
+    for v in range(current_version, DB_SCHEMA_VERSION):
+        version_to_apply = v + 1
+        log.info(f"📁 [Majoor] Applying migration v{version_to_apply}...")
+        try:
+            _MIGRATIONS[version_to_apply](conn)
+            conn.execute(f"PRAGMA user_version = {version_to_apply}")
+            conn.commit()
+            log.info(f"📁✅ [Majoor] Migration v{version_to_apply} applied successfully.")
+        except Exception as e:
+            log.error(f"📁❌ [Majoor] FAILED to apply migration v{version_to_apply}: {e}")
+            conn.rollback()
+            raise
 
+def _migrate_v1(conn: sqlite3.Connection) -> None:
 
-def _create_schema(conn: sqlite3.Connection) -> None:
-    """Create database tables and indexes."""
+    """Schema version 1: Initial creation of assets table and FTS."""
+
     # Main assets table
+
     conn.execute("""
+
         CREATE TABLE IF NOT EXISTS assets (
+
             -- Identity (stable key)
+
             id TEXT PRIMARY KEY,
+
             type TEXT NOT NULL,
+
             subfolder TEXT,
+
             filename TEXT NOT NULL,
+
             ext TEXT,
+
             abs_path TEXT,
 
+
+
             -- File metadata
+
             mtime INTEGER,
+
             size INTEGER,
+
             kind TEXT,
 
+
+
             -- Media properties
+
             width INTEGER,
+
             height INTEGER,
+
             duration_ms INTEGER,
 
+
+
             -- User metadata
+
             rating REAL,
+
             tags_json TEXT,
+
             notes TEXT,
 
+
+
             -- Generation params
+
             prompt TEXT,
+
             negative TEXT,
+
             model TEXT,
+
             sampler TEXT,
+
             steps INTEGER,
+
             cfg REAL,
+
             seed TEXT,
 
+
+
             -- Workflow tracking
+
             has_workflow INTEGER DEFAULT 0,
+
             workflow_hash TEXT,
 
+
+
             -- Full metadata dump (fallback/archive)
+
             meta_json TEXT,
 
+
+
             -- Timestamps
+
             created_at INTEGER DEFAULT (strftime('%s', 'now')),
+
             updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+
         )
+
     """)
 
+
+
     # Indexes for common queries
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_mtime ON assets(mtime)")
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_kind ON assets(kind)")
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_rating ON assets(rating)")
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_has_workflow ON assets(has_workflow)")
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_workflow_hash ON assets(workflow_hash)")
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_type_subfolder ON assets(type, subfolder)")
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_filename ON assets(filename)")
 
 
-def _detect_fts5(conn: sqlite3.Connection) -> None:
-    """Detect FTS5 availability and create FTS table if available."""
-    global _index_status
 
-    # Check if FTS5 is compiled in
-    cursor = conn.execute("PRAGMA compile_options")
-    compile_options = [row[0] for row in cursor.fetchall()]
-    fts5_available = any("FTS5" in opt for opt in compile_options)
+    # Create FTS table only if FTS5 is available
 
-    with _status_lock:
-        _index_status["fts_available"] = fts5_available
+    if not _is_fts5_available(conn):
 
-    if not fts5_available:
-        log.warning("[Majoor] FTS5 not available, instant search disabled")
         return
 
-    def _fts_columns() -> List[str]:
-        try:
-            rows = conn.execute("PRAGMA table_info(assets_fts)").fetchall()
-        except sqlite3.OperationalError:
-            return []
-        return [row[1] for row in rows]
 
-    existing_cols = _fts_columns()
-    needs_rebuild = bool(existing_cols) and "tags_text" not in existing_cols
 
-    if needs_rebuild:
-        log.warning("[Majoor] FTS schema outdated (missing tags_text); rebuilding index")
-        conn.execute("DROP TRIGGER IF EXISTS assets_fts_insert")
-        conn.execute("DROP TRIGGER IF EXISTS assets_fts_update")
-        conn.execute("DROP TRIGGER IF EXISTS assets_fts_delete")
-        conn.execute("DROP TABLE IF EXISTS assets_fts")
-        existing_cols = []
-
-    # Create FTS5 virtual table
     try:
+
         conn.execute("""
+
             CREATE VIRTUAL TABLE IF NOT EXISTS assets_fts USING fts5(
+
                 id UNINDEXED,
+
                 filename,
+
                 subfolder,
+
                 prompt,
+
                 negative,
-                tags_text,
+
                 notes,
+
                 model,
+
                 sampler,
+
                 content='assets',
+
                 content_rowid='rowid'
+
             )
+
         """)
 
-        # Create triggers to keep FTS in sync
-        conn.execute("""
-            CREATE TRIGGER IF NOT EXISTS assets_fts_insert AFTER INSERT ON assets BEGIN
-                INSERT INTO assets_fts(rowid, id, filename, subfolder, prompt, negative, tags_text, notes, model, sampler)
-                VALUES (new.rowid, new.id, new.filename, new.subfolder, new.prompt, new.negative,
-                        replace(replace(new.tags_json, '["', ''), '"]', ''), new.notes, new.model, new.sampler);
-            END
-        """)
+        # Triggers will be added in v2
 
-        conn.execute("""
-            CREATE TRIGGER IF NOT EXISTS assets_fts_update AFTER UPDATE ON assets BEGIN
-                UPDATE assets_fts SET
-                    filename = new.filename,
-                    subfolder = new.subfolder,
-                    prompt = new.prompt,
-                    negative = new.negative,
-                    tags_text = replace(replace(new.tags_json, '["', ''), '"]', ''),
-                    notes = new.notes,
-                    model = new.model,
-                    sampler = new.sampler
-                WHERE rowid = new.rowid;
-            END
-        """)
-
-        conn.execute("""
-            CREATE TRIGGER IF NOT EXISTS assets_fts_delete AFTER DELETE ON assets BEGIN
-                DELETE FROM assets_fts WHERE rowid = old.rowid;
-            END
-        """)
-
-        if needs_rebuild or not existing_cols:
-            try:
-                conn.execute("""
-                    INSERT INTO assets_fts(
-                        rowid, id, filename, subfolder, prompt, negative, tags_text, notes, model, sampler
-                    )
-                    SELECT
-                        rowid, id, filename, subfolder, prompt, negative,
-                        replace(replace(tags_json, '["', ''), '"]', ''), notes, model, sampler
-                    FROM assets
-                """)
-            except Exception as e:
-                log.warning(f"[Majoor] Failed to seed FTS index: {e}")
-
-        log.info("[Majoor] FTS5 search enabled")
     except Exception as e:
-        log.warning(f"[Majoor] Failed to create FTS5 table: {e}")
-        with _status_lock:
-            _index_status["fts_available"] = False
+
+        log.warning(f"📁⚠️ [Majoor] Failed to create FTS5 table in v1: {e}")
+
+
+
+    # Feature detection should run as part of the migration
+
+    _detect_json1(conn)
+
+
+
+def _migrate_v2(conn: sqlite3.Connection) -> None:
+
+    """Schema version 2: Add tags_text to FTS table and add triggers."""
+
+    if not _is_fts5_available(conn):
+
+        log.warning("📁⚠️ [Majoor] FTS5 not available, skipping migration v2.")
+
+        return
+
+
+
+    # Check if FTS table needs update
+
+    try:
+
+        rows = conn.execute("PRAGMA table_info(assets_fts)").fetchall()
+
+        cols = [row[1] for row in rows]
+
+    except sqlite3.OperationalError:
+
+        cols = [] # FTS table might not exist if v1 failed
+
+
+
+    if "tags_text" in cols:
+
+        log.info("📁 [Majoor] FTS schema already up to date, skipping v2 rebuild.")
+
+    else:
+
+        log.warning("📁⚠️ [Majoor] FTS schema outdated, rebuilding index for v2.")
+
+        conn.execute("DROP TABLE IF EXISTS assets_fts")
+
+        conn.execute("""
+
+            CREATE VIRTUAL TABLE assets_fts USING fts5(
+
+                id UNINDEXED,
+
+                filename,
+
+                subfolder,
+
+                prompt,
+
+                negative,
+
+                tags_text,
+
+                notes,
+
+                model,
+
+                sampler,
+
+                content='assets',
+
+                content_rowid='rowid'
+
+            )
+
+        """)
+
+
+
+    # Create/update triggers
+
+    conn.execute("DROP TRIGGER IF EXISTS assets_fts_insert")
+
+    conn.execute("""
+
+        CREATE TRIGGER assets_fts_insert AFTER INSERT ON assets BEGIN
+
+            INSERT INTO assets_fts(rowid, id, filename, subfolder, prompt, negative, tags_text, notes, model, sampler)
+
+            VALUES (new.rowid, new.id, new.filename, new.subfolder, new.prompt, new.negative,
+
+                    replace(replace(new.tags_json, '["', ''), '"]', ''), new.notes, new.model, new.sampler);
+
+        END
+
+    """)
+
+
+
+    conn.execute("DROP TRIGGER IF EXISTS assets_fts_update")
+
+    conn.execute("""
+
+        CREATE TRIGGER assets_fts_update AFTER UPDATE ON assets BEGIN
+
+            UPDATE assets_fts SET
+
+                filename = new.filename,
+
+                subfolder = new.subfolder,
+
+                prompt = new.prompt,
+
+                negative = new.negative,
+
+                tags_text = replace(replace(new.tags_json, '["', ''), '"]', ''),
+
+                notes = new.notes,
+
+                model = new.model,
+
+                sampler = new.sampler
+
+            WHERE rowid = new.rowid;
+
+        END
+
+    """)
+
+
+
+    conn.execute("DROP TRIGGER IF EXISTS assets_fts_delete")
+
+    conn.execute("""
+
+        CREATE TRIGGER assets_fts_delete AFTER DELETE ON assets BEGIN
+
+            DELETE FROM assets_fts WHERE rowid = old.rowid;
+
+        END
+
+    """)
+
+
+
+    # Re-populate FTS table
+
+    try:
+
+        conn.execute("DELETE FROM assets_fts")
+
+        conn.execute("""
+
+            INSERT INTO assets_fts(rowid, id, filename, subfolder, prompt, negative, tags_text, notes, model, sampler)
+
+            SELECT rowid, id, filename, subfolder, prompt, negative,
+
+                   replace(replace(tags_json, '["', ''), '"]', ''), notes, model, sampler
+
+            FROM assets
+
+        """)
+
+        log.info("📁 [Majoor] FTS index successfully repopulated.")
+
+    except Exception as e:
+
+        log.warning(f"📁⚠️ [Majoor] Failed to repopulate FTS index: {e}")
+
+
+
+
+
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+
+
+
+
+
+    """Schema version 3: Add indexing_errors table."""
+
+
+
+
+
+    conn.execute("""
+
+
+
+
+
+        CREATE TABLE IF NOT EXISTS indexing_errors (
+
+
+
+
+
+            path TEXT PRIMARY KEY,
+
+
+
+
+
+            reason TEXT,
+
+
+
+
+
+            details TEXT,
+
+
+
+
+
+            last_attempt_at INTEGER NOT NULL
+
+
+
+
+
+        )
+
+
+
+
+
+    """)
+
+
+
+
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_indexing_errors_last_attempt ON indexing_errors(last_attempt_at)")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+_MIGRATIONS = {
+
+
+
+
+
+    1: _migrate_v1,
+
+
+
+
+
+    2: _migrate_v2,
+
+
+
+
+
+    3: _migrate_v3,
+
+
+
+
+
+}
+
+
+
+
+
+
+
+
+
+def _is_fts5_available(conn: sqlite3.Connection) -> bool:
+
+    """Check if FTS5 is compiled in."""
+
+    cursor = conn.execute("PRAGMA compile_options")
+
+    compile_options = [row[0] for row in cursor.fetchall()]
+
+    return any("FTS5" in opt for opt in compile_options)
+
+
+
+def _detect_fts5(conn: sqlite3.Connection) -> None:
+
+    """Detect FTS5 availability and update global status."""
+
+    global _index_status
+
+    fts5_available = _is_fts5_available(conn)
+
+    with _status_lock:
+
+        if _index_status["fts_available"] != fts5_available:
+
+            log.info(f"📁 [Majoor] FTS5 availability: {fts5_available}")
+
+        _index_status["fts_available"] = fts5_available
+
+
 
 
 def _detect_json1(conn: sqlite3.Connection) -> None:
@@ -287,13 +634,15 @@ def get_db() -> sqlite3.Connection:
 
 
 def _cleanup_connections():
-    """Close all thread-local connections on exit."""
+    """Close all thread-local connections and stop watcher on exit."""
+    from . import watcher
+    watcher.stop_watcher()
     if hasattr(_thread_local, "connection"):
         try:
             _thread_local.connection.close()
-            log.debug("[Majoor] Database connection closed")
+            log.debug("📁🔍 [Majoor] Database connection closed")
         except Exception as e:
-            log.debug(f"[Majoor] Error closing connection: {e}")
+            log.debug(f"📁🔍 [Majoor] Error closing connection: {e}")
 
 
 # Register cleanup handler
@@ -352,19 +701,28 @@ def upsert_asset(record: Dict[str, Any]) -> None:
         conn.execute(sql, [record[f] for f in fields])
         conn.commit()
     except Exception as e:
-        log.error(f"[Majoor] Failed to upsert asset {record.get('id')}: {e}")
+        log.error(f"📁❌ [Majoor] Failed to upsert asset {record.get('id')}: {e}")
         conn.rollback()
         raise
 
 
 def delete_asset(asset_id: str) -> None:
-    """Delete an asset from the index."""
+    """Delete an asset and any associated indexing errors from the index."""
     conn = get_db()
     try:
+        # Also clear any potential indexing errors for this path
+        parsed_id = _parse_asset_id(asset_id)
+        if parsed_id and parsed_id.get("filename"):
+            # Reconstruct path to be safe
+            from .config import OUTPUT_ROOT
+            from pathlib import Path
+            path = Path(OUTPUT_ROOT) / parsed_id["subfolder"] / parsed_id["filename"]
+            clear_indexing_error(str(path.resolve()))
+
         conn.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
         conn.commit()
     except Exception as e:
-        log.error(f"[Majoor] Failed to delete asset {asset_id}: {e}")
+        log.error(f"📁❌ [Majoor] Failed to delete asset {asset_id}: {e}")
         conn.rollback()
         raise
 
@@ -513,7 +871,7 @@ def query_assets(
         cursor = conn.execute(count_query, params)
         total = cursor.fetchone()[0]
     except Exception as e:
-        log.error(f"[Majoor] Failed to count assets: {e}")
+        log.error(f"📁❌ [Majoor] Failed to count assets: {e}")
         total = 0
 
     # Paginate
@@ -525,7 +883,7 @@ def query_assets(
         rows = cursor.fetchall()
         assets = [_row_to_asset(row) for row in rows]
     except Exception as e:
-        log.error(f"[Majoor] Failed to query assets: {e}")
+        log.error(f"📁❌ [Majoor] Failed to query assets: {e}")
         assets = []
 
     return {
@@ -556,6 +914,37 @@ def _row_to_asset(row: sqlite3.Row) -> Dict[str, Any]:
     return asset
 
 
+def log_indexing_error(path: str, reason: str, details: str) -> None:
+    """Log an error into the indexing_errors table."""
+    conn = get_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO indexing_errors (path, reason, details, last_attempt_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                reason = excluded.reason,
+                details = excluded.details,
+                last_attempt_at = excluded.last_attempt_at
+            """,
+            (path, reason, details, int(time.time()))
+        )
+        conn.commit()
+    except Exception as e:
+        log.error(f"📁❌ [Majoor] Failed to log indexing error for {path}: {e}")
+        conn.rollback()
+
+def clear_indexing_error(path: str) -> None:
+    """Remove a resolved error from the indexing_errors table."""
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM indexing_errors WHERE path = ?", (path,))
+        conn.commit()
+    except Exception as e:
+        log.error(f"📁❌ [Majoor] Failed to clear indexing error for {path}: {e}")
+        conn.rollback()
+
+
 # ===== Indexing Operations =====
 
 def _should_reindex(file_path: str, db_record: Optional[Dict[str, Any]]) -> bool:
@@ -579,14 +968,23 @@ def _should_reindex(file_path: str, db_record: Optional[Dict[str, Any]]) -> bool
     return False  # Skip, unchanged
 
 
-def _extract_asset_metadata(file_path: str, type_name: str, subfolder: str, filename: str) -> Dict[str, Any]:
+def _extract_asset_metadata(file_path: str, type_name: str, subfolder: str, filename: str) -> Optional[Dict[str, Any]]:
     """
     Extract metadata from a file for indexing.
-    Reuses existing metadata loaders (Windows/sidecar/exiftool).
+    Returns a dict of metadata on success, or None on failure.
+    Errors are logged to the indexing_errors table.
     """
-    stat = os.stat(file_path)
-    ext = os.path.splitext(filename)[1].lower()
-    kind = classify_ext(filename.lower())
+    try:
+        stat = os.stat(file_path)
+        ext = os.path.splitext(filename)[1].lower()
+        kind = classify_ext(filename.lower())
+    except FileNotFoundError:
+        # File might have been deleted between scan and processing
+        log.debug(f"📁🔍 [Majoor] File not found during metadata extraction: {file_path}")
+        return None
+    except Exception as e:
+        log_indexing_error(file_path, "file_stat", f"{type(e).__name__}: {e}")
+        return None
 
     # Base record
     record = {
@@ -603,6 +1001,9 @@ def _extract_asset_metadata(file_path: str, type_name: str, subfolder: str, file
 
     # Load metadata (system metadata + sidecar)
     try:
+        # Use robust workflow detection first
+        record["has_workflow"] = 1 if has_generation_workflow(file_path) else 0
+
         sys_meta = get_system_metadata(file_path) or {}
         sidecar_meta = load_metadata(file_path) or {}
 
@@ -612,17 +1013,23 @@ def _extract_asset_metadata(file_path: str, type_name: str, subfolder: str, file
 
         # Sidecar-only fields
         record["notes"] = sidecar_meta.get("notes", "")
-        record["prompt"] = sidecar_meta.get("prompt", {}).get("text", "")
+        # Simplified prompt extraction
+        prompt_text = ""
+        if isinstance(sidecar_meta.get("prompt"), dict):
+            prompt_text = sidecar_meta.get("prompt", {}).get("text", "")
+        record["prompt"] = prompt_text
         record["negative"] = sidecar_meta.get("prompt", {}).get("negative", "")
 
         # Generation params (from ComfyUI workflow/prompt)
         workflow = sidecar_meta.get("workflow")
         if workflow:
-            record["has_workflow"] = 1
+            # If has_workflow wasn't detected but we have a sidecar, mark it.
+            if record["has_workflow"] == 0:
+                record["has_workflow"] = 1
             # Calculate workflow hash
             record["workflow_hash"] = hash_workflow_robust(workflow)
         else:
-            record["has_workflow"] = 0
+            # No sidecar workflow, hash is None
             record["workflow_hash"] = None
 
         # Extract common generation params from prompt
@@ -646,19 +1053,27 @@ def _extract_asset_metadata(file_path: str, type_name: str, subfolder: str, file
         # Media properties (basic extraction, can be extended with PIL/ffmpeg)
         if kind == "image" and ext in IMAGE_EXTS:
             try:
-                from PIL import Image
+                # Lazy import PIL
+                from PIL import Image, UnidentifiedImageError
                 with Image.open(file_path) as img:
                     record["width"], record["height"] = img.size
-            except:
+            except UnidentifiedImageError:
+                 log.debug(f"Could not identify image file {file_path}")
+            except Exception:
+                # This can fail for many reasons (corrupt file, etc.), don't log as major error
                 pass
 
         # Store full metadata as JSON (optional, for debugging)
-        record["meta_json"] = json.dumps({**sys_meta, **sidecar_meta}, ensure_ascii=False)
+        # record["meta_json"] = json.dumps({**sys_meta, **sidecar_meta}, ensure_ascii=False)
+
+        # If we reached here, any previous errors for this path are resolved
+        clear_indexing_error(file_path)
+        return record
 
     except Exception as e:
-        log.warning(f"[Majoor] Failed to extract metadata for {file_path}: {e}")
-
-    return record
+        log.warning(f"📁⚠️ [Majoor] Failed to extract metadata for {file_path}: {e}")
+        log_indexing_error(file_path, "metadata_extraction", f"{type(e).__name__}: {e}")
+        return None
 
 
 def reindex_paths(paths: List[str], progress_cb: Optional[Callable[[int, int], None]] = None) -> Dict[str, Any]:
@@ -710,12 +1125,18 @@ def reindex_paths(paths: List[str], progress_cb: Optional[Callable[[int, int], N
 
             # Extract metadata and upsert
             record = _extract_asset_metadata(file_path, type_name, subfolder, filename)
-            upsert_asset(record)
-            indexed += 1
+            if record:
+                upsert_asset(record)
+                indexed += 1
+            else:
+                # Error was already logged by _extract_asset_metadata
+                errors.append(f"Failed to extract metadata for {file_path}")
+                continue
 
         except Exception as e:
-            log.error(f"[Majoor] Failed to index {file_path}: {e}")
+            log.error(f"📁❌ [Majoor] Failed to index {file_path}: {e}")
             errors.append(f"{file_path}: {e}")
+            log_indexing_error(file_path, "indexing_general", f"{type(e).__name__}: {e}")
 
         if progress_cb:
             progress_cb(i + 1, total)
@@ -786,7 +1207,7 @@ def reindex_all(progress_cb: Optional[Callable[[int, int], None]] = None) -> Dic
         # Index each file
         for i, file_path in enumerate(file_paths):
             if _stop_indexing.is_set():
-                log.info("[Majoor] Indexing stopped by user")
+                log.info("📁 [Majoor] Indexing stopped by user")
                 break
 
             try:
@@ -813,12 +1234,17 @@ def reindex_all(progress_cb: Optional[Callable[[int, int], None]] = None) -> Dic
                 else:
                     # Extract metadata and upsert
                     record = _extract_asset_metadata(file_path, type_name, subfolder, filename)
-                    upsert_asset(record)
-                    indexed += 1
+                    if record:
+                        upsert_asset(record)
+                        indexed += 1
+                    else:
+                        # Error already logged
+                        pass
 
             except Exception as e:
-                log.error(f"[Majoor] Failed to index {file_path}: {e}")
+                log.error(f"📁❌ [Majoor] Failed to index {file_path}: {e}")
                 errors.append(f"{file_path}: {e}")
+                log_indexing_error(file_path, "indexing_general", f"{type(e).__name__}: {e}")
 
             if progress_cb:
                 progress_cb(i + 1, total)
@@ -845,7 +1271,7 @@ def reindex_all(progress_cb: Optional[Callable[[int, int], None]] = None) -> Dic
             _index_status["indexed_assets"] = _index_status["total_assets"]
 
     except Exception as e:
-        log.error(f"[Majoor] Reindex failed: {e}")
+        log.error(f"📁❌ [Majoor] Reindex failed: {e}")
         with _status_lock:
             _index_status["status"] = "error"
             _index_status["errors"].append(str(e))
@@ -863,7 +1289,7 @@ def start_background_reindex() -> None:
     global _indexing_thread
 
     if _indexing_thread and _indexing_thread.is_alive():
-        log.warning("[Majoor] Indexing already in progress")
+        log.warning("📁⚠️ [Majoor] Indexing already in progress")
         return
 
     _stop_indexing.clear()
@@ -872,7 +1298,7 @@ def start_background_reindex() -> None:
         try:
             reindex_all()
         except Exception as e:
-            log.error(f"[Majoor] Background reindex failed: {e}")
+            log.error(f"📁❌ [Majoor] Background reindex failed: {e}")
 
     _indexing_thread = threading.Thread(target=worker, daemon=True)
     _indexing_thread.start()
@@ -896,6 +1322,18 @@ def get_index_status() -> Dict[str, Any]:
         status["last_scan"] = datetime.fromtimestamp(status["last_scan"]).isoformat()
 
     return status
+
+
+def get_indexing_errors() -> List[Dict[str, Any]]:
+    """Get all records from the indexing_errors table."""
+    conn = get_db()
+    try:
+        cursor = conn.execute("SELECT * FROM indexing_errors ORDER BY last_attempt_at DESC")
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        log.error(f"📁❌ [Majoor] Failed to get indexing errors: {e}")
+        return []
 
 
 def check_freshness() -> str:
@@ -926,7 +1364,7 @@ def check_freshness() -> str:
             return "stale"
 
     except Exception as e:
-        log.error(f"[Majoor] Failed to check freshness: {e}")
+        log.error(f"📁❌ [Majoor] Failed to check freshness: {e}")
         return "unknown"
 
 
@@ -936,49 +1374,30 @@ def auto_init_index() -> None:
     """
     Auto-initialize index after ComfyUI is ready.
     Creates DB if it doesn't exist, checks freshness, and triggers reindex if needed.
-
-    IMPORTANT: Must be called AFTER ComfyUI server is fully initialized.
-    Do NOT call on module import (race condition with OUTPUT_ROOT).
     """
     try:
         # Ensure index directory exists
         os.makedirs(INDEX_DIR, exist_ok=True)
 
-        if not os.path.exists(INDEX_DB):
-            log.info("[Majoor] Creating index database for the first time")
-            init_db()
-            # First-time index in background
+        # Initialize database and run migrations
+        init_db()
+
+        # Check freshness to catch up on offline changes
+        freshness = check_freshness()
+        with _status_lock:
+            _index_status["freshness"] = freshness
+
+        if freshness == "stale":
+            log.info("📁 [Majoor] Index is stale, triggering one-time reindex.")
             start_background_reindex()
-        else:
-            # Database exists, just ensure schema is up to date
-            init_db()
 
-            # Check freshness
-            freshness = check_freshness()
-            with _status_lock:
-                _index_status["freshness"] = freshness
-
-            # Auto-reindex if stale or last scan > 1 hour ago
-            status = get_index_status()
-            should_reindex = False
-
-            if freshness == "stale":
-                should_reindex = True
-                log.info("[Majoor] Index is stale, triggering auto-reindex")
-
-            if status.get("last_scan"):
-                from datetime import datetime
-                last_scan = datetime.fromisoformat(status["last_scan"])
-                age_seconds = (datetime.now() - last_scan).total_seconds()
-                if age_seconds > 3600:  # 1 hour
-                    should_reindex = True
-                    log.info("[Majoor] Index is >1 hour old, triggering auto-reindex")
-
-            if should_reindex:
-                start_background_reindex()
+        # Start the real-time file watcher
+        from . import watcher
+        watcher.start_watcher(OUTPUT_ROOT)
 
     except Exception as e:
-        log.error(f"[Majoor] Failed to auto-initialize index: {e}")
+        log.error(f"📁❌ [Majoor] Failed to auto-initialize index: {e}")
+
 
 
 # Note: auto_init_index() should be called from __init__.py or routes.py after server starts

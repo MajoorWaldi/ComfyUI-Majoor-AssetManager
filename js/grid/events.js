@@ -92,7 +92,7 @@ const fileManagerStore = {
 export async function mjrFetchFileAsDataTransferFile(info) {
   const url = buildViewUrl(info);
   try {
-    const res = await fetch(url);
+    const res = await api.fetchApi(url);
     if (!res.ok) return null;
     const blob = await res.blob();
     const name = info.filename || info.name || "file";
@@ -589,8 +589,8 @@ export function ensureGlobalAutoRefresh(refreshAllInstances) {
 
 async function fetchHistory(promptId) {
   try {
-    const url = `${location.origin}/history/${promptId}`;
-    const res = await fetch(url);
+    const url = `/history/${promptId}`;
+    const res = await api.fetchApi(url);
     if (!res.ok) return null;
     return await res.json();
   } catch (err) {
@@ -625,7 +625,7 @@ async function persistGenerationMetadata(videoFiles, history) {
 
   try {
     if (mjrCapabilitiesCache === null) {
-      const resCap = await fetch("/mjr/filemanager/capabilities");
+      const resCap = await api.fetchApi("/mjr/filemanager/capabilities");
       if (resCap.ok) {
         mjrCapabilitiesCache = await resCap.json().catch(() => null);
       } else {
@@ -634,7 +634,7 @@ async function persistGenerationMetadata(videoFiles, history) {
     }
     const sidecarEnabled = !!(mjrCapabilitiesCache && mjrCapabilitiesCache.sidecar_enabled);
     if (!sidecarEnabled) return;
-    await fetch("/mjr/filemanager/generation/update", {
+    await api.fetchApi("/mjr/filemanager/generation/update", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),

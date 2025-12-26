@@ -1,5 +1,5 @@
-import { api } from "../../../../scripts/api.js";
-import { app } from "../../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
+import { app } from "../../../scripts/app.js";
 
 export function createEl(tag, className, text) {
   const el = document.createElement(tag);

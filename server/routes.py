@@ -192,13 +192,13 @@ _BATCH_ZIP_MAX_AGE_S = 3600.0
 try:
     _SCAN_MIN_INTERVAL = float(os.environ.get("MJR_SCAN_MIN_INTERVAL", "5.0"))
 except (ValueError, TypeError) as e:
-    log.warning("[Majoor] Invalid MJR_SCAN_MIN_INTERVAL, using default: %s", e)
+    log.warning("📁⚠️ [Majoor] Invalid MJR_SCAN_MIN_INTERVAL, using default: %s", e)
     _SCAN_MIN_INTERVAL = 5.0
 
 try:
     _FOLDER_CHECK_INTERVAL = float(os.environ.get("MJR_FOLDER_CHECK_INTERVAL", "2.0"))
 except (ValueError, TypeError) as e:
-    log.warning("[Majoor] Invalid MJR_FOLDER_CHECK_INTERVAL, using default: %s", e)
+    log.warning("📁⚠️ [Majoor] Invalid MJR_FOLDER_CHECK_INTERVAL, using default: %s", e)
     _FOLDER_CHECK_INTERVAL = 2.0
 
 try:
@@ -206,7 +206,7 @@ try:
     if _META_PREFETCH_COUNT < 0:
         _META_PREFETCH_COUNT = 0
 except (ValueError, TypeError) as e:
-    log.warning("[Majoor] Invalid MJR_META_PREFETCH_COUNT, using default: %s", e)
+    log.warning("📁⚠️ [Majoor] Invalid MJR_META_PREFETCH_COUNT, using default: %s", e)
     _META_PREFETCH_COUNT = 80
 
 _CACHE_LOCK = threading.Lock()
@@ -982,65 +982,75 @@ async def list_files(request: web.Request) -> web.Response:
     prefetch_count = min(len(items), _META_PREFETCH_COUNT) if (paged and offset == 0 and not using_index) else 0
     if prefetch_count > 0:
         root = _get_output_root()
-        # Make a copy of items to prevent cache mutation race conditions
-        import copy
-        prefetch_items = copy.deepcopy(items[:prefetch_count])
 
-        async def _prefetch_async():
-            """Background task to prefetch metadata without blocking the response."""
+        async def _prefetch_async(prefetch_items: List[Dict[str, Any]]):
+            """
+            Background task to prefetch metadata and safely update the main cache.
+            """
             loop = asyncio.get_running_loop()
 
-            def _prefetch_one(f, original_f):
-                """Prefetch metadata and update original file dict with lock protection."""
+            def _prefetch_one(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                """
+                Fetches metadata for a single item and returns it.
+                Does NOT modify any shared state.
+                """
                 try:
-                    filename = f.get("filename") or f.get("name")
-                    subfolder = f.get("subfolder", "")
-                    if not filename:
-                        return
-                    target = (root / subfolder / filename).resolve()
-                    try:
-                        target.relative_to(root)
-                    except ValueError:
-                        return
-                    kind = f.get("kind") or classify_ext(filename.lower())
-                    # FIX: Removed dead code - _metadata_target was a no-op that just returned target
+                    filename = item.get("filename")
+                    subfolder = item.get("subfolder", "")
+                    relpath = item.get("relpath")
+                    if not filename or relpath is None:
+                        return None
+
+                    target = _safe_target(root, subfolder, filename)
                     if not target.exists():
-                        return
+                        return None
+
+                    kind = item.get("kind") or classify_ext(filename.lower())
                     rating, tags = _rating_tags_with_fallback(target, kind)
-                    # Keep workflow dot accurate even when we mark __metaLoaded.
-                    has_wf = False
-                    if kind in ("image", "video"):
-                        try:
-                            has_wf = _has_workflow_cached(target)
-                        except Exception:
-                            has_wf = False
+                    has_wf = _has_workflow_cached(target) if kind in ("image", "video") else False
 
-                    # Update original with lock to prevent race conditions
-                    with _CACHE_LOCK:
-                        original_f["rating"] = rating
-                        original_f["tags"] = tags
-                        original_f["has_workflow"] = has_wf
-                        original_f["__metaLoaded"] = True
-                except Exception:
-                    pass
+                    return {
+                        "relpath": relpath,
+                        "rating": rating,
+                        "tags": tags,
+                        "has_workflow": has_wf,
+                        "__metaLoaded": True,
+                    }
+                except Exception as e:
+                    log.debug(f"📁🔍 [Majoor] Prefetch failed for {item.get('filename')}: {e}")
+                    return None
 
-            # Process items in parallel with bounded workers
             max_workers_env = os.environ.get("MJR_META_PREFETCH_WORKERS")
             try:
                 max_workers_cfg = int(max_workers_env) if max_workers_env is not None else None
             except (ValueError, TypeError):
                 max_workers_cfg = None
             max_workers = max(1, min(prefetch_count, max_workers_cfg or 4))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-                tasks = []
-                for idx, f in enumerate(prefetch_items):
-                    if idx < len(items):
-                        tasks.append(loop.run_in_executor(pool, _prefetch_one, f, items[idx]))
-                if tasks:
-                    await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Schedule background task without blocking
-        asyncio.create_task(_prefetch_async())
+            results: List[Optional[Dict[str, Any]]] = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = [loop.run_in_executor(pool, _prefetch_one, item) for item in prefetch_items]
+                gathered_results = await asyncio.gather(*futures, return_exceptions=True)
+                results = [r for r in gathered_results if isinstance(r, dict)]
+
+            if not results:
+                return
+
+            # Safely update the main cache with the results
+            with _CACHE_LOCK:
+                # Create a map for quick lookups
+                cache_map = {item.get("relpath"): item for item in _FILE_CACHE if item.get("relpath")}
+                for res in results:
+                    if not res:
+                        continue
+                    relpath = res.get("relpath")
+                    if relpath in cache_map:
+                        cache_map[relpath].update(res)
+
+        # Schedule background task with a copy of the items to prefetch
+        import copy
+        items_to_prefetch = copy.deepcopy(items[:prefetch_count])
+        asyncio.create_task(_prefetch_async(items_to_prefetch))
 
     return _json_response(
         {
@@ -1150,15 +1160,38 @@ async def batch_metadata(request: web.Request) -> web.Response:
                 elif res.get("filename"):
                     results.append(res)
             except Exception as e:
-                # Log the exception and add to errors instead of silently continuing
+                # Collect errors silently, will log summary below
                 filename = item.get("filename", "unknown")
                 error_msg = f"Worker exception: {type(e).__name__}: {str(e)}"
-                log.warning("[Majoor] Batch metadata worker failed for %s: %s", filename, error_msg)
                 errors.append({"filename": filename, "error": error_msg})
 
-    # Log summary if there were failures
+    # Log summary - only one line to avoid console spam
     if errors:
-        log.info("[Majoor] Batch metadata completed: %d success, %d errors", len(results), len(errors))
+        # Group errors by error type for debug logging
+        error_types = {}
+        for err in errors:
+            error_key = err.get("error", "Unknown error")
+            if error_key not in error_types:
+                error_types[error_key] = []
+            error_types[error_key].append(err.get("filename", "unknown"))
+
+        # Single warning line for console
+        log.warning(f"📁⚠️ [Majoor] Batch metadata: {len(results)} OK, {len(errors)} failed")
+
+        # Detailed error breakdown only in debug mode
+        for error_type, filenames in error_types.items():
+            log.debug(f"📁🔍 [Majoor]   • {error_type} ({len(filenames)} files)")
+            if len(filenames) <= 3:
+                for fn in filenames:
+                    log.debug(f"📁🔍 [Majoor]     - {fn}")
+            else:
+                for fn in filenames[:2]:
+                    log.debug(f"📁🔍 [Majoor]     - {fn}")
+                log.debug(f"📁🔍 [Majoor]     ... and {len(filenames) - 2} more files")
+    else:
+        # Success case - also keep it brief
+        if len(results) > 0:
+            log.debug(f"📁🔍 [Majoor] Batch metadata: {len(results)} files processed successfully")
 
     return _json_response({"ok": True, "metadatas": results, "errors": errors})
 
@@ -1542,75 +1575,68 @@ async def get_metadata(request: web.Request) -> web.Response:
     filename = request.query.get("filename")
     subfolder = request.query.get("subfolder", "")
 
+    # Debug mode for detailed logging (enables history lookup logs, parser failures, etc.)
+    debug = request.query.get("debug", "").lower() in ("1", "true", "yes", "on")
+
     # FIX: Use validation helper to reduce code duplication
-    target, error = _validate_file_path(root, filename, subfolder)
+    target, error = await asyncio.to_thread(_validate_file_path, root, filename, subfolder)
     if error:
         # Map error to appropriate status code
         status = 404 if "not found" in error["error"].lower() else 400
         return _json_response(error, status=status)
 
-    def _extract_generation(path: Path) -> Dict[str, Any]:
-        def _extract_one(p: Path) -> Dict[str, Any]:
-            try:
-                return extract_generation_params_from_png(p) or {}
-            except Exception as e:
-                log.warning(
-                    "[Majoor.AssetsManager] metadata parsing error for %s: %s", p.name, e
-                )
-                return {}
-
-        def _has_wf(p: Dict[str, Any]) -> bool:
-            return bool(
-                p.get("has_workflow")
-                or p.get("workflow")
-                or p.get("prompt")
-                or p.get("positive_prompt")
-                or p.get("negative_prompt")
-                or p.get("sampler_name")
-                or p.get("model")
-                or p.get("loras")
-            )
-
-        ext_lower = path.suffix.lower()
-        params: Dict[str, Any] = _extract_one(path)
-
-        if ext_lower in {".mp4", ".mov", ".m4v", ".webm", ".mkv"} and not _has_wf(params):
-            stem = path.stem
-            candidates = []
-            try:
-                for entry in path.parent.iterdir():
-                    if not entry.is_file():
-                        continue
-                    if entry.suffix.lower() != ".png":
-                        continue
-                    if (
-                        entry.stem == stem
-                        or entry.stem.startswith(f"{stem}_")
-                        or entry.stem.startswith(f"{stem}-")
-                    ):
-                        candidates.append(entry)
-            except Exception:
-                candidates = []
-
-            if candidates:
-                candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                for png in candidates:
-                    sib_params = _extract_one(png)
-                    if _has_wf(sib_params):
-                        params = sib_params
-                        params["generation_source"] = "sibling_png"
-                        break
-
-        if isinstance(params, dict) and "has_workflow" not in params:
-            params["has_workflow"] = _has_wf(params)
-
-        return params
-
     loop = asyncio.get_running_loop()
-    params = await loop.run_in_executor(None, _extract_generation, target)
+
+    def _extract_and_process_generation(path: Path) -> Dict[str, Any]:
+        """Wrapper to extract params and handle video/sibling logic."""
+        try:
+            params = extract_generation_params_from_png(path, debug=debug) or {}
+
+            # Simplified sibling logic check directly after initial extraction
+            # Support for MP4/WEBP files that may lack embedded metadata
+            ext_lower = path.suffix.lower()
+            if ext_lower in {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".webp"} and not params.get("has_workflow"):
+                stem = path.stem
+                parent_dir = path.parent
+                candidates = [
+                    f for f in parent_dir.iterdir()
+                    if f.is_file() and f.suffix.lower() == ".png" and (
+                        f.stem == stem or f.stem.startswith(f"{stem}_") or f.stem.startswith(f"{stem}-")
+                    )
+                ]
+
+                if candidates:
+                    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                    for png_sibling in candidates:
+                        sib_params = extract_generation_params_from_png(png_sibling, debug=debug) or {}
+                        if sib_params.get("has_workflow"):
+                            sib_params["generation_source"] = "sibling_png"
+                            return sib_params
+            return params
+        except Exception as e:
+            if debug:
+                log.exception("📁❌ [Majoor.AssetsManager] metadata parsing error for %s: %s", path.name, e)
+            else:
+                log.warning("📁⚠️ [Majoor.AssetsManager] metadata parsing error for %s: %s", path.name, e)
+            return {}
+
+    # Run generation param extraction and robust workflow check in parallel
+    params_future = loop.run_in_executor(None, _extract_and_process_generation, target)
+    has_wf_future = loop.run_in_executor(None, has_generation_workflow, target)
+
+    params, has_wf_flag = await asyncio.gather(params_future, has_wf_future)
+
+    # CRITICAL FIX: Use non-destructive OR to preserve workflow detection from extraction
+    # NEVER overwrite True with False - combine results from both sources
+    if isinstance(params, dict):
+        params["has_workflow"] = bool(
+            params.get("has_workflow")    # What extraction already found
+            or params.get("workflow")     # Raw workflow object if present
+            or has_wf_flag                # Fast check result
+        )
 
     kind = classify_ext(filename.lower())
-    rating, tags = _rating_tags_with_fallback(target, kind)
+    rating, tags = await loop.run_in_executor(None, _rating_tags_with_fallback, target, kind)
 
     return _json_response({"ok": True, "generation": params, "rating": rating, "tags": tags})
 
@@ -1792,7 +1818,7 @@ async def batch_update_metadata(request: web.Request) -> web.Response:
             except Exception as e:
                 filename = item.get("filename", "unknown")
                 error_msg = f"Worker exception: {type(e).__name__}: {str(e)}"
-                log.warning("[Majoor] Batch update worker failed for %s: %s", filename, error_msg)
+                log.warning("📁⚠️ [Majoor] Batch update worker failed for %s: %s", filename, error_msg)
                 errors.append({
                     "filename": filename,
                     "subfolder": item.get("subfolder", ""),
@@ -1801,7 +1827,7 @@ async def batch_update_metadata(request: web.Request) -> web.Response:
 
     # Log summary
     if errors:
-        log.info("[Majoor] Batch update completed: %d updated, %d errors", len(updated), len(errors))
+        log.info("📁 [Majoor] Batch update completed: %d updated, %d errors", len(updated), len(errors))
     else:
         log.debug("[Majoor] Batch update completed: %d files updated successfully", len(updated))
 
@@ -2040,7 +2066,7 @@ async def health_check_collection_route(request: web.Request) -> web.Response:
         })
 
     except Exception as e:
-        log.error("[Majoor] Collection health check failed for '%s': %s", name, e)
+        log.error("📁❌ [Majoor] Collection health check failed for '%s': %s", name, e)
         return _json_response({"ok": False, "error": str(e)}, status=500)
 
 
@@ -2067,7 +2093,7 @@ async def index_status_route(request: web.Request) -> web.Response:
         status = await asyncio.to_thread(get_index_status)
         return _json_response(status)
     except Exception as e:
-        log.error("[Majoor] Failed to get index status: %s", e)
+        log.error("📁❌ [Majoor] Failed to get index status: %s", e)
         return _json_response({"status": "error", "error": str(e)}, status=500)
 
 
@@ -2239,7 +2265,7 @@ async def index_query_route(request: web.Request) -> web.Response:
         return _json_response(result)
 
     except Exception as e:
-        log.error("[Majoor] Failed to query index: %s", e)
+        log.error("📁❌ [Majoor] Failed to query index: %s", e)
         return _json_response({"error": str(e)}, status=500)
 
 
@@ -2292,7 +2318,31 @@ async def index_sync_metadata_route(request: web.Request) -> web.Response:
         })
 
     except Exception as e:
-        log.error("[Majoor] Failed to sync metadata to index: %s", e)
+        log.error("📁❌ [Majoor] Failed to sync metadata to index: %s", e)
+        return _json_response({"ok": False, "error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.post("/mjr/filemanager/cache/clear")
+async def clear_workflow_cache(request: web.Request) -> web.Response:
+    """
+    Clear the server-side workflow detection cache.
+    Useful after updating metadata extraction code or when workflow detection seems incorrect.
+
+    Returns:
+      {
+        "ok": true,
+        "cleared": <number of cached entries cleared>
+      }
+    """
+    try:
+        with _HAS_WORKFLOW_CACHE_LOCK:
+            count = len(_HAS_WORKFLOW_CACHE)
+            _HAS_WORKFLOW_CACHE.clear()
+
+        log.info("📁 [Majoor] Cleared workflow cache (%d entries)", count)
+        return _json_response({"ok": True, "cleared": count})
+    except Exception as e:
+        log.error("📁❌ [Majoor] Failed to clear workflow cache: %s", e)
         return _json_response({"ok": False, "error": str(e)}, status=500)
 
 
@@ -2313,8 +2363,68 @@ async def workflow_hash_info_route(request: web.Request) -> web.Response:
         info = get_hash_algorithm_info()
         return _json_response(info)
     except Exception as e:
-        log.error("[Majoor] Failed to get workflow hash info: %s", e)
+        log.error("📁❌ [Majoor] Failed to get workflow hash info: %s", e)
         return _json_response({"error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.get("/mjr/filemanager/index/errors")
+async def get_indexing_errors_route(request: web.Request) -> web.Response:
+    """
+    Get all logged indexing errors.
+
+    Returns:
+      {
+        "ok": true,
+        "errors": [
+          {"path": "...", "reason": "...", "details": "...", "last_attempt_at": ...},
+          ...
+        ]
+      }
+    """
+    try:
+        from .index_db import get_indexing_errors
+        errors = await asyncio.to_thread(get_indexing_errors)
+        return _json_response({"ok": True, "errors": errors})
+    except Exception as e:
+        log.error("📁❌ [Majoor] Failed to get indexing errors: %s", e)
+        return _json_response({"ok": False, "error": str(e)}, status=500)
+
+
+@PromptServer.instance.routes.post("/mjr/filemanager/index/retry_failed")
+async def retry_failed_route(request: web.Request) -> web.Response:
+    """
+    Trigger a re-index attempt on all files that previously failed.
+    
+    Returns:
+      {
+        "ok": true,
+        "message": "Retrying X failed items in the background."
+      }
+    """
+    try:
+        from .index_db import get_indexing_errors
+        errors = await asyncio.to_thread(get_indexing_errors)
+        if not errors:
+            return _json_response({"ok": True, "message": "No failed items to retry."})
+
+        paths_to_retry = [e["path"] for e in errors]
+        
+        # Run this in the background as it could be slow
+        def _retry():
+            reindex_paths(paths_to_retry)
+
+        # Using a thread is safer for long-running background tasks
+        # that are not heavily I/O bound in the asyncio sense.
+        import threading
+        threading.Thread(target=_retry, daemon=True).start()
+        
+        return _json_response({
+            "ok": True,
+            "message": f"Retrying {len(paths_to_retry)} failed items in the background."
+        })
+    except Exception as e:
+        log.error("📁❌ [Majoor] Failed to start retry job: %s", e)
+        return _json_response({"ok": False, "error": str(e)}, status=500)
 
 
 # ===== Initialize Index After Routes Loaded =====
@@ -2330,9 +2440,9 @@ def _init_index_after_server_ready():
             time.sleep(2)  # Wait 2 seconds
             auto_init_index()
         threading.Thread(target=delayed_init, daemon=True).start()
-        log.info("[Majoor] Index initialization scheduled")
+        log.info("📁 [Majoor] Index initialization scheduled")
     except Exception as e:
-        log.error(f"[Majoor] Failed to schedule index init: {e}")
+        log.error(f"📁❌ [Majoor] Failed to schedule index init: {e}")
 
 # Call init after routes are registered
 _init_index_after_server_ready()

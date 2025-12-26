@@ -224,6 +224,32 @@ def _extract_json_from_video(path: Path) -> Tuple[Optional[Dict[str, Any]], Opti
         if isinstance(obj, dict):
             for k, v in obj.items():
                 key_norm = str(k).lower()
+
+                # QuickTime Keys tags contain workflow/prompt directly
+                if key_norm == "keys:workflow" and isinstance(v, str):
+                    s = v.strip()
+                    if s.startswith("{"):
+                        try:
+                            wf = _json_loads_relaxed(s)
+                            if isinstance(wf, dict) and wf.get("nodes"):
+                                found_workflow = wf
+                        except Exception:
+                            pass
+                    continue
+
+                if key_norm == "keys:prompt" and isinstance(v, str):
+                    s = v.strip()
+                    if s.startswith("{"):
+                        try:
+                            pr = _json_loads_relaxed(s)
+                            if isinstance(pr, dict):
+                                first = next(iter(pr.values()), None)
+                                if isinstance(first, dict) and "inputs" in first:
+                                    found_prompt = pr
+                        except Exception:
+                            pass
+                    continue
+
                 key_interesting = key_norm in (
                     "comment",
                     "usercomment",
@@ -296,6 +322,8 @@ def _extract_json_from_video(path: Path) -> Tuple[Optional[Dict[str, Any]], Opti
                 "-ItemList:Comment",
                 "-ItemList:Description",
                 "-ItemList:UserComment",
+                "-Keys:Workflow",
+                "-Keys:Prompt",
                 str(path),
             ]
             proc = subprocess.run(

@@ -8,7 +8,7 @@ import {
   getExt,
   mjrSettings,
 } from "./ui_settings.js";
-import { api } from "../../../../scripts/api.js";
+import { api } from "../../../scripts/api.js";
 
 function formatCardHoverTitle(file) {
   const rawName = file?.name || file?.filename || "(unnamed)";

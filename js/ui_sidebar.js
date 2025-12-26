@@ -1,4 +1,4 @@
-import { api } from "../../../../scripts/api.js";
+import { api } from "../../../scripts/api.js";
 import {
   buildViewUrl,
   createEl,
@@ -316,9 +316,10 @@ export function createMetadataSidebar(options) {
     const hasSamplers = samplers.length > 0;
     const hasModels = models.length > 0;
     const hasLoras = loras.length > 0;
-    const hasAnyGen =
-      hasPositive || hasNegative || hasSeeds || hasCfg || hasSamplers || hasModels || hasLoras;
     const hasWorkflow = workflowPresent;
+    // Consider file as having generation data if it has workflow OR traditional generation params
+    const hasAnyGen =
+      hasPositive || hasNegative || hasSeeds || hasCfg || hasSamplers || hasModels || hasLoras || hasWorkflow;
 
     const topDivider = createEl("div");
     topDivider.style.borderTop = "1px solid var(--border-color, #333)";
@@ -505,7 +506,7 @@ export function createMetadataSidebar(options) {
         body.tags = Array.isArray(safeUpdates.tags) ? safeUpdates.tags : [];
       }
 
-      const res = await fetch("/mjr/filemanager/metadata/update", {
+      const res = await api.fetchApi("/mjr/filemanager/metadata/update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

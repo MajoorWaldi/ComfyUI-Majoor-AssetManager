@@ -5,6 +5,7 @@
  * Shows when multiple assets are selected.
  */
 
+import { api } from "../../../scripts/api.js";
 import { showToast } from './ui_settings.js';
 
 /**
@@ -132,7 +133,7 @@ function exportSelectionList(state) {
             subfolder: file.subfolder || '',
             rating: file.rating || 0,
             tags: file.tags || [],
-            has_workflow: file.has_workflow || false,
+            has_workflow: file.hasWorkflow || file.has_workflow || false,
         };
     });
 
@@ -243,7 +244,7 @@ async function performBulkUpdate(state, selectedIds, updates, progressTitle, cal
         }
 
         // Call batch update endpoint
-        const resp = await fetch('/mjr/filemanager/metadata/batch_update', {
+        const resp = await api.fetchApi('/mjr/filemanager/metadata/batch_update', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -256,7 +257,7 @@ async function performBulkUpdate(state, selectedIds, updates, progressTitle, cal
         const result = await resp.json();
 
         // Sync to index
-        await fetch('/mjr/filemanager/index/sync_from_metadata', {
+        await api.fetchApi('/mjr/filemanager/index/sync_from_metadata', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ assets: items.map(i => ({ ...i, ...updates })) })
@@ -298,7 +299,7 @@ async function performBulkDelete(state, selectedIds, callbacks) {
     const progress = createProgressModal(`Deleting ${items.length} assets...`, items.length);
 
     try {
-        const resp = await fetch('/mjr/filemanager/delete', {
+        const resp = await api.fetchApi('/mjr/filemanager/delete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ items })

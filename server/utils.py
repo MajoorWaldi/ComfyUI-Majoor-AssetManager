@@ -15,10 +15,10 @@ from .logger import get_logger
 log = get_logger(__name__)
 
 # Supported extensions
-IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
-VIDEO_EXTS = (".mp4", ".mov", ".webm", ".mkv")
-AUDIO_EXTS = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac")
-MODEL3D_EXTS = (".obj", ".fbx", ".glb", ".gltf", ".stl")
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv"}
+AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"}
+MODEL3D_EXTS = {".obj", ".fbx", ".glb", ".gltf", ".stl"}
 WINDOWS_RATING_INDEX = 14  # fallback
 WINDOWS_TAGS_INDEX = 21    # fallback
 STAR_CHARS = ("\u2605", "\u2606", "\u22c6", "\u272d", "\u272e", "\u2730")
@@ -61,7 +61,7 @@ try:
     if _META_CACHE_MAX_SIZE <= 0:
         _META_CACHE_MAX_SIZE = 1000
 except (ValueError, TypeError) as e:
-    log.warning("[Majoor] Invalid MJR_META_CACHE_SIZE, using default: %s", e)
+    log.warning("📁⚠️ [Majoor] Invalid MJR_META_CACHE_SIZE, using default: %s", e)
     _META_CACHE_MAX_SIZE = 1000
 
 _META_CACHE: OrderedDict[str, tuple[Optional[float], int, dict]] = OrderedDict()
@@ -525,7 +525,7 @@ def get_exif_metadata(file_path: str) -> dict:
         return {}
     try:
         timeout_s = _env_timeout("MJR_EXIFTOOL_READ_TIMEOUT", 2.0, min_s=0.5, max_s=60.0)
-        is_video = file_path.lower().endswith(VIDEO_EXTS)
+        is_video = file_path.lower().endswith(tuple(VIDEO_EXTS))
 
         # For videos, prefer XMP tags (portable and consistent) then fall back to Microsoft tags.
         # For images/others, keep the existing wide read set (Windows + XMP + common keyword fields).
@@ -554,8 +554,24 @@ def get_exif_metadata(file_path: str) -> dict:
                 "-XPKeywords",
                 file_path,
             ]
-        out = subprocess.check_output(cmd, timeout=timeout_s)
-        data = json.loads(out)[0]
+        proc = None
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=timeout_s, check=False)
+            if proc.returncode != 0 or not proc.stdout:
+                return {}
+            data = json.loads(proc.stdout)[0]
+        except subprocess.TimeoutExpired:
+            # Ensure process terminated
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                    proc.wait()
+                except Exception:
+                    pass
+            return {}
+        except Exception as e:
+            log.debug("[Majoor] ExifTool read failed: %s", e)
+            return {}
 
         rating_raw = None
         if is_video:
@@ -956,7 +972,7 @@ def update_metadata_with_windows(file_path: str, updates: dict) -> dict:
     ok_win = False
     ok_exif = False
     if has_rating or has_tags:
-        is_video = str(file_path).lower().endswith(VIDEO_EXTS)
+        is_video = str(file_path).lower().endswith(tuple(VIDEO_EXTS))
         # For videos, prefer ExifTool writes (more portable; also writes Microsoft:Category/SharedUserRating).
         if is_video and _get_exiftool_path():
             ok_exif = set_exif_metadata(
@@ -988,7 +1004,7 @@ def update_metadata_with_windows(file_path: str, updates: dict) -> dict:
 
     # Video robustness: if Windows metadata fields are not supported and ExifTool is unavailable,
     # still persist rating/tags for the manager via a sidecar JSON (even on Windows).
-    if (not ok_win and not ok_exif) and str(file_path).lower().endswith(VIDEO_EXTS):
+    if (not ok_win and not ok_exif) and str(file_path).lower().endswith(tuple(VIDEO_EXTS)):
         try:
             save_metadata(file_path, {"rating": rating if has_rating else current_rating, "tags": target_tags}, force=True)
             sidecar_saved = True
@@ -1045,7 +1061,7 @@ def get_system_metadata(file_path: str) -> dict:
 
     meta = get_exif_metadata(file_path)
     # For videos, ExifTool is the source of truth (Explorer can be inconsistent across handlers).
-    if file_path.lower().endswith(VIDEO_EXTS) and meta:
+    if file_path.lower().endswith(tuple(VIDEO_EXTS)) and meta:
         _cache_set(file_path, mtime, _get_cache_epoch(), meta)
         return meta
 
@@ -1074,13 +1090,13 @@ def get_system_metadata(file_path: str) -> dict:
 
 def classify_ext(lower_name: str) -> str:
     """Retourne image / video / audio / model3d / other."""
-    if lower_name.endswith(IMAGE_EXTS):
+    if lower_name.endswith(tuple(IMAGE_EXTS)):
         return "image"
-    if lower_name.endswith(VIDEO_EXTS):
+    if lower_name.endswith(tuple(VIDEO_EXTS)):
         return "video"
-    if lower_name.endswith(AUDIO_EXTS):
+    if lower_name.endswith(tuple(AUDIO_EXTS)):
         return "audio"
-    if lower_name.endswith(MODEL3D_EXTS):
+    if lower_name.endswith(tuple(MODEL3D_EXTS)):
         return "model3d"
     return "other"
 
@@ -1090,7 +1106,7 @@ def ensure_dir(path):
 
 def is_image(fname: str):
     f = fname.lower()
-    return f.endswith(IMAGE_EXTS)
+    return f.endswith(tuple(IMAGE_EXTS))
 
 def metadata_path(image_path: str):
     candidate = image_path + METADATA_EXT

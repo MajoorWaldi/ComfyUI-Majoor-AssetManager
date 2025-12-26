@@ -96,6 +96,7 @@ Python dependencies (auto-installed by ComfyUI Manager):
 - `aiohttp` (REST API server)
 - `pillow` (thumbnail generation)
 - `send2trash` (safe delete to recycle bin)
+- `watchdog` (real-time file system monitoring for automatic reindexing)
 - `pywin32` (Windows only; enables Windows Property System metadata)
 
 **Strongly recommended** external tools:
@@ -197,6 +198,12 @@ Access settings via the ComfyUI settings panel (gear icon).
 ---
 
 ## 📝 Notes & Tips
+
+## 📌 Recent fixes
+- Fixed a crash when querying metadata source info while sidecar files are disabled (safe-guard against missing sidecar paths).
+- Improved ExifTool reads to use a robust subprocess pattern with timeouts and better error handling.
+- Added unit tests for PNG injection, EXIF UserComment decoding, and metadata source detection.
+
 
 - **Collections folder**: Smart filters and saved collections are stored in `_mjr_collections` inside your ComfyUI output directory
 - **Workflow fingerprinting**: Uses SHA1 of canonicalized workflow JSON (excludes node IDs, positions, UI properties) for stable matching across workflow variations

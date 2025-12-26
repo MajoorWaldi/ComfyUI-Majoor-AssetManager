@@ -356,6 +356,68 @@ def _scan_png_info_for_generation(info: Dict[str, Any]) -> Tuple[Optional[Dict[s
     return prompt_found, workflow_found
 
 
+def _extract_parameters_from_image(file_path: Path) -> Optional[str]:
+    """
+    Extract A1111-style 'parameters' text from image file (PNG/WEBP/JPG/TIFF).
+    Checks both PNG info dict and EXIF tags with case-insensitive matching.
+    Returns the parameters string if found, None otherwise.
+    """
+    if Image is None:
+        return None
+
+    try:
+        with Image.open(file_path) as img:
+            # Check PNG-style info first
+            info = getattr(img, "info", {}) or {}
+
+            # Case-insensitive search in info dict keys
+            for key, value in info.items():
+                key_lower = str(key).lower()
+                if 'parameters' in key_lower:
+                    # Handle both string and bytes
+                    if isinstance(value, str):
+                        return value
+                    elif isinstance(value, (bytes, bytearray)):
+                        try:
+                            return value.decode("utf-8", errors="replace")
+                        except:
+                            pass
+
+            # Check EXIF data for WEBP/JPG/TIFF
+            try:
+                from PIL.ExifTags import TAGS
+                exif = img.getexif()
+                if exif:
+                    for tag_id, value in exif.items():
+                        tag_name = TAGS.get(tag_id, f"Tag_{tag_id}")
+                        tag_name_lower = tag_name.lower()
+
+                        # Decode bytes
+                        if isinstance(value, bytes):
+                            try:
+                                value = value.decode('utf-8', errors='ignore')
+                            except:
+                                continue
+
+                        # Check for 'parameters' in tag name
+                        if 'parameters' in tag_name_lower and isinstance(value, str):
+                            return value
+
+                        # Check ImageDescription (270) and UserComment (37510) as fallback
+                        # These sometimes contain A1111 parameters
+                        if tag_id in (270, 37510) and isinstance(value, str):
+                            # Verify it looks like A1111 parameters
+                            if any(kw in value.lower() for kw in ['steps:', 'sampler:', 'cfg scale:', 'seed:', 'negative prompt:']):
+                                return value
+            except:
+                pass
+
+    except Exception:
+        pass
+
+    return None
+
+
 def parse_a1111_parameters(text: str) -> Dict[str, Any]:
     """
     Parse A1111/SD-WebUI style 'Parameters' block into a metadata dict.
@@ -800,6 +862,53 @@ def load_prompt_graph_from_png(path: str | Path) -> Optional[Dict[str, Any]]:
         if pg:
             return pg
 
+    # 1ter) extra_pnginfo containing workflow/prompt (common ComfyUI pattern)
+    extra = _as_text(info.get("extra_pnginfo"))
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except Exception:
+            extra = None
+    if isinstance(extra, dict):
+        prompt = _ensure_dict_from_json(_as_text(extra.get("prompt")))
+        if prompt is not None:
+            if isinstance(prompt, list):
+                prompt = _normalize_workflow_to_prompt_graph({"nodes": prompt})
+            return prompt
+        wf_raw = _ensure_dict_from_json(_as_text(extra.get("workflow")))
+        if wf_raw is not None:
+            pg = _normalize_workflow_to_prompt_graph(wf_raw)
+            if pg:
+                return pg
+
+    # 1quater) Additional common ComfyUI metadata fields
+    # Check for workflow in 'workflow_json' field (used by some custom nodes)
+    workflow_json = _as_text(info.get("workflow_json"))
+    if workflow_json:
+        wf = _ensure_dict_from_json(workflow_json)
+        if isinstance(wf, dict) and wf.get("nodes"):
+            pg = _normalize_workflow_to_prompt_graph(wf)
+            if pg:
+                return pg
+
+    # Check for prompt in 'prompt_json' field
+    prompt_json = _as_text(info.get("prompt_json"))
+    if prompt_json:
+        pr = _ensure_dict_from_json(prompt_json)
+        if isinstance(pr, dict):
+            first_val = next(iter(pr.values()), None)
+            if isinstance(first_val, dict) and "inputs" in first_val and "class_type" in first_val:
+                return pr
+
+    # Check for 'workflow_api' field (used by some ComfyUI implementations)
+    workflow_api = _as_text(info.get("workflow_api"))
+    if workflow_api:
+        wf = _ensure_dict_from_json(workflow_api)
+        if isinstance(wf, dict) and "nodes" in wf:
+            pg = _normalize_workflow_to_prompt_graph(wf)
+            if pg:
+                return pg
+
     # Helper to sniff prompt/workflow from a "Parameters" string (some tools stash JSON there)
     def _extract_from_parameters(val: Any) -> Optional[Dict[str, Any]]:
         if isinstance(val, dict):
@@ -981,32 +1090,193 @@ def load_raw_workflow_from_png(path: str | Path) -> Optional[Dict[str, Any]]:
 
 def _pick_sampler_node(prompt_graph: Dict[str, Any]) -> Optional[str]:
     """
-    Select a single sampler from the graph.
-    Simple deterministic strategy:
-    - pick the sampler with the largest numeric id.
+    Select a single sampler-like node from the graph.
+    Strategy (robust):
+    1) Prefer nodes whose class_type matches known sampler classes
+    2) If none found, fallback to heuristic scan for nodes exposing typical sampler inputs
+    3) Deterministic pick: choose candidate with highest numeric id (or first non-numeric)
     """
-    sampler_ids: List[int] = []
+    strong_candidates = []  # (node_id, is_int, val)
+    heuristic_candidates = []  # (node_id, score)
 
     for node_id, node in prompt_graph.items():
+        if not isinstance(node, dict):
+            continue
         node_type = (node.get("class_type") or "").lower()
+        inputs = node.get("inputs") or {}
+        if not isinstance(inputs, dict):
+            continue
+
+        # Strong match: class_type is a known sampler
         if node_type in SAMPLER_CLASSES or "sampler" in node_type:
             try:
-                sampler_ids.append(int(node_id))
-            except Exception:
-                # si l'id n'est pas un int, on ignore
-                continue
+                int_id = int(node_id)
+                strong_candidates.append((node_id, True, int_id))
+            except:
+                strong_candidates.append((node_id, False, 0))
+        else:
+            # Heuristic: check if node has sampler-like inputs (seed, steps, cfg, etc.)
+            score = 0
+            sampler_input_keys = ["seed", "steps", "cfg", "sampler_name", "scheduler"]
+            for key in sampler_input_keys:
+                if key in inputs:
+                    score += 2  # exact match
+                else:
+                    # partial match (cfg_scale, step, etc.)
+                    for inp_key in inputs.keys():
+                        if key in str(inp_key).lower():
+                            score += 1
+                            break
+            # If score >= 2, consider it a sampler-like node
+            if score >= 2:
+                heuristic_candidates.append((node_id, score))
 
-    if not sampler_ids:
+    # Prefer strong candidates
+    if strong_candidates:
+        # Sort: integer IDs first (by value desc), then non-integer
+        strong_candidates.sort(key=lambda x: (not x[1], -x[2] if x[1] else 0))
+        return strong_candidates[0][0]
+
+    # Fallback to heuristic candidates
+    if heuristic_candidates:
+        # Pick highest score, then highest numeric ID if tie
+        heuristic_candidates.sort(key=lambda x: (-x[1], x[0]), reverse=False)
+        # Try to convert to int for deterministic pick
+        best_candidates = [c for c in heuristic_candidates if c[1] == heuristic_candidates[0][1]]
+        int_candidates = []
+        for node_id, score in best_candidates:
+            try:
+                int_candidates.append((node_id, int(node_id)))
+            except:
+                pass
+        if int_candidates:
+            int_candidates.sort(key=lambda x: -x[1])
+            return int_candidates[0][0]
+        return best_candidates[0][0]
+
+    return None
+
+
+def _trace_to_text_node(prompt_graph: Dict[str, Any], link_value: Any, max_depth: int = 5) -> Optional[str]:
+    """
+    Trace recursively through the graph following links (API format) to find text content.
+    Handles: KSampler -> Conditioning -> CLIPTextEncode -> text
+
+    Args:
+        prompt_graph: Full prompt graph (API format)
+        link_value: Link value from inputs (can be ["node_id", slot] or direct id)
+        max_depth: Maximum recursion depth to prevent infinite loops
+
+    Returns:
+        Text string if found, None otherwise
+    """
+    if max_depth <= 0:
         return None
 
-    best_id = max(sampler_ids)
-    return str(best_id)
+    # Extract node_id from link (handles ["5", 0] format)
+    node_id = _extract_link_node_id(link_value)
+    if node_id is None:
+        return None
+
+    node = prompt_graph.get(str(node_id))
+    if not isinstance(node, dict):
+        return None
+
+    class_type = str(node.get("class_type", "")).lower()
+    inputs = node.get("inputs", {})
+    if not isinstance(inputs, dict):
+        return None
+
+    # Direct text node detection (CLIPTextEncode variants)
+    text_node_keywords = [
+        "cliptextencode", "clip_text_encode", "textencode",
+        "cliptextencodeadvanced", "cliptextencodesdxl",
+        "dualcliptextencodeflux", "t5textencode",
+        "sd3textencoder", "promptbuilder", "stringliteral"
+    ]
+
+    is_text_node = any(kw in class_type for kw in text_node_keywords)
+
+    if is_text_node:
+        # Extract text from known fields
+        for field in ("text", "text_g", "text_l", "prompt", "string", "value",
+                      "content", "input_text", "clip_l", "clip_g", "t5xxl"):
+            val = inputs.get(field)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+
+    # Recursive tracing through intermediate nodes
+    # Common patterns: ConditioningCombine, ConditioningSetArea, Reroute, etc.
+    trace_fields = [
+        "conditioning", "conditioning_1", "conditioning_2",  # ConditioningCombine
+        "text", "clip", "conditioning_to",  # Various nodes
+        "positive", "negative"  # Some custom nodes
+    ]
+
+    for field in trace_fields:
+        if field in inputs:
+            result = _trace_to_text_node(prompt_graph, inputs[field], max_depth - 1)
+            if result:
+                return result
+
+    return None
+
+
+def _trace_to_model_node(prompt_graph: Dict[str, Any], link_value: Any, max_depth: int = 5) -> Optional[str]:
+    """
+    Trace recursively to find model/checkpoint name.
+
+    Args:
+        prompt_graph: Full prompt graph
+        link_value: Link value from inputs
+        max_depth: Maximum recursion depth
+
+    Returns:
+        Model filename if found, None otherwise
+    """
+    if max_depth <= 0:
+        return None
+
+    node_id = _extract_link_node_id(link_value)
+    if node_id is None:
+        return None
+
+    node = prompt_graph.get(str(node_id))
+    if not isinstance(node, dict):
+        return None
+
+    class_type = str(node.get("class_type", ""))
+    inputs = node.get("inputs", {})
+    if not isinstance(inputs, dict):
+        return None
+
+    # Direct checkpoint loader detection
+    if class_type in CHECKPOINT_LOADER_CLASSES:
+        ckpt = inputs.get("ckpt_name") or inputs.get("ckpt_file")
+        if isinstance(ckpt, str):
+            return ckpt
+
+    if class_type in UNET_LOADER_CLASSES:
+        unet = inputs.get("unet_name") or inputs.get("model_name")
+        if isinstance(unet, str):
+            return unet
+
+    # Recursive tracing through model chain (LoRA, etc.)
+    if "model" in inputs:
+        result = _trace_to_model_node(prompt_graph, inputs["model"], max_depth - 1)
+        if result:
+            return result
+
+    return None
 
 
 def _extract_clip_text(prompt_graph: Dict[str, Any], node_id: Optional[str]) -> Optional[str]:
     """
     Extract text from a text-encoder-like node (CLIP / SDXL / Flux, etc.).
     Keep it generic: look at fields 'text', 'text_g', 'text_l', and various custom node fields.
+
+    ENHANCED: If the direct node doesn't contain text, uses recursive tracing to follow
+    links and find text in connected nodes (API format link following).
     """
     if node_id is None:
         return None
@@ -1027,11 +1297,17 @@ def _extract_clip_text(prompt_graph: Dict[str, Any], node_id: Optional[str]) -> 
         if isinstance(v, str) and v.strip():
             texts.append(v.strip())
 
-    if not texts:
-        return None
+    if texts:
+        # Direct text found
+        return " | ".join(texts)
 
-    # jointure simple; tu peux raffiner (multi-lignes, etc.)
-    return " | ".join(texts)
+    # ENHANCED: No direct text found - try recursive tracing through links
+    # This handles cases like: Conditioning -> CLIPTextEncode (API format)
+    trace_result = _trace_to_text_node(prompt_graph, node_id)
+    if trace_result:
+        return trace_result
+
+    return None
 
 
 def _collect_all_texts(prompt_graph: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -1099,6 +1375,21 @@ def _collect_all_texts(prompt_graph: Dict[str, Any]) -> Dict[str, List[str]]:
             "text",  # generic text node name
         ]
         is_text_node = any(kw in ctype for kw in text_keywords)
+
+        # Fallback: some custom nodes don't advertise "text/prompt" in class_type but still
+        # store usable prompt strings in common input fields. If any of those fields are
+        # present as strings, treat the node as a text node.
+        if not is_text_node:
+            for _k in (
+                "text", "text_g", "text_l", "prompt", "positive", "negative",
+                "string", "value", "content", "input_text", "prompt_text",
+                "caption", "description", "instruction"
+            ):
+                _v = inputs.get(_k)
+                if isinstance(_v, str) and _v.strip():
+                    is_text_node = True
+                    break
+
         if not is_text_node:
             continue
 
@@ -1288,11 +1579,20 @@ def extract_generation_params_from_prompt_graph(
     if pos_id is None and isinstance(pos_input, str):
         positive_prompt = pos_input
     else:
+        # Try direct extraction first, then recursive tracing
         positive_prompt = _extract_clip_text(prompt_graph, pos_id)
+        if not positive_prompt and pos_input is not None:
+            # ENHANCED: Direct trace from sampler's positive input (API format)
+            positive_prompt = _trace_to_text_node(prompt_graph, pos_input)
+
     if neg_id is None and isinstance(neg_input, str):
         negative_prompt = neg_input
     else:
+        # Try direct extraction first, then recursive tracing
         negative_prompt = _extract_clip_text(prompt_graph, neg_id)
+        if not negative_prompt and neg_input is not None:
+            # ENHANCED: Direct trace from sampler's negative input (API format)
+            negative_prompt = _trace_to_text_node(prompt_graph, neg_input)
 
     # Fallback: collect any text nodes if prompts are missing
     if not positive_prompt or not negative_prompt:
@@ -1309,6 +1609,28 @@ def extract_generation_params_from_prompt_graph(
     )
     # Resolve through reroute/set/get nodes
     model_link_id = _resolve_through_reroutes(prompt_graph, model_link_id)
+
+    # If the sampler doesn't expose a model link (common in some video pipelines),
+    # fallback to any known model loader node in the graph.
+    if model_link_id is None:
+        loader_ids: List[str] = []
+        for _nid, _node in prompt_graph.items():
+            if not isinstance(_node, dict):
+                continue
+            _ctype = str(_node.get("class_type") or "")
+            if _ctype in CHECKPOINT_LOADER_CLASSES or _ctype in UNET_LOADER_CLASSES:
+                loader_ids.append(str(_nid))
+
+        if loader_ids:
+            def _id_score(_id: str) -> tuple[int, str]:
+                try:
+                    return (int(_id), _id)
+                except Exception:
+                    return (-1, _id)
+
+            loader_ids.sort(key=_id_score)
+            model_link_id = loader_ids[-1]
+
     model_name, vae_name, loras = _walk_model_chain(prompt_graph, model_link_id)
 
     reconstructed_from_prompt = False
@@ -1357,7 +1679,65 @@ def extract_generation_params_from_workflow(workflow: Dict[str, Any]) -> Dict[st
     )
 
 
-def extract_generation_params_from_png(path: str | Path) -> Dict[str, Any]:
+def _try_extract_from_history(prompt_id: str, debug: bool = False) -> Optional[Dict[str, Any]]:
+    """
+    Attempt to extract generation metadata from ComfyUI history using prompt_id.
+    Returns prompt_graph dict if found, None otherwise.
+
+    This is a best-effort fallback for files (MP4/WEBP) that don't embed metadata.
+    """
+    try:
+        from server import PromptServer
+
+        if not hasattr(PromptServer, 'instance'):
+            if debug:
+                from .logger import get_logger
+                log = get_logger(__name__)
+                log.debug("📁🔍 [Majoor] PromptServer.instance not available for history lookup")
+            return None
+
+        prompt_server = PromptServer.instance
+        if not hasattr(prompt_server, 'prompt_queue'):
+            if debug:
+                from .logger import get_logger
+                log = get_logger(__name__)
+                log.debug("📁🔍 [Majoor] PromptServer.prompt_queue not available")
+            return None
+
+        # Get history for this prompt_id
+        history = prompt_server.prompt_queue.get_history(prompt_id=prompt_id)
+        if not history or prompt_id not in history:
+            if debug:
+                from .logger import get_logger
+                log = get_logger(__name__)
+                log.debug(f"📁🔍 [Majoor] No history found for prompt_id: {prompt_id}")
+            return None
+
+        prompt_data = history[prompt_id]
+        if not isinstance(prompt_data, dict):
+            return None
+
+        # Extract prompt graph from history
+        # History format: {prompt_id: {"prompt": {node_id: {...}}, ...}}
+        prompt_graph = prompt_data.get("prompt")
+        if prompt_graph and isinstance(prompt_graph, dict):
+            if debug:
+                from .logger import get_logger
+                log = get_logger(__name__)
+                log.debug(f"📁✅ [Majoor] Found prompt graph in history for {prompt_id} ({len(prompt_graph)} nodes)")
+            return prompt_graph
+
+        return None
+
+    except Exception as e:
+        if debug:
+            from .logger import get_logger
+            log = get_logger(__name__)
+            log.debug(f"📁⚠️ [Majoor] History lookup failed for {prompt_id}: {e}")
+        return None
+
+
+def extract_generation_params_from_png(path: str | Path, *, debug: bool = False) -> Dict[str, Any]:
     """
     Read all generation info from a ComfyUI output.
 
@@ -1373,6 +1753,63 @@ def extract_generation_params_from_png(path: str | Path) -> Dict[str, Any]:
     if not p.exists():
         return {}
 
+    # First, try the enhanced comprehensive extraction method
+    try:
+        from .metadata.enhanced_extraction import extract_comprehensive_metadata
+        enhanced_result = extract_comprehensive_metadata(str(p))
+        prompt_graph = enhanced_result.get("prompt_graph")
+        raw_workflow = enhanced_result.get("workflow")
+
+        # CRITICAL FIX: If we have workflow but no prompt_graph, try to normalize
+        if raw_workflow and not prompt_graph:
+            prompt_graph = _normalize_workflow_to_prompt_graph(raw_workflow)
+
+            # If normalization failed, try EXIF fallback for prompt_graph
+            if not prompt_graph and original_ext in {".webp", ".jpg", ".jpeg", ".tif", ".tiff"}:
+                try:
+                    from .metadata.exif_extraction import extract_comfyui_prompt_workflow_from_exif_fields
+                    exif_prompt, exif_workflow, _ = extract_comfyui_prompt_workflow_from_exif_fields(str(p))
+                    if exif_prompt:
+                        prompt_graph = exif_prompt
+                except:
+                    pass
+
+        if prompt_graph or raw_workflow:
+            # If we found data with enhanced extraction, use it
+            reconstruct_allowed = original_ext != ".png"
+
+            # Use prompt_graph if available, otherwise try to construct from workflow
+            graph_for_extraction = prompt_graph
+            if not graph_for_extraction and raw_workflow:
+                graph_for_extraction = _normalize_workflow_to_prompt_graph(raw_workflow) or {}
+
+            result = extract_generation_params_from_prompt_graph(
+                graph_for_extraction,
+                raw_workflow=raw_workflow,
+                reconstruct_allowed=reconstruct_allowed,
+            )
+            # Ensure has_workflow is properly set
+            result["has_workflow"] = enhanced_result.get("has_workflow", False)
+            result["metadata_sources"] = enhanced_result.get("metadata_sources", [])
+
+            # Debug logging if enabled
+            if debug and os.environ.get("MJR_DEBUG_METADATA", "0").lower() in ("1", "true", "yes", "on"):
+                from .logger import get_logger
+                log = get_logger(__name__)
+                log.debug(f"📁🔍 [Majoor] Extracted params for {p.name}:")
+                log.debug(f"  - has_workflow: {result.get('has_workflow')}")
+                log.debug(f"  - has prompt_graph: {bool(prompt_graph)}")
+                log.debug(f"  - has raw_workflow: {bool(raw_workflow)}")
+                log.debug(f"  - has positive_prompt: {bool(result.get('positive_prompt'))}")
+                log.debug(f"  - has seed: {result.get('seed') is not None}")
+                log.debug(f"  - has model: {bool(result.get('model'))}")
+                log.debug(f"  - sources: {result.get('metadata_sources')}")
+
+            return result
+    except ImportError:
+        # Fallback to original method if enhanced extraction is not available
+        pass
+
     raw_workflow = None
     prompt_graph = None
 
@@ -1382,10 +1819,15 @@ def extract_generation_params_from_png(path: str | Path) -> Dict[str, Any]:
         raw_workflow = load_raw_workflow_from_png(p)
         prompt_graph = load_prompt_graph_from_png(p)
 
+    # Try sidecar metadata and history lookup
+    prompt_id_from_sidecar = None
     if prompt_graph is None and load_metadata is not None:
         try:
             side_meta = load_metadata(str(p))
             if isinstance(side_meta, dict):
+                # Store prompt_id for potential history lookup
+                prompt_id_from_sidecar = side_meta.get("prompt_id")
+
                 prompt = _ensure_dict_from_json(side_meta.get("prompt"))
                 if prompt is not None:
                     prompt_graph = prompt
@@ -1398,32 +1840,90 @@ def extract_generation_params_from_png(path: str | Path) -> Dict[str, Any]:
         except Exception:
             prompt_graph = None
 
-    # Fallback: A1111/SD-WebUI Parameters block (no workflow)
-    if prompt_graph is None and original_ext == ".png" and Image is not None:
+    # Sibling PNG fallback for video/WEBP files without embedded metadata
+    if prompt_graph is None and original_ext in {".mp4", ".mov", ".webm", ".mkv", ".m4v", ".webp"}:
         try:
-            with Image.open(p) as img:
-                info = getattr(img, "info", {}) or {}
-            params_val = None
-            for k, v in info.items():
-                try:
-                    if str(k).lower() == "parameters":
-                        params_val = v
-                        break
-                except Exception:
-                    continue
-            if isinstance(params_val, (bytes, bytearray)):
-                try:
-                    params_val = params_val.decode("utf-8", errors="replace")
-                except Exception:
-                    params_val = None
-            if isinstance(params_val, str):
+            stem = p.stem
+            parent_dir = p.parent
+            candidates = [
+                f for f in parent_dir.iterdir()
+                if f.is_file() and f.suffix.lower() == ".png" and (
+                    f.stem == stem or f.stem.startswith(f"{stem}_") or f.stem.startswith(f"{stem}-")
+                )
+            ]
+
+            if candidates:
+                # Sort by modification time (most recent first)
+                candidates.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+                # Try to extract from sibling PNG
+                for png_sibling in candidates:
+                    try:
+                        png_prompt = load_prompt_graph_from_png(png_sibling)
+                        if png_prompt:
+                            prompt_graph = png_prompt
+                            if raw_workflow is None:
+                                raw_workflow = load_raw_workflow_from_png(png_sibling)
+                            if debug:
+                                log.debug(f"📁🔍 [Majoor] Using sibling PNG: {png_sibling.name}")
+                            break
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    # History lookup fallback for MP4/WEBP and other formats that may lack embedded metadata
+    if prompt_graph is None and prompt_id_from_sidecar:
+        # Determine if we should try history lookup
+        allow_history = original_ext in {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".webp", ".jpg", ".jpeg", ".avif"}
+
+        # Allow override via environment variable
+        if os.environ.get("MJR_META_ALLOW_HISTORY", "").lower() in ("1", "true", "yes", "on"):
+            allow_history = True
+
+        if allow_history:
+            if debug:
+                from .logger import get_logger
+                log = get_logger(__name__)
+                log.debug(f"📁🔍 [Majoor] Attempting history lookup for {p.name} with prompt_id={prompt_id_from_sidecar}")
+
+            history_prompt_graph = _try_extract_from_history(prompt_id_from_sidecar, debug=debug)
+            if history_prompt_graph:
+                prompt_graph = history_prompt_graph
+                if debug:
+                    from .logger import get_logger
+                    log = get_logger(__name__)
+                    log.debug(f"📁✅ [Majoor] Successfully retrieved metadata from history for {p.name}")
+
+    # Fallback: A1111/SD-WebUI Parameters block (no workflow)
+    # Extended to support WEBP, JPG, TIFF in addition to PNG
+    if prompt_graph is None and original_ext in {".png", ".webp", ".jpg", ".jpeg", ".tif", ".tiff"} and Image is not None:
+        try:
+            # Use the robust helper that checks both PNG info and EXIF
+            params_val = _extract_parameters_from_image(p)
+
+            if isinstance(params_val, str) and params_val.strip():
                 parsed = parse_a1111_parameters(params_val)
                 if parsed:
                     parsed.setdefault("has_workflow", False)
                     parsed.setdefault("source", "a1111_parameters")
+                    # Add informational note
+                    parsed.setdefault("metadata_notes", "Generation parameters detected (A1111-style), ComfyUI workflow not embedded")
+
+                    # Log debug info if enabled
+                    if debug or os.environ.get("MJR_DEBUG_METADATA", "").lower() in ("1", "true", "yes", "on"):
+                        from .logger import get_logger
+                        log = get_logger(__name__)
+                        log.debug(f"📁✅ [Majoor] Extracted A1111 parameters from {original_ext} file: {p.name}")
+                        log.debug(f"📁🔍 [Majoor]   - Positive prompt length: {len(parsed.get('positive_prompt', ''))}")
+                        log.debug(f"📁🔍 [Majoor]   - Has seed: {parsed.get('seed') is not None}")
+                        log.debug(f"📁🔍 [Majoor]   - Has steps: {parsed.get('steps') is not None}")
+
                     return parsed
-        except Exception:
-            pass
+        except Exception as e:
+            if debug or os.environ.get("MJR_DEBUG_METADATA", "").lower() in ("1", "true", "yes", "on"):
+                from .logger import get_logger
+                log = get_logger(__name__)
+                log.debug(f"📁⚠️ [Majoor] A1111 parameter extraction failed for {p.name}: {e}")
 
     if not prompt_graph:
         return {}
@@ -1440,10 +1940,21 @@ def has_generation_workflow(path: str | Path) -> bool:
     """
     Lightweight presence check for generation workflow/prompt.
     Avoids reconstruction; just detects whether metadata contains a prompt/workflow.
+
+    PATCH #3: Added sibling PNG fallback for WEBP files (like MP4).
     """
     p = Path(path)
     if not p.exists():
         return False
+
+    # First, try the enhanced comprehensive extraction method
+    try:
+        from .metadata.enhanced_extraction import has_generation_workflow_enhanced
+        if has_generation_workflow_enhanced(str(p)):
+            return True
+    except ImportError:
+        # Fallback to original method if enhanced extraction is not available
+        pass
 
     ext = p.suffix.lower()
     prompt_graph = None
@@ -1479,6 +1990,29 @@ def has_generation_workflow(path: str | Path) -> bool:
                 wf = _ensure_dict_from_json(side_meta.get("workflow"))
                 if (isinstance(pr, dict) and pr) or (isinstance(wf, dict) and wf):
                     return True
+        except Exception:
+            pass
+
+    # PATCH #3: Sibling PNG fallback for WEBP/MP4 files
+    # If this is a WEBP or video file without workflow, check for sibling PNG
+    if ext in {".webp", ".mp4", ".mov", ".webm", ".mkv", ".m4v"}:
+        try:
+            stem = p.stem
+            parent_dir = p.parent
+            candidates = [
+                f for f in parent_dir.iterdir()
+                if f.is_file() and f.suffix.lower() == ".png" and (
+                    f.stem == stem or f.stem.startswith(f"{stem}_") or f.stem.startswith(f"{stem}-")
+                )
+            ]
+
+            if candidates:
+                # Sort by modification time (most recent first)
+                candidates.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+                # Check if any sibling PNG has workflow
+                for png_sibling in candidates:
+                    if has_generation_workflow(png_sibling):
+                        return True
         except Exception:
             pass
 

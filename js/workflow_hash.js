@@ -5,6 +5,8 @@
  * Used for "Find assets from current graph" feature.
  */
 
+import { api } from "../../../scripts/api.js";
+
 // Keys to exclude from canonicalization (must match server config)
 const EXCLUDE_KEYS = new Set([
     'id',
@@ -151,7 +153,7 @@ export async function hashCurrentWorkflow(app) {
  */
 export async function validateHashAlgorithm() {
     try {
-        const resp = await fetch('/mjr/filemanager/workflow/hash_info');
+        const resp = await api.fetchApi('/mjr/filemanager/workflow/hash_info');
         const info = await resp.json();
 
         console.log('[Majoor] Server workflow hash algorithm:', info);
@@ -160,8 +162,8 @@ export async function validateHashAlgorithm() {
         const serverKeys = new Set(info.exclude_keys || []);
         const clientKeys = EXCLUDE_KEYS;
 
-        const missingOnClient = [...serverKeys].filter(k => !clientKeys.has(k));
-        const missingOnServer = [...clientKeys].filter(k => !serverKeys.has(k));
+        const missingOnClient = Array.from(serverKeys).filter(k => !clientKeys.has(k));
+        const missingOnServer = Array.from(clientKeys).filter(k => !serverKeys.has(k));
 
         if (missingOnClient.length > 0) {
             console.warn('[Majoor] Client missing exclude keys:', missingOnClient);

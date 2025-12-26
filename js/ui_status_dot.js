@@ -17,7 +17,7 @@ export function createStatusDot(api) {
 
     async function updateStatus() {
         try {
-            const resp = await fetch('/mjr/filemanager/index/status');
+            const resp = await api.fetchApi('/mjr/filemanager/index/status');
             const status = await resp.json();
 
             // Determine dot class based on status
@@ -103,7 +103,7 @@ export function createStatusDot(api) {
         if (!confirm) return;
 
         try {
-            const resp = await fetch('/mjr/filemanager/index/reindex', {
+            const resp = await api.fetchApi('/mjr/filemanager/index/reindex', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({scope: 'all'})
