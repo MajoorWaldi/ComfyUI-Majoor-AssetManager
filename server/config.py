@@ -61,10 +61,10 @@ METADATA_DEBUG = os.environ.get("MJR_DEBUG_METADATA", "0").strip() not in ("0", 
 # If False, log errors but continue (don't crash)
 METADATA_SAFE_FALLBACK = os.environ.get("MJR_METADATA_SAFE_FALLBACK", "1").strip() not in ("0", "false", "no", "off")
 
-# Indexing mode: 'auto' (default) runs the SQLite index/watchdog,
+# Indexing mode: 'auto' runs the SQLite index/watchdog,
 # 'index' forces reindex even if filesystem-first UI is configured,
-# 'filesystem' disables the index entirely and relies on filesystem scans.
-_INDEX_MODE_ENV = os.environ.get("MJR_INDEX_MODE", "auto").strip().lower()
+# 'filesystem' disables the index entirely and relies on filesystem scans (default).
+_INDEX_MODE_ENV = os.environ.get("MJR_INDEX_MODE", "filesystem").strip().lower()
 if _INDEX_MODE_ENV not in ("auto", "index", "filesystem"):
-    _INDEX_MODE_ENV = "auto"
+    _INDEX_MODE_ENV = "filesystem"
 INDEX_MODE = _INDEX_MODE_ENV
