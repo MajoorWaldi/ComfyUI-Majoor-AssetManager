@@ -42,7 +42,7 @@ export function mjrCreateContextMenu(file, deps) {
       const newItem = createEl("div", "", "+ New Collection");
       newItem.style.padding = "4px 0";
       newItem.style.cursor = "pointer";
-      newItem.style.borderBottom = "1px solid #444";
+      newItem.style.borderBottom = "1px solid var(--border-color, #444)";
       newItem.style.marginBottom = "4px";
       
       const handleAdd = async (name) => {
@@ -162,7 +162,13 @@ export function mjrCreateContextMenu(file, deps) {
             <p style="margin: 0 0 20px 0; font-size: 0.9rem; opacity: 0.8;">This cannot be undone.</p>
             <div style="display:flex; gap:15px; justify-content:center;">
               <button id="mjr-cancel-btn" class="comfy-btn">Cancel</button>
-              <button id="mjr-delete-btn" class="comfy-btn" style="background:#a33; color: white;">Delete</button>
+              <button
+                id="mjr-delete-btn"
+                class="comfy-btn"
+                style="background: var(--mjr-error, #a33); color: var(--mjr-badge-fg, #fff);"
+              >
+                Delete
+              </button>
             </div>
           </div>
         `;

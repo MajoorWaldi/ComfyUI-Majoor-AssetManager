@@ -9,6 +9,7 @@ import {
   mjrSettings,
 } from "./ui_settings.js";
 import { api } from "../../../scripts/api.js";
+import { mjrThemeVars } from "./ui_theme.js";
 
 function formatCardHoverTitle(file) {
   const rawName = file?.name || file?.filename || "(unnamed)";
@@ -168,16 +169,16 @@ export function updateWorkflowDot(card, workflowState) {
       : "unknown";
 
   if (state === "yes") {
-    dot.style.background = "#65d174";
-    dot.style.boxShadow = "0 0 6px rgba(101,209,116,0.9)";
+    dot.style.background = mjrThemeVars.statusSuccess;
+    dot.style.boxShadow = `0 0 6px ${mjrThemeVars.statusSuccessGlow}`;
     dot.style.opacity = "1";
   } else if (state === "no") {
-    dot.style.background = "#d45a5a";
-    dot.style.boxShadow = "0 0 6px rgba(212,90,90,0.8)";
+    dot.style.background = mjrThemeVars.statusError;
+    dot.style.boxShadow = `0 0 6px ${mjrThemeVars.statusErrorGlow}`;
     dot.style.opacity = "0.85";
   } else {
-    dot.style.background = "#aaaaaa";
-    dot.style.boxShadow = "0 0 6px rgba(170,170,170,0.6)";
+    dot.style.background = mjrThemeVars.statusNeutral;
+    dot.style.boxShadow = `0 0 6px ${mjrThemeVars.statusNeutralGlow}`;
     dot.style.opacity = "0.6";
   }
 }
@@ -209,7 +210,7 @@ export function updateCardVisuals(card, file) {
       const span = document.createElement("span");
       const filled = i <= val;
       span.textContent = "★";
-      span.style.color = filled ? "#ffd45a" : "#777";
+      span.style.color = filled ? mjrThemeVars.starsFilled : mjrThemeVars.starsEmpty;
       span.style.marginRight = i < 5 ? "2px" : "0";
       badge.appendChild(span);
     }
@@ -274,7 +275,7 @@ export function renderBadges(card, rating, tags) {
       const span = document.createElement("span");
       const filled = i <= rating;
       span.textContent = "★";
-      span.style.color = filled ? "#ffd45a" : "#777";
+      span.style.color = filled ? mjrThemeVars.starsFilled : mjrThemeVars.starsEmpty;
       span.style.marginRight = i < 5 ? "2px" : "0";
       ratingBadge.appendChild(span);
     }
@@ -294,7 +295,7 @@ export function createFileThumb(kind, ext, file, card) {
   thumb.style.position = "relative";
   thumb.style.aspectRatio = "1 / 1";
   thumb.style.overflow = "hidden";
-  thumb.style.background = "#111";
+  thumb.style.background = mjrThemeVars.thumbBg;
   thumb.__mjrHoverTimer = null;
 
   const badge = createEl("div", "mjr-fm-badge", ext || "FILE");
@@ -306,7 +307,7 @@ export function createFileThumb(kind, ext, file, card) {
   badge.style.fontSize = "0.65rem";
   badge.style.fontWeight = "600";
   badge.style.background = "rgba(0,0,0,0.7)";
-  badge.style.color = "#fff";
+  badge.style.color = mjrThemeVars.badgeFg;
   badge.style.textTransform = "uppercase";
   badge.style.pointerEvents = "none";
   thumb.appendChild(badge);
@@ -396,7 +397,7 @@ export function createFileThumb(kind, ext, file, card) {
     playIcon.style.padding = "3px 5px";
     playIcon.style.borderRadius = "999px";
     playIcon.style.background = "rgba(0,0,0,0.6)";
-    playIcon.style.color = "#fff";
+    playIcon.style.color = mjrThemeVars.icon;
     thumb.appendChild(playIcon);
   } else if (kind === "audio") {
     const audioBg = createEl("div");
@@ -405,12 +406,12 @@ export function createFileThumb(kind, ext, file, card) {
     audioBg.style.display = "flex";
     audioBg.style.alignItems = "center";
     audioBg.style.justifyContent = "center";
-    audioBg.style.background = "linear-gradient(135deg, #1b2735 0%, #090a0f 100%)";
+    audioBg.style.background = mjrThemeVars.audioGradient;
 
     const icon = document.createElement("i");
     icon.className = "pi pi-volume-up";
     icon.style.fontSize = "1.4rem";
-    icon.style.color = "#fff";
+    icon.style.color = mjrThemeVars.icon;
     audioBg.appendChild(icon);
 
     thumb.appendChild(audioBg);
@@ -421,12 +422,12 @@ export function createFileThumb(kind, ext, file, card) {
     modelBg.style.display = "flex";
     modelBg.style.alignItems = "center";
     modelBg.style.justifyContent = "center";
-    modelBg.style.background = "radial-gradient(circle at 20% 20%, #3b82f6, #0f172a)";
+    modelBg.style.background = mjrThemeVars.modelGradient;
 
     const icon = document.createElement("i");
     icon.className = "pi pi-cube";
     icon.style.fontSize = "1.4rem";
-    icon.style.color = "#fff";
+    icon.style.color = mjrThemeVars.icon;
     modelBg.appendChild(icon);
 
     thumb.appendChild(modelBg);
@@ -437,7 +438,7 @@ export function createFileThumb(kind, ext, file, card) {
     box.style.display = "flex";
     box.style.alignItems = "center";
     box.style.justifyContent = "center";
-    box.style.background = "#111";
+    box.style.background = mjrThemeVars.cardBg;
     box.textContent = ext || "FILE";
     thumb.appendChild(box);
   }

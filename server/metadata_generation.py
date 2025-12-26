@@ -20,11 +20,12 @@ except ImportError:
     # Pillow not available - PNG parsing will be disabled
     Image = None
 try:
-    from .utils import load_metadata, _get_exiftool_path  # type: ignore
+    from .utils import load_metadata, _get_exiftool_path, IMAGE_EXTS  # type: ignore
 except ImportError:
     # Utils not available - sidecar fallback disabled
     load_metadata = None
     _get_exiftool_path = None
+    IMAGE_EXTS = set()
 
 
 def _load_custom_node_mappings() -> Dict[str, List[str]]:
@@ -1963,6 +1964,8 @@ def has_generation_workflow(path: str | Path) -> bool:
     if ext in {".mp4", ".mov", ".webm", ".mkv"}:
         prompt_graph, raw_workflow = _extract_json_from_video(p)
     else:
+        if ext not in IMAGE_EXTS:
+            return False
         if Image is None or not p.exists():
             return False
         prompt_graph = None

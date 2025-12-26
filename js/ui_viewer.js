@@ -15,6 +15,7 @@ import {
 } from "./ui_settings.js";
 import { mjrGlobalState } from "./global_state.js";
 import { setupViewerInteractions } from "./viewer/interaction.js";
+import { mjrThemeVars } from "./ui_theme.js";
 
 export const mjrViewerState = { overlay: null, frame: null, abCleanup: null, resetView: null };
 export const mjrViewerNav = { prev: null, next: null };
@@ -216,9 +217,9 @@ export function mjrEnsureViewerOverlay() {
     top: "12px",
     right: "12px",
     fontSize: "18px",
-    border: "1px solid #555",
-    background: "#000000cc",
-    color: "#fff",
+    border: `1px solid ${mjrThemeVars.viewerBorder}`,
+    background: mjrThemeVars.viewerBg,
+    color: mjrThemeVars.viewerText,
     cursor: "pointer",
     width: "36px",
     height: "36px",
@@ -270,12 +271,12 @@ export function mjrEnsureViewerOverlay() {
   });
   const filmstripCount = document.createElement("div");
   Object.assign(filmstripCount.style, {
-    color: "#ddd",
+    color: mjrThemeVars.viewerMuted,
     fontSize: "12px",
     fontWeight: "600",
     padding: "0 6px",
     borderRadius: "4px",
-    background: "rgba(255,255,255,0.08)",
+    background: mjrThemeVars.filmstripBg,
     flex: "0 0 auto",
   });
 
@@ -309,7 +310,7 @@ export function mjrEnsureViewerOverlay() {
         objectFit: "cover",
         borderRadius: "4px",
         cursor: "pointer",
-        border: i === mjrCurrentIndex ? "2px solid #5fb3ff" : "2px solid transparent",
+        border: i === mjrCurrentIndex ? `2px solid ${mjrThemeVars.highlight}` : "2px solid transparent",
         opacity: i === mjrCurrentIndex ? "1" : "0.6",
       });
       t.onerror = () => {
@@ -352,9 +353,9 @@ export function mjrEnsureViewerOverlay() {
       left: "12px",
       top: "50%",
       transform: "translateY(-50%)",
-      background: "#000000aa",
-      border: "1px solid #555",
-      color: "#fff",
+      background: mjrThemeVars.overlay,
+      border: `1px solid ${mjrThemeVars.viewerBorder}`,
+      color: mjrThemeVars.viewerText,
       borderRadius: "50%",
       width: "36px",
       height: "36px",
@@ -376,9 +377,9 @@ export function mjrEnsureViewerOverlay() {
       right: "12px",
       top: "50%",
       transform: "translateY(-50%)",
-      background: "#000000aa",
-      border: "1px solid #555",
-      color: "#fff",
+      background: mjrThemeVars.overlay,
+      border: `1px solid ${mjrThemeVars.viewerBorder}`,
+      color: mjrThemeVars.viewerText,
       borderRadius: "50%",
       width: "36px",
       height: "36px",
@@ -554,7 +555,7 @@ export function mjrCreateMediaElement(file) {
   } else {
     el = document.createElement("div");
     el.textContent = "No inline preview for this file type.";
-    el.style.color = "#888";
+    el.style.color = mjrThemeVars.viewerMuted;
   }
 
   return { el, kind };
@@ -577,10 +578,10 @@ export function mjrCreateViewerPane(file) {
     flex: "1 1 0",
     display: "flex",
     flexDirection: "column",
-    background: "#111",
+    background: mjrThemeVars.viewerPanel,
     borderRadius: "10px",
     overflow: "hidden",
-    border: "1px solid #444",
+    border: `1px solid ${mjrThemeVars.viewerPanelBorder}`,
     minWidth: "0",
   });
 
@@ -590,7 +591,7 @@ export function mjrCreateViewerPane(file) {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    background: "#000",
+    background: mjrThemeVars.viewerCheckerBg,
     minHeight: "0",
     height: "100%",
     width: "100%",
@@ -608,8 +609,8 @@ export function mjrCreateViewerPane(file) {
     bottom: `${zoomHudOffsetPx}px`,
     padding: "4px 8px",
     borderRadius: "6px",
-    background: "rgba(0,0,0,0.65)",
-    color: "#f0f0f0",
+    background: mjrThemeVars.viewerPanel,
+    color: mjrThemeVars.viewerText,
     fontSize: "12px",
     fontWeight: "600",
     letterSpacing: "0.5px",
@@ -620,10 +621,9 @@ export function mjrCreateViewerPane(file) {
   });
   zoomHud.textContent = "100%";
   mediaWrap.appendChild(zoomHud);
-  const checkerPattern =
-    "repeating-conic-gradient(#eee 0 25%, #ccc 0 50%) 50%/20px 20px";
+  const checkerPattern = mjrThemeVars.viewerChecker;
   const applyCheckerboardBg = (enabled) => {
-    mediaWrap.style.background = enabled ? checkerPattern : "#000";
+    mediaWrap.style.background = enabled ? checkerPattern : mjrThemeVars.viewerCheckerBg;
   };
   applyCheckerboardBg(!!mjrSettings.viewer.useCheckerboard);
 
@@ -631,8 +631,8 @@ export function mjrCreateViewerPane(file) {
   Object.assign(infoBar.style, {
     padding: "6px 10px",
     fontSize: "12px",
-    color: "#ccc",
-    borderTop: "1px solid #333",
+    color: mjrThemeVars.viewerSmallText,
+    borderTop: `1px solid ${mjrThemeVars.viewerPanelBorder}`,
     whiteSpace: "nowrap",
     textOverflow: "ellipsis",
     overflow: "hidden",
@@ -669,9 +669,9 @@ export function mjrCreateViewerPane(file) {
       position: "fixed",
       left: `${x}px`,
       top: `${y}px`,
-      background: "rgba(0,0,0,0.92)",
-      color: "#eee",
-      border: "1px solid #444",
+      background: mjrThemeVars.viewerPanel,
+      color: mjrThemeVars.viewerText,
+      border: `1px solid ${mjrThemeVars.viewerPanelBorder}`,
       borderRadius: "6px",
       boxShadow: "0 6px 20px rgba(0,0,0,0.5)",
       padding: "6px 0",
@@ -689,7 +689,7 @@ export function mjrCreateViewerPane(file) {
         cursor: "pointer",
       });
       el.addEventListener("mouseenter", () => {
-        el.style.background = "rgba(255,255,255,0.08)";
+        el.style.background = mjrThemeVars.filmstripBg;
       });
       el.addEventListener("mouseleave", () => {
         el.style.background = "transparent";
@@ -759,10 +759,10 @@ export function mjrOpenABViewer(fileA, fileB) {
     position: "relative",
     width: "min(90vw, 1600px)",
     height: "min(80vh, 900px)",
-    background: "#000",
+    background: mjrThemeVars.viewerPanel,
     borderRadius: "10px",
     overflow: "hidden",
-    border: "1px solid #444",
+    border: `1px solid ${mjrThemeVars.viewerPanelBorder}`,
     userSelect: "none",
     touchAction: "none",
     cursor: "default",
@@ -879,14 +879,14 @@ export function mjrOpenABViewer(fileA, fileB) {
       bottom: `${zoomHudOffsetPx}px`,
       padding: "4px 8px",
       borderRadius: "6px",
-      background: "rgba(0,0,0,0.65)",
-      color: "#f0f0f0",
+      background: mjrThemeVars.viewerPanel,
+      color: mjrThemeVars.viewerText,
       fontSize: "12px",
       fontWeight: "600",
       letterSpacing: "0.5px",
       pointerEvents: "none",
       zIndex: "5",
-      border: "1px solid rgba(255,255,255,0.1)",
+      border: `1px solid ${mjrThemeVars.viewerPanelBorder}`,
       boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
     });
     zoomHud.textContent = "100%";
@@ -1019,10 +1019,9 @@ export function mjrOpenABViewer(fileA, fileB) {
   enableZoomPan(baseMedia, baseWrap, sharedZoom);
   enableZoomPan(topMedia, topWrap, sharedZoom);
 
-  const checkerPattern =
-    "repeating-conic-gradient(#eee 0 25%, #ccc 0 50%) 50%/20px 20px";
+  const checkerPattern = mjrThemeVars.viewerChecker;
   const applyCheckerboardBg = (enabled) => {
-    const bg = enabled ? checkerPattern : "#000";
+    const bg = enabled ? checkerPattern : mjrThemeVars.viewerCheckerBg;
     baseWrap.style.background = bg;
     topWrap.style.background = bg;
   };
@@ -1041,9 +1040,9 @@ export function mjrOpenABViewer(fileA, fileB) {
       position: "fixed",
       left: `${x}px`,
       top: `${y}px`,
-      background: "rgba(0,0,0,0.92)",
-      color: "#eee",
-      border: "1px solid #444",
+      background: mjrThemeVars.viewerPanel,
+      color: mjrThemeVars.viewerText,
+      border: `1px solid ${mjrThemeVars.viewerPanelBorder}`,
       borderRadius: "6px",
       boxShadow: "0 6px 20px rgba(0,0,0,0.5)",
       padding: "6px 0",
@@ -1062,7 +1061,7 @@ export function mjrOpenABViewer(fileA, fileB) {
         cursor: "pointer",
       });
       el.addEventListener("mouseenter", () => {
-        el.style.background = "rgba(255,255,255,0.08)";
+        el.style.background = mjrThemeVars.filmstripBg;
       });
       el.addEventListener("mouseleave", () => {
         el.style.background = "transparent";
@@ -1114,14 +1113,14 @@ export function mjrOpenABViewer(fileA, fileB) {
     transform: "translateX(-50%)",
     padding: "6px 10px",
     borderRadius: "8px",
-    background: "rgba(0,0,0,0.55)",
-    color: "#f0f0f0",
+    background: mjrThemeVars.viewerPanel,
+    color: mjrThemeVars.viewerText,
     fontSize: "12px",
     fontWeight: "600",
     letterSpacing: "0.3px",
     pointerEvents: "none",
     zIndex: "10",
-    border: "1px solid rgba(255,255,255,0.08)",
+    border: `1px solid ${mjrThemeVars.viewerPanelBorder}`,
     boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
     textAlign: "center",
     whiteSpace: "nowrap",
@@ -1164,14 +1163,14 @@ export function mjrOpenABViewer(fileA, fileB) {
     left: "50%",
     width: "2px",
     marginLeft: "-1px",
-    background: "rgba(255,255,255,0.35)",
+    background: mjrThemeVars.overlay,
     backdropFilter: "blur(1px)",
     zIndex: "5",
   });
   handle.style.pointerEvents = "none";
   handle.dataset.mjrSplitHandle = "1";
   handle.textContent = "↔";
-  handle.style.color = "#fff";
+  handle.style.color = mjrThemeVars.viewerText;
   handle.style.fontSize = "13px";
   handle.style.display = "flex";
   handle.style.alignItems = "center";
@@ -1203,8 +1202,8 @@ export function mjrOpenABViewer(fileA, fileB) {
     padding: "2px 6px",
     fontSize: "11px",
     borderRadius: "4px",
-    background: "#000000aa",
-    color: "#fff",
+    background: mjrThemeVars.overlay,
+    color: mjrThemeVars.viewerText,
     maxWidth: "45%",
     whiteSpace: "nowrap",
     textOverflow: "ellipsis",
@@ -1220,8 +1219,8 @@ export function mjrOpenABViewer(fileA, fileB) {
     padding: "2px 6px",
     fontSize: "11px",
     borderRadius: "4px",
-    background: "#000000aa",
-    color: "#fff",
+    background: mjrThemeVars.overlay,
+    color: mjrThemeVars.viewerText,
     maxWidth: "45%",
     whiteSpace: "nowrap",
     textOverflow: "ellipsis",
@@ -1303,8 +1302,8 @@ export function mjrOpenABViewer(fileA, fileB) {
       padding: "4px 8px",
       fontSize: "11px",
       borderRadius: "4px",
-      background: "#000000aa",
-      color: "#ffdf7a",
+      background: mjrThemeVars.overlay,
+      color: mjrThemeVars.starsFilled,
     });
     container.appendChild(warn);
   }
@@ -1385,8 +1384,8 @@ export function mjrRenderSingleCurrent() {
         left: "8px",
         padding: "6px 10px",
         borderRadius: "8px",
-        background: "rgba(0,0,0,0.6)",
-        color: "#ffd45a",
+        background: mjrThemeVars.viewerPanel,
+        color: mjrThemeVars.starsFilled,
         fontWeight: "700",
         letterSpacing: "2px",
         fontSize: "20px",
@@ -1426,7 +1425,7 @@ export function mjrUpdateViewerRatingDisplay(rating) {
     const span = document.createElement("span");
     const filled = i <= r;
     span.textContent = filled ? "★" : "☆";
-    span.style.color = filled ? "#ffd45a" : "#777";
+    span.style.color = filled ? mjrThemeVars.starsFilled : mjrThemeVars.starsEmpty;
     span.style.marginRight = i < 5 ? "2px" : "0";
     mjrViewerRatingEl.appendChild(span);
   }
@@ -1476,8 +1475,8 @@ export function mjrApplyOpenViewerSettings() {
           left: "8px",
           padding: "6px 10px",
           borderRadius: "8px",
-          background: "rgba(0,0,0,0.6)",
-          color: "#ffd45a",
+          background: mjrThemeVars.viewerPanel,
+          color: mjrThemeVars.starsFilled,
           fontWeight: "700",
           letterSpacing: "2px",
           fontSize: "20px",

@@ -5,6 +5,7 @@ import {
   mjrSettings,
 } from "./ui_settings.js";
 import { normalizeMtimeOnList, normalizeMtimeValue } from "./assets_filters.js";
+import { mjrThemeVars } from "./ui_theme.js";
 
 export const mjrRefreshDefaults = { silent: true, forceFiles: false, metaOnly: false };
 
@@ -157,7 +158,7 @@ export async function loadFiles(state, gridEl, applyFilterAndRender, opts = {}, 
       applyFilterAndRender({ skipMetadataFetch });
     } catch (err) {
       console.error("[Majoor.AssetsManager] load error", err);
-      gridEl.innerHTML = '<div style="color:#e66;padding:10px;">Error loading files (see console).</div>';
+      gridEl.innerHTML = `<div style="color:${mjrThemeVars.errorText};padding:10px;">Error loading files (see console).</div>`;
       mjrShowToast("error", "Error loading files", "Error");
     } finally {
       state.loading = false;

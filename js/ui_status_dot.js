@@ -142,26 +142,26 @@ const STYLES = `
     cursor: pointer;
 }
 
-.mjr-status-idle,
+ .mjr-status-idle,
 .mjr-status-up_to_date {
-    background-color: #22c55e; /* Green */
+    background-color: var(--mjr-status-success, #22c55e);
 }
 
 .mjr-status-indexing {
-    background-color: #eab308; /* Yellow */
+    background-color: var(--mjr-status-warning, #eab308);
     animation: mjr-pulse 2s infinite;
 }
 
 .mjr-status-error {
-    background-color: #ef4444; /* Red */
+    background-color: var(--mjr-status-error, #ef4444);
 }
 
 .mjr-status-stale {
-    background-color: #9ca3af; /* Gray */
+    background-color: var(--mjr-status-neutral, #9ca3af);
 }
 
 .mjr-status-unknown {
-    background-color: #6b7280; /* Dark gray */
+    background-color: var(--mjr-status-muted, #6b7280);
 }
 
 @keyframes mjr-pulse {

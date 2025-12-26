@@ -40,7 +40,7 @@ from .utils import (
 )
 from .metadata import update_metadata_with_windows, deep_merge_metadata
 from .metadata_generation import extract_generation_params_from_png, has_generation_workflow
-from .config import OUTPUT_ROOT, ENABLE_JSON_SIDECAR, METADATA_EXT
+from .config import OUTPUT_ROOT, ENABLE_JSON_SIDECAR, METADATA_EXT, INDEX_MODE
 from .collections_store import (
     get_collections,
     load_collection,
@@ -2431,6 +2431,9 @@ async def retry_failed_route(request: web.Request) -> web.Response:
 
 def _init_index_after_server_ready():
     """Initialize index after ComfyUI server is ready (avoids race condition)."""
+    if INDEX_MODE == "filesystem":
+        log.info("[Majoor] Filesystem index mode active; skipping index initialization")
+        return
     try:
         from .index_db import auto_init_index
         # Small delay to ensure server is fully up
@@ -2440,9 +2443,9 @@ def _init_index_after_server_ready():
             time.sleep(2)  # Wait 2 seconds
             auto_init_index()
         threading.Thread(target=delayed_init, daemon=True).start()
-        log.info("📁 [Majoor] Index initialization scheduled")
+        log.info("[Majoor] Index initialization scheduled")
     except Exception as e:
-        log.error(f"📁❌ [Majoor] Failed to schedule index init: {e}")
+        log.error("[Majoor] Failed to schedule index init: %s", e)
 
 # Call init after routes are registered
 _init_index_after_server_ready()

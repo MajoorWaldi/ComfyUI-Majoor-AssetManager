@@ -9,6 +9,7 @@ import {
   mjrSettings,
   mjrShowToast,
 } from "./ui_settings.js";
+import { mjrThemeVars } from "./ui_theme.js";
 
 export function createMetadataSidebar(options) {
   const {
@@ -136,7 +137,7 @@ export function createMetadataSidebar(options) {
     previewShell.style.borderRadius = "8px";
     previewShell.style.overflow = "hidden";
     previewShell.style.border = "1px solid var(--border-color, #333)";
-    previewShell.style.background = "#050505";
+    previewShell.style.background = mjrThemeVars.sidebarBg;
     previewShell.style.display = "flex";
     previewShell.style.alignItems = "center";
     previewShell.style.justifyContent = "center";
@@ -174,7 +175,7 @@ export function createMetadataSidebar(options) {
       icon.className = "pi pi-volume-up";
       icon.style.display = "block";
       icon.style.fontSize = "1.6rem";
-      icon.style.color = "#fff";
+      icon.style.color = mjrThemeVars.icon;
 
       const audio = document.createElement("audio");
       audio.src = url;
@@ -197,14 +198,14 @@ export function createMetadataSidebar(options) {
       icon.style.display = "block";
       icon.style.fontSize = "1.6rem";
       icon.style.marginBottom = "6px";
-      icon.style.color = "#fff";
+      icon.style.color = mjrThemeVars.icon;
 
       const text = createEl(
         "div",
         "",
         "3D file (preview placeholder). Use an external viewer for full inspection."
       );
-      text.style.color = "#eee";
+      text.style.color = mjrThemeVars.textColor;
       text.style.opacity = "0.8";
       text.style.fontSize = "0.8rem";
       text.style.textAlign = "center";
@@ -214,7 +215,7 @@ export function createMetadataSidebar(options) {
       previewShell.appendChild(wrap);
     } else {
       const text = createEl("div", "", "Unsupported preview type. Open in new tab or OS.");
-      text.style.color = "#eee";
+      text.style.color = mjrThemeVars.textColor;
       text.style.opacity = "0.8";
       text.style.fontSize = "0.8rem";
       previewShell.appendChild(text);
@@ -249,8 +250,8 @@ export function createMetadataSidebar(options) {
       errBox.style.marginTop = "8px";
       errBox.style.padding = "6px 8px";
       errBox.style.borderRadius = "6px";
-      errBox.style.border = "1px solid #b33";
-      errBox.style.background = "rgba(180,40,40,0.15)";
+      errBox.style.border = `1px solid ${mjrThemeVars.errorBorder}`;
+      errBox.style.background = mjrThemeVars.errorBg;
       errBox.style.fontSize = "0.75rem";
       metaContent.appendChild(errBox);
       return;
@@ -341,7 +342,7 @@ export function createMetadataSidebar(options) {
     const ratingStars = createEl("div", "mjr-fm-meta-rating");
     ratingStars.style.fontSize = "2rem";
     ratingStars.style.lineHeight = "1.2";
-    ratingStars.style.color = "#ffd45a";
+    ratingStars.style.color = mjrThemeVars.starsFilled;
     ratingStars.style.letterSpacing = "3px";
     ratingStars.style.display = "flex";
     ratingStars.style.gap = "6px";
@@ -351,7 +352,7 @@ export function createMetadataSidebar(options) {
       const star = createEl("span", "mjr-fm-meta-star", i <= ratingCount ? "★" : "☆");
       star.style.cursor = "pointer";
       star.style.userSelect = "none";
-      star.style.color = i <= ratingCount ? "#ffd45a" : "#777";
+      star.style.color = i <= ratingCount ? mjrThemeVars.starsFilled : mjrThemeVars.starsEmpty;
       star.style.transition = "color 0.15s ease";
       star.addEventListener("click", () => {
         file.rating = i;
@@ -436,7 +437,7 @@ export function createMetadataSidebar(options) {
     fieldsContainer.style.gap = "6px";
     fieldsContainer.style.marginTop = "8px";
 
-    const addColoredField = (label, value, multiline = false, color = "#5fb3ff") => {
+    const addColoredField = (label, value, multiline = false, color = mjrThemeVars.badgeAccent) => {
       const field = createCopyField(label, value, multiline);
       const lbl = field.querySelector(".mjr-fm-meta-label");
       if (lbl) {
@@ -446,9 +447,9 @@ export function createMetadataSidebar(options) {
       return field;
     };
 
-    if (hasPositive) fieldsContainer.appendChild(addColoredField("POSITIVE PROMPT", positive, true, "#8bd5ff"));
-    if (hasNegative) fieldsContainer.appendChild(addColoredField("NEGATIVE PROMPT", negative, true, "#ff9f7f"));
-    if (hasSeeds) fieldsContainer.appendChild(addColoredField("SEED(S)", seeds, false, "#d1b3ff"));
+    if (hasPositive) fieldsContainer.appendChild(addColoredField("POSITIVE PROMPT", positive, true, mjrThemeVars.positiveField));
+    if (hasNegative) fieldsContainer.appendChild(addColoredField("NEGATIVE PROMPT", negative, true, mjrThemeVars.negativeField));
+    if (hasSeeds) fieldsContainer.appendChild(addColoredField("SEED(S)", seeds, false, mjrThemeVars.seedField));
 
     const genLines = [];
     if (models) genLines.push(`Model: ${models}`);
@@ -466,7 +467,7 @@ export function createMetadataSidebar(options) {
     if (meta && meta.return_with_leftover_noise !== undefined && meta.return_with_leftover_noise !== null) genLines.push(`Return Leftover Noise: ${meta.return_with_leftover_noise}`);
 
     if (genLines.length) {
-      fieldsContainer.appendChild(addColoredField("MODEL / LORA / SAMPLER", genLines.join("\n"), true, "#5fb3ff"));
+      fieldsContainer.appendChild(addColoredField("MODEL / LORA / SAMPLER", genLines.join("\n"), true, mjrThemeVars.badgeAccent));
     }
 
     if (hasAnyGen) {

@@ -17,7 +17,7 @@ import hashlib
 import atexit
 from typing import Optional, Dict, List, Callable, Any
 from pathlib import Path
-from .config import OUTPUT_ROOT, INDEX_DIR, INDEX_DB
+from .config import OUTPUT_ROOT, INDEX_DIR, INDEX_DB, INDEX_MODE
 from .utils import (
     load_metadata,
     get_system_metadata,
@@ -1375,6 +1375,12 @@ def auto_init_index() -> None:
     Auto-initialize index after ComfyUI is ready.
     Creates DB if it doesn't exist, checks freshness, and triggers reindex if needed.
     """
+    if INDEX_MODE == "filesystem":
+        log.info("[Majoor] Indexing disabled (filesystem mode)")
+        with _status_lock:
+            _index_status["status"] = "idle"
+        return
+
     try:
         # Ensure index directory exists
         os.makedirs(INDEX_DIR, exist_ok=True)
@@ -1388,7 +1394,7 @@ def auto_init_index() -> None:
             _index_status["freshness"] = freshness
 
         if freshness == "stale":
-            log.info("📁 [Majoor] Index is stale, triggering one-time reindex.")
+            log.info("[Majoor] Index is stale, triggering one-time reindex.")
             start_background_reindex()
 
         # Start the real-time file watcher

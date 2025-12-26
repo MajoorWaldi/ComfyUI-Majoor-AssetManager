@@ -548,7 +548,7 @@ const STYLES = `
 
 .mjr-progress-fill {
     height: 100%;
-    background: linear-gradient(90deg, #22c55e, #16a34a);
+    background: var(--mjr-success-gradient, linear-gradient(90deg, #22c55e, #16a34a));
     transition: width 0.3s ease;
     width: 0%;
 }
