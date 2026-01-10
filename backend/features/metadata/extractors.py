@@ -876,6 +876,20 @@ def _extract_json_fields(exif_data: Dict[str, Any]) -> Tuple[Optional[Dict[str, 
     return workflow, prompt
 
 
+def _looks_like_prompt_node_id(value: Any) -> bool:
+    """
+    Accept plain integers or colon-delimited numeric ids (e.g. "91:68").
+    """
+    if isinstance(value, int):
+        return True
+    if not isinstance(value, str):
+        return False
+    parts = value.split(":")
+    if not parts:
+        return False
+    return all(part.isdigit() for part in parts)
+
+
 def _looks_like_comfyui_prompt_graph(value: Optional[Dict[str, Any]]) -> bool:
     """
     Heuristic check for a ComfyUI prompt graph (the runtime `prompt` dict keyed by node id).
@@ -894,7 +908,7 @@ def _looks_like_comfyui_prompt_graph(value: Optional[Dict[str, Any]]) -> bool:
     digit_keys = 0
     valid_nodes = 0
     for k in keys:
-        if isinstance(k, str) and k.isdigit():
+        if _looks_like_prompt_node_id(k):
             digit_keys += 1
         node = value.get(k)
         if not isinstance(node, dict):

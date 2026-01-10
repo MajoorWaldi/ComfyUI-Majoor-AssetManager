@@ -41,3 +41,4 @@ ENV/
 Thumbs.db
 clean_pycache.bat
 AGENTS.md
+backend/features/metadata/test_extractors.py

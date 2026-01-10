@@ -1244,6 +1244,19 @@ export function createViewer() {
     });
 
     // Mouse wheel zoom (trackpad-friendly). Capture + preventDefault so ComfyUI canvas doesn't zoom underneath.
+    const navigateViewerAssets = (direction) => {
+        if (!Array.isArray(state.assets) || state.assets.length === 0) {
+            return false;
+        }
+        const nextIndex = state.currentIndex + direction;
+        if (nextIndex < 0 || nextIndex >= state.assets.length) {
+            return false;
+        }
+        state.currentIndex = nextIndex;
+        updateUI();
+        return true;
+    };
+
     const onWheelZoom = (e) => {
         if (overlay.style.display === "none") return;
         try {
@@ -1263,6 +1276,16 @@ export function createViewer() {
             e.stopPropagation();
             e.stopImmediatePropagation?.();
         } catch {}
+
+        if (e.shiftKey) {
+            const delta = Number(e.deltaY) || 0;
+            if (delta) {
+                const direction = delta > 0 ? 1 : -1;
+                if (navigateViewerAssets(direction)) {
+                    return;
+                }
+            }
+        }
 
         const dy = Number(e.deltaY) || 0;
         if (!dy) return;
@@ -1530,17 +1553,11 @@ export function createViewer() {
                 break;
             case 'ArrowLeft':
                 // Plain arrows navigate between assets
-                if (state.currentIndex > 0) {
-                    state.currentIndex--;
-                    updateUI();
-                }
+                navigateViewerAssets(-1);
                 break;
             case 'ArrowRight':
                 // Plain arrows navigate between assets
-                if (state.currentIndex < state.assets.length - 1) {
-                    state.currentIndex++;
-                    updateUI();
-                }
+                navigateViewerAssets(1);
                 break;
             case '+':
             case '=':
