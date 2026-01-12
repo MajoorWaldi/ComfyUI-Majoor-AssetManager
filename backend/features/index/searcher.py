@@ -683,7 +683,7 @@ class IndexSearcher:
             return "*"
 
         # Replace FTS5 special characters with spaces
-        sanitized = re.sub(r"[\"'\-:&/\\|;@#*~()\[\]{}]+", " ", text)
+        sanitized = re.sub(r"[\"'\-:&/\\|;@#*~()\[\]{}\.]+", " ", text)
         # Replace non-printable / control chars
         sanitized = re.sub(r"[^\x20-\x7E]+", " ", sanitized)
         # Collapse whitespace

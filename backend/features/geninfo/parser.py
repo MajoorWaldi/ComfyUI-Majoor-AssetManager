@@ -485,24 +485,46 @@ def _trace_noise_seed(nodes_by_id: Dict[str, Dict[str, Any]], link: Any) -> Opti
 
 def _trace_scheduler_sigmas(
     nodes_by_id: Dict[str, Dict[str, Any]], link: Any
-) -> Tuple[Optional[Any], Optional[Any], Optional[Any], Optional[Any], Optional[Tuple[str, str]]]:
+) -> Tuple[Optional[Any], Optional[Any], Optional[Any], Optional[Any], Optional[Tuple[str, str]], Optional[str]]:
     """
     For advanced sampler pipelines, `sigmas` points to a scheduler node that carries steps/scheduler/denoise
     and sometimes a `model` link.
     """
     src_id = _walk_passthrough(nodes_by_id, link)
     if not src_id:
-        return (None, None, None, None, None)
+        return (None, None, None, None, None, None)
     node = nodes_by_id.get(src_id)
     if not isinstance(node, dict):
-        return (None, None, None, None, None)
+        return (None, None, None, None, None, None)
     ins = _inputs(node)
     steps = _scalar(ins.get("steps"))
+    steps_confidence: Optional[str] = "high" if steps is not None else None
+    if steps is None:
+        # Some video workflows use manual sigma schedules (e.g. ManualSigmas) instead of an explicit `steps` field.
+        # Best-effort: count the comma-separated values and treat it as (steps + 1).
+        try:
+            sigmas = ins.get("sigmas")
+            if isinstance(sigmas, str) and sigmas.strip():
+                raw_parts = [p.strip() for p in sigmas.replace("\n", " ").split(",")]
+                parts = [p for p in raw_parts if p]
+                # Ensure these are numeric-ish to avoid accidentally treating random strings as step schedules.
+                numeric = 0
+                for p in parts:
+                    try:
+                        float(p)
+                        numeric += 1
+                    except Exception:
+                        pass
+                if numeric >= 2:
+                    steps = max(1, numeric - 1)
+                    steps_confidence = "low"
+        except Exception:
+            pass
     scheduler = _scalar(ins.get("scheduler"))
     denoise = _scalar(ins.get("denoise"))
     model_link = ins.get("model") if _is_link(ins.get("model")) else None
     src = f"{_node_type(node)}:{src_id}"
-    return (steps, scheduler, denoise, model_link, (src_id, src))
+    return (steps, scheduler, denoise, model_link, (src_id, src), steps_confidence)
 
 
 def _trace_guidance_from_conditioning(nodes_by_id: Dict[str, Dict[str, Any]], conditioning_link: Any) -> Optional[Tuple[Any, str]]:
@@ -623,6 +645,11 @@ def _collect_text_encoder_nodes_from_conditioning(
 
     def _should_expand(node: Dict[str, Any]) -> bool:
         ct = _lower(_node_type(node))
+        # Negative "ConditioningZeroOut" chains don't represent a user-authored negative prompt.
+        # Avoid surfacing the positive prompt as the negative prompt when a graph uses
+        # ConditioningZeroOut to satisfy a required negative input.
+        if branch == "negative" and "conditioningzeroout" in ct:
+            return False
         if _is_reroute(node):
             return True
         if "conditioning" in ct:
@@ -1088,6 +1115,8 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
     confidence = sampler_conf
 
     ins = _inputs(sampler_node)
+    field_sources: Dict[str, str] = {}
+    field_confidence: Dict[str, str] = {}
 
     # Advanced sampler pipelines (Flux/SD3): derive fields from orchestrator dependencies.
     advanced = _is_advanced_sampler(sampler_node)
@@ -1096,6 +1125,9 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
     pos_val: Optional[Tuple[str, str]] = None
     neg_val: Optional[Tuple[str, str]] = None
     conditioning_link = None
+    guider_cfg_value: Optional[Any] = None
+    guider_cfg_source: Optional[str] = None
+    guider_model_link: Optional[Any] = None
     if _is_link(ins.get("positive")):
         items = _collect_texts_from_conditioning(nodes_by_id, ins.get("positive"), branch="positive")
         if items:
@@ -1126,6 +1158,7 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
         guider_node = nodes_by_id.get(guider_id) if guider_id else None
         if isinstance(guider_node, dict):
             gins = _inputs(guider_node)
+            # Some guiders pass a single `conditioning` link.
             if _is_link(gins.get("conditioning")):
                 conditioning_link = gins.get("conditioning")
                 items = _collect_texts_from_conditioning(nodes_by_id, conditioning_link)
@@ -1135,6 +1168,37 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
                     source = srcs[0] if len(set(srcs)) <= 1 else f"{srcs[0]} (+{len(srcs)-1})"
                     if text:
                         pos_val = (text, source)
+
+            # Other guiders (e.g. CFGGuider in some video stacks) expose `positive` / `negative`.
+            if _is_link(gins.get("positive")):
+                conditioning_link = conditioning_link or gins.get("positive")
+                if not pos_val:
+                    items = _collect_texts_from_conditioning(nodes_by_id, gins.get("positive"), branch="positive")
+                    if items:
+                        text = "\n".join([t for t, _ in items]).strip()
+                        srcs = [s for _, s in items]
+                        source = srcs[0] if len(set(srcs)) <= 1 else f"{srcs[0]} (+{len(srcs)-1})"
+                        if text:
+                            pos_val = (text, source)
+
+            if _is_link(gins.get("negative")) and not neg_val:
+                items = _collect_texts_from_conditioning(nodes_by_id, gins.get("negative"), branch="negative")
+                if items:
+                    text = "\n".join([t for t, _ in items]).strip()
+                    srcs = [s for _, s in items]
+                    source = srcs[0] if len(set(srcs)) <= 1 else f"{srcs[0]} (+{len(srcs)-1})"
+                    if text:
+                        neg_val = (text, source)
+
+            # Guidance scale sometimes lives on the guider node.
+            cfg_val = _scalar(gins.get("cfg")) or _scalar(gins.get("cfg_scale")) or _scalar(gins.get("guidance"))
+            if cfg_val is not None:
+                guider_cfg_value = cfg_val
+                guider_cfg_source = f"{_node_type(guider_node)}:{guider_id}"
+
+            # Model chain for video stacks can also originate on the guider node.
+            if _is_link(gins.get("model")):
+                guider_model_link = gins.get("model")
 
     # Last-resort (still no guessing): some custom sampler nodes store prompt strings directly.
     if not pos_val:
@@ -1162,35 +1226,69 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
 
     # Advanced sampler: sampler_name/steps/scheduler/denoise/seed may be stored on linked nodes.
     model_link_for_chain = ins.get("model") if _is_link(ins.get("model")) else None
+    if model_link_for_chain is None and _is_link(guider_model_link):
+        model_link_for_chain = guider_model_link
     if advanced:
         if _is_link(ins.get("sampler")):
             s = _trace_sampler_name(nodes_by_id, ins.get("sampler"))
             if s and not sampler_name:
                 sampler_name = s[0]
         if _is_link(ins.get("sigmas")):
-            st, sch, den, model_link, _src = _trace_scheduler_sigmas(nodes_by_id, ins.get("sigmas"))
+            st, sch, den, model_link, _src, st_conf = _trace_scheduler_sigmas(nodes_by_id, ins.get("sigmas"))
             if st is not None and steps is None:
                 steps = st
+                if _src and isinstance(_src, tuple) and len(_src) == 2:
+                    field_sources["steps"] = _src[1]
+                if st_conf:
+                    field_confidence["steps"] = st_conf
             if sch is not None and not scheduler:
                 scheduler = sch
+                if _src and isinstance(_src, tuple) and len(_src) == 2:
+                    field_sources["scheduler"] = _src[1]
             if den is not None and denoise is None:
                 denoise = den
+                if _src and isinstance(_src, tuple) and len(_src) == 2:
+                    field_sources["denoise"] = _src[1]
             if model_link and not model_link_for_chain:
                 model_link_for_chain = model_link
         if _is_link(ins.get("noise")) and seed_val is None:
             s = _trace_noise_seed(nodes_by_id, ins.get("noise"))
             if s:
                 seed_val = s[0]
+                field_sources["seed"] = s[1]
         if conditioning_link and cfg is None:
             g = _trace_guidance_from_conditioning(nodes_by_id, conditioning_link)
             if g:
                 cfg = g[0]
+                field_sources["cfg"] = g[1]
+
+    if cfg is None and guider_cfg_value is not None:
+        cfg = guider_cfg_value
+        if guider_cfg_source:
+            field_sources["cfg"] = guider_cfg_source
 
     # Model chain + LoRAs
     models: Dict[str, Dict[str, Any]] = {}
     loras: List[Dict[str, Any]] = []
     if model_link_for_chain and _is_link(model_link_for_chain):
         models, loras = _trace_model_chain(nodes_by_id, model_link_for_chain, confidence)
+
+    # Related model loaders (non-diffusion): e.g. latent upscalers in video workflows.
+    if "upscaler" not in models:
+        try:
+            for node_id, node in nodes_by_id.items():
+                if not isinstance(node, dict):
+                    continue
+                ct = _lower(_node_type(node))
+                if "upscalemodelloader" not in ct and "upscale_model" not in ct and "latentupscale" not in ct:
+                    continue
+                ins2 = _inputs(node)
+                name = _clean_model_id(ins2.get("model_name") or ins2.get("upscale_model") or ins2.get("upscale_model_name"))
+                if name:
+                    models["upscaler"] = {"name": name, "confidence": "medium", "source": f"{_node_type(node)}:{node_id}"}
+                    break
+        except Exception:
+            pass
 
     # Size
     size = None
@@ -1256,6 +1354,8 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
             merged["unet"] = models["unet"]
         if models.get("diffusion"):
             merged["diffusion"] = models["diffusion"]
+        if models.get("upscaler"):
+            merged["upscaler"] = models["upscaler"]
         if clip:
             merged["clip"] = clip
         if vae:
@@ -1276,7 +1376,9 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
         ("seed", seed_val),
         ("denoise", denoise),
     ):
-        f = _field(val, confidence, sampler_source)
+        source = field_sources.get(key, sampler_source)
+        conf = field_confidence.get(key, confidence)
+        f = _field(val, conf, source)
         if f:
             out[key] = f
 

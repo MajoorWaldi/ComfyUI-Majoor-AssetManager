@@ -95,6 +95,28 @@ export function createSidebar(position = "right") {
 export async function showAssetInSidebar(sidebar, asset, onUpdate) {
     if (!sidebar || !asset) return;
 
+    const hasMeaningfulMetadataRaw = (value) => {
+        if (value == null) return false;
+        if (typeof value === "string") {
+            const trimmed = value.trim();
+            if (!trimmed) return false;
+            return trimmed !== "{}" && trimmed !== "null";
+        }
+        if (typeof value === "object") {
+            try {
+                return Object.keys(value).length > 0;
+            } catch {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    const hasGenerationLikeData = (obj) => {
+        if (!obj) return false;
+        return !!(obj.geninfo || obj.prompt || hasMeaningfulMetadataRaw(obj.metadata_raw));
+    };
+
     try {
         if (sidebar._closeTimer) {
             clearTimeout(sidebar._closeTimer);
@@ -116,7 +138,7 @@ export async function showAssetInSidebar(sidebar, asset, onUpdate) {
     sidebar._ratingTagsSection = null;
 
     let fullAsset = asset;
-    if (asset.id && (!asset.metadata_raw && !asset.exif && !asset.geninfo && !asset.prompt)) {
+    if (asset.id && (!hasGenerationLikeData(asset) && !asset.exif)) {
         try {
             const result = await getAssetMetadata(asset.id);
             if (result.ok && result.data) {
@@ -133,7 +155,7 @@ export async function showAssetInSidebar(sidebar, asset, onUpdate) {
     }
 
     // If the asset isn't indexed (no id) or still lacks generation metadata, fetch on-demand by filepath.
-    if (!fullAsset?.geninfo && !fullAsset?.prompt && !fullAsset?.metadata_raw) {
+    if (!hasGenerationLikeData(fullAsset)) {
         const filePath = fullAsset?.filepath || fullAsset?.path || fullAsset?.file_info?.filepath || null;
         if (typeof filePath === "string" && filePath.trim()) {
             try {

@@ -1628,6 +1628,54 @@ export function createViewer() {
     } catch {}
 
     function closeViewer() {
+        // Ensure media playback is fully stopped when closing the overlay.
+        // Hiding the overlay alone does not stop HTMLMediaElement audio in all browsers.
+        try {
+            const mediaEls = overlay.querySelectorAll?.("video, audio");
+            if (mediaEls && mediaEls.length) {
+                for (const el of mediaEls) {
+                    try {
+                        el.muted = true;
+                    } catch {}
+                    try {
+                        el.pause?.();
+                    } catch {}
+                    try {
+                        el.currentTime = 0;
+                    } catch {}
+                    try {
+                        // Remove all <source> children (if any) and unload the element.
+                        const sources = el.querySelectorAll?.("source");
+                        if (sources && sources.length) {
+                            for (const s of sources) {
+                                try {
+                                    s.remove();
+                                } catch {}
+                            }
+                        }
+                    } catch {}
+                    try {
+                        el.removeAttribute?.("src");
+                    } catch {}
+                    try {
+                        // Some browsers keep playing unless we force a reload after removing src.
+                        el.load?.();
+                    } catch {}
+                }
+            }
+        } catch {}
+
+        // Free DOM resources (and ensure playback stops even if `pause()` was ignored).
+        try {
+            singleView.innerHTML = "";
+        } catch {}
+        try {
+            abView.innerHTML = "";
+        } catch {}
+        try {
+            sideView.innerHTML = "";
+        } catch {}
+
         overlay.style.display = 'none';
         try {
             document.body.style.overflow = state._prevBodyOverflow ?? '';
