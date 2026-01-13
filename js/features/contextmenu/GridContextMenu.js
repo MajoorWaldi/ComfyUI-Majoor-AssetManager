@@ -8,6 +8,9 @@ import { openInFolder, updateAssetRating, deleteAsset, renameAsset } from "../..
 import { ASSET_RATING_CHANGED_EVENT, ASSET_TAGS_CHANGED_EVENT } from "../../app/events.js";
 import { createTagsEditor } from "../../components/TagsEditor.js";
 import { safeDispatchCustomEvent } from "../../utils/events.js";
+import { showAddToCollectionMenu } from "../collections/contextmenu/addToCollectionMenu.js";
+import { getOrCreateMenu, createMenuItem, createMenuSeparator, showMenuAt } from "../../components/contextmenu/MenuCore.js";
+import { hideMenu, clearMenu } from "../../components/contextmenu/MenuCore.js";
 // Bulk operations removed - using local helpers
 const getSelectedAssetIds = (gridContainer) => {
     const selected = new Set();
@@ -20,6 +23,19 @@ const getSelectedAssetIds = (gridContainer) => {
         }
     } catch {}
     return selected;
+};
+
+const getSelectedAssets = (gridContainer) => {
+    const assets = [];
+    if (!gridContainer) return assets;
+    try {
+        const cards = gridContainer.querySelectorAll(".mjr-asset-card.is-selected");
+        for (const card of cards) {
+            const a = card?._mjrAsset;
+            if (a) assets.push(a);
+        }
+    } catch {}
+    return assets;
 };
 
 const clearSelection = (gridContainer) => {
@@ -37,131 +53,35 @@ const MENU_SELECTOR = ".mjr-grid-context-menu";
 const POPOVER_SELECTOR = ".mjr-grid-popover";
 
 function createMenu() {
-    const existing = document.querySelector(MENU_SELECTOR);
-    if (existing) return existing;
-
-    const menu = document.createElement("div");
-    menu.className = "mjr-grid-context-menu mjr-context-menu";
-    menu.style.cssText = `
-        position: fixed;
-        background: var(--comfy-menu-bg);
-        border: 1px solid var(--border-color);
-        border-radius: 6px;
-        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
-        min-width: 220px;
-        z-index: 10001;
-        display: none;
-        padding: 4px 0;
-    `;
-
-    const ac = new AbortController();
-    menu._mjrAbortController = ac;
-
-    const hide = () => {
-        menu.style.display = "none";
-        try {
-            const pop = document.querySelector(POPOVER_SELECTOR);
-            pop?.remove?.();
-        } catch {}
-    };
-
-    document.addEventListener(
-        "click",
-        (e) => {
-            if (!menu.contains(e.target)) hide();
-        },
-        { signal: ac.signal, capture: true }
-    );
-    document.addEventListener(
-        "keydown",
-        (e) => {
-            if (e.key === "Escape") hide();
-        },
-        { signal: ac.signal, capture: true }
-    );
-    document.addEventListener("scroll", hide, { capture: true, signal: ac.signal });
-
-    document.body.appendChild(menu);
-    return menu;
+    return getOrCreateMenu({
+        selector: MENU_SELECTOR,
+        className: "mjr-grid-context-menu",
+        minWidth: 220,
+        zIndex: 10001,
+        onHide: null,
+    });
 }
 
-function createItem(label, iconClass, rightHint, onClick, { disabled = false } = {}) {
-    const item = document.createElement("div");
-    item.className = "mjr-context-menu-item";
-    item.style.cssText = `
-        padding: 8px 14px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        cursor: ${disabled ? "default" : "pointer"};
-        color: var(--fg-color);
-        font-size: 13px;
-        opacity: ${disabled ? "0.45" : "1"};
-        transition: background 0.15s;
-        user-select: none;
-    `;
+const createItem = createMenuItem;
+const separator = createMenuSeparator;
+const showAt = showMenuAt;
 
-    const left = document.createElement("div");
-    left.style.cssText = "display:flex; align-items:center; gap:10px;";
-    if (iconClass) {
-        const iconEl = document.createElement("i");
-        iconEl.className = iconClass;
-        iconEl.style.cssText = "width:16px; text-align:center; opacity:0.8;";
-        left.appendChild(iconEl);
-    }
-    const labelEl = document.createElement("span");
-    labelEl.textContent = label;
-    left.appendChild(labelEl);
-    item.appendChild(left);
-
-    if (rightHint) {
-        const hint = document.createElement("span");
-        hint.textContent = rightHint;
-        hint.style.cssText = "font-size: 11px; opacity: 0.55; margin-left: 16px;";
-        item.appendChild(hint);
-    }
-
-    item.addEventListener("mouseenter", () => {
-        if (!disabled) item.style.background = "var(--comfy-input-bg)";
+function getOrCreateRatingSubmenu() {
+    return getOrCreateMenu({
+        selector: ".mjr-grid-rating-submenu",
+        className: "mjr-grid-rating-submenu",
+        minWidth: 200,
+        zIndex: 10002,
+        onHide: null,
     });
-    item.addEventListener("mouseleave", () => {
-        item.style.background = "transparent";
-    });
-
-    item.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        if (disabled) return;
-        try {
-            await onClick?.();
-        } catch {}
-    });
-
-    return item;
 }
 
-function separator() {
-    const s = document.createElement("div");
-    s.style.cssText = "height:1px;background:var(--border-color);margin:4px 0;";
-    return s;
-}
-
-function showAt(menu, x, y) {
-    menu.style.display = "block";
-    menu.style.left = `${x}px`;
-    menu.style.top = `${y}px`;
-
-    const rect = menu.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-
-    let fx = x;
-    let fy = y;
-    if (x + rect.width > vw) fx = vw - rect.width - 10;
-    if (y + rect.height > vh) fy = vh - rect.height - 10;
-
-    menu.style.left = `${Math.max(8, fx)}px`;
-    menu.style.top = `${Math.max(8, fy)}px`;
+function showSubmenuNextTo(anchorEl, menuEl) {
+    if (!anchorEl || !menuEl) return;
+    const rect = anchorEl.getBoundingClientRect();
+    const x = Math.round(rect.right + 6);
+    const y = Math.round(rect.top - 4);
+    showAt(menuEl, x, y);
 }
 
 function showTagsPopover(x, y, asset, onChanged) {
@@ -179,6 +99,9 @@ function showTagsPopover(x, y, asset, onChanged) {
         top: ${y}px;
     `;
 
+    const ac = new AbortController();
+    pop._mjrAbortController = ac;
+
     const editor = createTagsEditor(asset, (tags) => {
         asset.tags = tags;
         safeDispatchCustomEvent(
@@ -192,6 +115,34 @@ function showTagsPopover(x, y, asset, onChanged) {
     });
     pop.appendChild(editor);
     document.body.appendChild(pop);
+
+    const hide = () => {
+        try {
+            pop._mjrAbortController?.abort?.();
+        } catch {}
+        try {
+            pop.remove?.();
+        } catch {}
+    };
+
+    // Dismiss when clicking outside (so clicking inside input doesn't close it).
+    try {
+        document.addEventListener(
+            "mousedown",
+            (e) => {
+                if (!pop.contains(e.target)) hide();
+            },
+            { capture: true, signal: ac.signal }
+        );
+        document.addEventListener(
+            "keydown",
+            (e) => {
+                if (e.key === "Escape") hide();
+            },
+            { capture: true, signal: ac.signal }
+        );
+        document.addEventListener("scroll", hide, { capture: true, signal: ac.signal });
+    } catch {}
 
     // Clamp into viewport
     const rect = pop.getBoundingClientRect();
@@ -283,10 +234,25 @@ export function bindGridContextMenu({
             })
         );
 
+        // Add to collection (single or multi)
+        menu.appendChild(
+            createItem("Add to collection...", "pi pi-bookmark", null, async () => {
+                try {
+                    menu.style.display = "none";
+                } catch {}
+                const selectedAssets = getSelectedAssets(gridContainer);
+                const list = selectedAssets.length ? selectedAssets : [asset];
+                await showAddToCollectionMenu({ x: e.clientX, y: e.clientY, assets: list });
+            })
+        );
+
         menu.appendChild(separator());
 
         // Edit Tags
         menu.appendChild(createItem("Edit Tags…", "pi pi-tags", null, () => {
+            try {
+                hideMenu(menu);
+            } catch {}
             showTagsPopover(e.clientX + 6, e.clientY + 6, asset, () => {
                 // Update card UI after tags change
                 const card = document.querySelector(`[data-mjr-asset-id="${CSS.escape ? CSS.escape(String(asset.id)) : String(asset.id)}"]`);
@@ -296,22 +262,79 @@ export function bindGridContextMenu({
             });
         }));
 
-        // Rating submenu
+        // Rating submenu (hover)
         menu.appendChild(separator());
-        const ratingLabel = (n) => (n === 0 ? "Reset rating" : `Set rating: ${"★".repeat(n)}`);
-        for (const n of [5, 4, 3, 2, 1, 0]) {
-            menu.appendChild(
-                createItem(ratingLabel(n), "pi pi-star", n ? String(n) : "0", () => setRating(asset, n, () => {
-                    // Update card UI after rating change
-                    const card = document.querySelector(`[data-mjr-asset-id="${CSS.escape ? CSS.escape(String(asset.id)) : String(asset.id)}"]`);
-                    if (card && card._mjrAsset) {
-                        card._mjrAsset.rating = n;
-                    }
-                }), {
-                    disabled: !asset?.id
-                })
+        const ratingRoot = createItem("Set rating", "pi pi-star", "›", () => {}, { disabled: !asset?.id });
+        ratingRoot.style.cursor = !asset?.id ? "default" : "pointer";
+        menu.appendChild(ratingRoot);
+
+        let hideTimer = null;
+        const ratingSubmenu = getOrCreateRatingSubmenu();
+
+        const closeRatingSubmenu = () => {
+            try {
+                hideMenu(ratingSubmenu);
+                clearMenu(ratingSubmenu);
+            } catch {}
+        };
+
+        const scheduleClose = () => {
+            if (hideTimer) clearTimeout(hideTimer);
+            hideTimer = setTimeout(closeRatingSubmenu, 180);
+        };
+
+        const cancelClose = () => {
+            if (hideTimer) clearTimeout(hideTimer);
+            hideTimer = null;
+        };
+
+        const renderRatingSubmenu = () => {
+            clearMenu(ratingSubmenu);
+            const stars = (n) => "★".repeat(n) + "☆".repeat(Math.max(0, 5 - n));
+            for (const n of [5, 4, 3, 2, 1]) {
+                ratingSubmenu.appendChild(
+                    createItem(stars(n), "pi pi-star", null, async () => {
+                        await setRating(asset, n, () => {
+                            const card = document.querySelector(
+                                `[data-mjr-asset-id="${CSS.escape ? CSS.escape(String(asset.id)) : String(asset.id)}"]`
+                            );
+                            if (card && card._mjrAsset) card._mjrAsset.rating = n;
+                        });
+                        closeRatingSubmenu();
+                        try {
+                            hideMenu(menu);
+                        } catch {}
+                    }, { disabled: !asset?.id })
+                );
+            }
+            ratingSubmenu.appendChild(separator());
+            ratingSubmenu.appendChild(
+                createItem("Reset rating", "pi pi-star", "0", async () => {
+                    await setRating(asset, 0, () => {
+                        const card = document.querySelector(
+                            `[data-mjr-asset-id="${CSS.escape ? CSS.escape(String(asset.id)) : String(asset.id)}"]`
+                        );
+                        if (card && card._mjrAsset) card._mjrAsset.rating = 0;
+                    });
+                    closeRatingSubmenu();
+                    try {
+                        hideMenu(menu);
+                    } catch {}
+                }, { disabled: !asset?.id })
             );
-        }
+        };
+
+        ratingRoot.addEventListener("mouseenter", () => {
+            if (!asset?.id) return;
+            cancelClose();
+            renderRatingSubmenu();
+            showSubmenuNextTo(ratingRoot, ratingSubmenu);
+        });
+        ratingRoot.addEventListener("mouseleave", () => {
+            scheduleClose();
+        });
+        ratingSubmenu.addEventListener("mouseenter", () => cancelClose());
+        ratingSubmenu.addEventListener("mouseleave", () => scheduleClose());
 
         menu.appendChild(separator());
 

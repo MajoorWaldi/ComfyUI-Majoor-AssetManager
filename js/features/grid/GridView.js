@@ -8,7 +8,7 @@ import { createAssetCard } from "../../components/Card.js";
 import { createRatingBadge, createTagsBadge } from "../../components/Badges.js";
 import { APP_CONFIG } from "../../app/config.js";
 import { getViewerInstance } from "../../components/Viewer.js";
-import { bindContextMenu } from "../../components/ContextMenu.js";
+// Context menus are bound by the panel (GridContextMenu) to avoid duplicate handlers.
 import { ASSET_RATING_CHANGED_EVENT, ASSET_TAGS_CHANGED_EVENT } from "../../app/events.js";
 import { safeDispatchCustomEvent } from "../../utils/events.js";
 import { bindAssetDragStart } from "../dnd/DragDrop.js";
@@ -332,7 +332,7 @@ function appendAssets(gridContainer, assets, state) {
         } catch {}
         gridContainer.appendChild(frag);
         // Update context menu asset list (bind is idempotent).
-        bindContextMenu(gridContainer, state.assets);
+        // Context menus are bound by the panel.
     }
     return added;
 }
@@ -619,6 +619,70 @@ export async function loadAssets(gridContainer, query = "*", options = {}) {
     }
 }
 
+/**
+ * Load a pre-defined list of assets into the grid (no paging/infinite scroll).
+ * Used for "Collections" views.
+ */
+export async function loadAssetsFromList(gridContainer, assets, options = {}) {
+    const { title = "Collection", reset = true } = options || {};
+    const state = getOrCreateState(gridContainer);
+
+    const list = Array.isArray(assets) ? assets : [];
+
+    if (reset) {
+        stopObserver(state);
+        state.offset = 0;
+        state.total = list.length;
+        state.done = true;
+        state.loading = false;
+        state.query = String(title || "Collection");
+        state.seenKeys = new Set();
+        state.assets = [];
+        gridContainer.innerHTML = "";
+        showLoadingOverlay(gridContainer, list.length ? `Loading ${title}...` : `${title} is empty`);
+    }
+
+    try {
+        // Apply the current sort order for consistent UX.
+        const sortKey = gridContainer.dataset.mjrSort || "mtime_desc";
+        const sorted = list.slice().sort((a, b) => {
+            const av = getSortValue(a, sortKey);
+            const bv = getSortValue(b, sortKey);
+            if (av < bv) return -1;
+            if (av > bv) return 1;
+            return 0;
+        });
+
+        appendAssets(gridContainer, sorted, state);
+
+        if (reset) {
+            hideLoadingOverlay(gridContainer);
+            const hasCards = gridContainer.querySelector(".mjr-card") != null;
+            if (!hasCards) {
+                gridContainer.innerHTML = "";
+                const p = document.createElement("p");
+                p.className = "mjr-muted";
+                p.textContent = "No assets found";
+                gridContainer.appendChild(p);
+            }
+        }
+
+        return { ok: true, count: sorted.length, total: sorted.length };
+    } catch (err) {
+        stopObserver(state);
+        if (reset) hideLoadingOverlay(gridContainer);
+        gridContainer.innerHTML = "";
+        const p = document.createElement("p");
+        p.className = "mjr-muted";
+        p.style.color = "var(--error-text, #f44336)";
+        p.textContent = `Failed to load collection: ${err?.message || err}`;
+        gridContainer.appendChild(p);
+        return { ok: false, error: err?.message || String(err) };
+    } finally {
+        if (reset) hideLoadingOverlay(gridContainer);
+    }
+}
+
 export function disposeGrid(gridContainer) {
     const state = GRID_STATE.get(gridContainer);
     if (!state) return;
@@ -771,7 +835,7 @@ export function upsertAsset(gridContainer, asset) {
             }
 
             // Bind context menu and drag start
-            bindContextMenu(gridContainer, state.assets);
+            // Context menus are bound by the panel.
             bindAssetDragStart(gridContainer);
 
             // Hydrate rating/tags if needed

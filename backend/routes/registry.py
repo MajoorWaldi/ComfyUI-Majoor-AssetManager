@@ -21,6 +21,7 @@ from .handlers import (
     register_search_routes,
     register_scan_routes,
     register_asset_routes,
+    register_collections_routes,
 )
 
 logger = get_logger(__name__)
@@ -104,6 +105,7 @@ def register_all_routes() -> web.RouteTableDef:
     register_search_routes(routes)
     register_scan_routes(routes)
     register_asset_routes(routes)
+    register_collections_routes(routes)
 
     logger.info("=" * 60)
     logger.info("Routes registered:")
@@ -120,6 +122,7 @@ def register_all_routes() -> web.RouteTableDef:
     logger.info("  GET /mjr/am/asset/{asset_id}")
     logger.info("  POST /mjr/am/assets/delete")
     logger.info("  POST /mjr/am/assets/rename")
+    logger.info("  GET /mjr/am/collections")
     logger.info("=" * 60)
 
     return routes

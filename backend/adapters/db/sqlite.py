@@ -240,7 +240,8 @@ class Sqlite:
             return Result.Err(ErrorCode.INVALID_INPUT, "values must be a list or tuple")
 
         # Allow optional table alias prefix (e.g. "a.filepath").
-        if not isinstance(column, str) or not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*(\\.[a-zA-Z_][a-zA-Z0-9_]*)?$", column):
+        # NOTE: this is a Python regex; `\.` matches a literal dot.
+        if not isinstance(column, str) or not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?$", column):
             return Result.Err(ErrorCode.INVALID_INPUT, f"Invalid column name: {column}")
 
         if "{IN_CLAUSE}" not in str(base_query or ""):

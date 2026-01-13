@@ -34,6 +34,7 @@ export function createHeaderView() {
     const customMenuBtn = createIconButton("pi-folder-open", "Custom folders");
     const filterBtn = createIconButton("pi-filter", "Filters");
     const sortBtn = createIconButton("pi-sort", "Sort");
+    const collectionsBtn = createIconButton("pi-bookmark", "Collections");
 
     customMenuBtn.style.display = "none";
     headerTools.appendChild(customMenuBtn);
@@ -50,7 +51,8 @@ export function createHeaderView() {
         tabButtons,
         customMenuBtn,
         filterBtn,
-        sortBtn
+        sortBtn,
+        collectionsBtn
     };
 }
 

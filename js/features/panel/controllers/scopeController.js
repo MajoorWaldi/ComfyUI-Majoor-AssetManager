@@ -19,6 +19,10 @@ export function createScopeController({ state, tabButtons, customMenuBtn, custom
         const normalized = String(scope || "").toLowerCase();
         if (!allowed.has(normalized)) return;
 
+        // Switching scope exits any active collection view.
+        state.collectionId = "";
+        state.collectionName = "";
+
         state.scope = normalized === "outputs" ? "output" : normalized === "inputs" ? "input" : normalized;
         if (state.scope !== "custom") {
             state.customRootId = "";

@@ -1,13 +1,15 @@
 import { triggerAutoScan } from "../../app/bootstrap.js";
 import { comfyAlert, comfyConfirm, comfyPrompt } from "../../app/dialogs.js";
 import { createStatusIndicator, setupStatusPolling, triggerScan } from "../status/StatusDot.js";
-import { createGridContainer, loadAssets, disposeGrid } from "../grid/GridView.js";
-import { get, post } from "../../api/client.js";
+import { createGridContainer, loadAssets, loadAssetsFromList, disposeGrid } from "../grid/GridView.js";
+import { get, post, getCollectionAssets } from "../../api/client.js";
 import { ENDPOINTS } from "../../api/endpoints.js";
 import { createSidebar, showAssetInSidebar, closeSidebar } from "../../components/SidebarView.js";
 import { createRatingBadge, createTagsBadge } from "../../components/Badges.js";
 import { loadMajoorSettings } from "../../app/settings.js";
 import { createPopoverManager } from "./views/popoverManager.js";
+import { createCollectionsPopoverView } from "../collections/views/collectionsPopoverView.js";
+import { createCollectionsController } from "../collections/controllers/collectionsController.js";
 
 import { createPanelState } from "./state/panelState.js";
 import { createHeaderView } from "./views/headerView.js";
@@ -52,19 +54,22 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     const state = createPanelState();
 
     const headerView = createHeaderView();
-    const { header, headerActions, tabButtons, customMenuBtn, filterBtn, sortBtn } = headerView;
+    const { header, headerActions, tabButtons, customMenuBtn, filterBtn, sortBtn, collectionsBtn } = headerView;
 
     const { customPopover, customSelect, customAddBtn, customRemoveBtn } = createCustomPopoverView();
     const { filterPopover, kindSelect, wfCheckbox, ratingSelect, dateRangeSelect, dateExactInput } = createFilterPopoverView();
     const { sortPopover, sortMenu } = createSortPopoverView();
+    const { collectionsPopover, collectionsMenu } = createCollectionsPopoverView();
 
     headerActions.appendChild(customPopover);
 
     const { searchSection, searchInputEl } = createSearchView({
         filterBtn,
         sortBtn,
+        collectionsBtn,
         filterPopover,
-        sortPopover
+        sortPopover,
+        collectionsPopover
     });
 
     const content = document.createElement("div");
@@ -129,6 +134,8 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     const gridController = createGridController({
         gridContainer,
         loadAssets,
+        loadAssetsFromList,
+        getCollectionAssets,
         disposeGrid,
         getQuery,
         state
@@ -166,9 +173,11 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         customPopover,
         filterPopover,
         sortPopover,
+        collectionsPopover,
         customMenuBtn,
         filterBtn,
-        sortBtn
+        sortBtn,
+        collectionsBtn
     ]);
 
     customMenuBtn.addEventListener("click", (e) => {
@@ -199,6 +208,16 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
             popovers.close(filterPopover);
         }
     });
+
+    const collectionsController = createCollectionsController({
+        state,
+        collectionsBtn,
+        collectionsMenu,
+        collectionsPopover,
+        popovers,
+        reloadGrid: gridController.reloadGrid
+    });
+    collectionsController.bind();
 
     bindFilters({
         state,

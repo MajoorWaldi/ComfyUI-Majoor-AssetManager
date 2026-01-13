@@ -96,8 +96,10 @@ export function createPanelHotkeysController({
             }
 
             // For navigation keys, prevent ComfyUI global handlers from stealing focus/scroll.
-            // Only intercept if panel is actually active
+            // Only intercept if panel is actually active.
+            // Never intercept while typing in inputs (e.g. tags editor in the sidebar).
             if (allowed.has(event.key) && isPanelActive()) {
+                if (isTypingTarget) return;
                 event.preventDefault();
                 event.stopPropagation();
                 event.stopImmediatePropagation?.();

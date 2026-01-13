@@ -12,15 +12,18 @@ import { getViewerInstance } from "./Viewer.js";
 import { buildAssetViewURL } from "../api/endpoints.js";
 import { comfyAlert } from "../app/dialogs.js";
 import { openInFolder } from "../api/client.js";
+import { showAddToCollectionMenu } from "../features/collections/contextmenu/addToCollectionMenu.js";
 
-const MENU_SELECTOR = ".mjr-context-menu";
+// NOTE: Keep this menu isolated from the newer grid context menu
+// (`.mjr-grid-context-menu`) to avoid selector collisions.
+const MENU_SELECTOR = ".mjr-legacy-context-menu";
 
 export function createContextMenu() {
     const existing = document.querySelector(MENU_SELECTOR);
     if (existing) return existing;
 
     const menu = document.createElement("div");
-    menu.className = "mjr-context-menu";
+    menu.className = "mjr-context-menu mjr-legacy-context-menu";
     menu.style.cssText = `
         position: fixed;
         background: var(--comfy-menu-bg);
@@ -196,6 +199,22 @@ export function showContextMenu(x, y, asset, allAssets, currentIndex, selectedAs
     });
     menu.appendChild(copyPath);
 
+    const addToCollection = createMenuItem(
+        selectedCount > 1 ? `Add to collection... (${selectedCount})` : "Add to collection...",
+        "pi pi-bookmark",
+        null,
+        async () => {
+            hide();
+            try {
+                const list = selectedAssets?.length ? selectedAssets : [asset];
+                await showAddToCollectionMenu({ x, y, assets: list });
+            } catch (err) {
+                console.error("Add to collection failed:", err);
+            }
+        }
+    );
+    menu.appendChild(addToCollection);
+
     const openFolder = createMenuItem("Open in Folder", "pi pi-folder-open", null, async () => {
         try {
             const assetId = asset?.id;
@@ -237,6 +256,11 @@ export function showContextMenu(x, y, asset, allAssets, currentIndex, selectedAs
 export function bindContextMenu(gridContainer, assets) {
     try {
         gridContainer._mjrContextMenuAssets = Array.isArray(assets) ? assets : [];
+    } catch {}
+
+    // If the panel has the newer grid context menu bound, don't bind the legacy one.
+    try {
+        if (gridContainer?._mjrGridContextMenuBound) return;
     } catch {}
 
     if (gridContainer._mjrContextMenuBound) return;

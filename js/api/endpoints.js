@@ -38,7 +38,10 @@ export const ENDPOINTS = {
 
     // Asset operations
     ASSET_DELETE: "/mjr/am/asset/delete",
-    ASSET_RENAME: "/mjr/am/asset/rename"
+    ASSET_RENAME: "/mjr/am/asset/rename",
+
+    // Collections
+    COLLECTIONS: "/mjr/am/collections"
 };
 
 /**

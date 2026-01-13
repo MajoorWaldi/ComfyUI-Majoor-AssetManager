@@ -2,6 +2,8 @@ export function createPanelState() {
     return {
         scope: "output",
         customRootId: "",
+        collectionId: "",
+        collectionName: "",
         kindFilter: "",
         dateRangeFilter: "",
         dateExactFilter: "",

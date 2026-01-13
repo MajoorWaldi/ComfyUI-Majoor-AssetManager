@@ -33,8 +33,13 @@ INDEX_DIR = str(INDEX_DIR_PATH)
 INDEX_DB_PATH = INDEX_DIR_PATH / "assets.sqlite"
 INDEX_DB = str(INDEX_DB_PATH)
 
+# Collections (user-curated sets of assets)
+COLLECTIONS_DIR_PATH = INDEX_DIR_PATH / "collections"
+COLLECTIONS_DIR = str(COLLECTIONS_DIR_PATH)
+
 # Create index directory if it doesn't exist
 os.makedirs(INDEX_DIR, exist_ok=True)
+os.makedirs(COLLECTIONS_DIR, exist_ok=True)
 
 # External tool overrides (portable vs. system-wide)
 EXIFTOOL_BIN = os.getenv("MAJOOR_EXIFTOOL_PATH") or os.getenv("MAJOOR_EXIFTOOL_BIN") or "exiftool"

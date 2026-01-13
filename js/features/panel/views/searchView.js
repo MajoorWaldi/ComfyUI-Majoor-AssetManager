@@ -1,4 +1,4 @@
-export function createSearchView({ filterBtn, sortBtn, filterPopover, sortPopover }) {
+export function createSearchView({ filterBtn, sortBtn, collectionsBtn, filterPopover, sortPopover, collectionsPopover }) {
     const searchSection = document.createElement("div");
     searchSection.classList.add("mjr-am-search");
 
@@ -34,8 +34,14 @@ export function createSearchView({ filterBtn, sortBtn, filterPopover, sortPopove
     sortAnchor.appendChild(sortBtn);
     sortAnchor.appendChild(sortPopover);
 
+    const collectionsAnchor = document.createElement("div");
+    collectionsAnchor.className = "mjr-popover-anchor";
+    if (collectionsBtn) collectionsAnchor.appendChild(collectionsBtn);
+    if (collectionsPopover) collectionsAnchor.appendChild(collectionsPopover);
+
     searchTools.appendChild(filterAnchor);
     searchTools.appendChild(sortAnchor);
+    searchTools.appendChild(collectionsAnchor);
     searchSection.appendChild(searchTools);
 
     return { searchSection, searchInputEl };

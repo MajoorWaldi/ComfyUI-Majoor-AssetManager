@@ -1,4 +1,4 @@
-export function createGridController({ gridContainer, loadAssets, disposeGrid, getQuery, state }) {
+export function createGridController({ gridContainer, loadAssets, loadAssetsFromList, getCollectionAssets, disposeGrid, getQuery, state }) {
     const reloadGrid = async () => {
         gridContainer.dataset.mjrScope = state.scope;
         gridContainer.dataset.mjrCustomRootId = state.customRootId || "";
@@ -32,6 +32,18 @@ export function createGridController({ gridContainer, loadAssets, disposeGrid, g
             p.textContent = "Add a custom folder to browse.";
             gridContainer.appendChild(p);
             return;
+        }
+
+        if (state.collectionId) {
+            const res = await getCollectionAssets?.(state.collectionId);
+            if (res?.ok && res.data && Array.isArray(res.data.assets)) {
+                const title = state.collectionName ? `Collection: ${state.collectionName}` : "Collection";
+                await loadAssetsFromList(gridContainer, res.data.assets, { title, reset: true });
+                return;
+            }
+            // If collection fetch fails, fall back to normal loading and clear the broken state.
+            state.collectionId = "";
+            state.collectionName = "";
         }
 
         await loadAssets(gridContainer, getQuery());

@@ -333,3 +333,42 @@ export async function deleteAssets(assetIds) {
 export async function renameAsset(assetId, newName) {
     return post("/mjr/am/asset/rename", { asset_id: assetId, new_name: newName });
 }
+
+// -----------------------------
+// Collections
+// -----------------------------
+
+export async function listCollections() {
+    return get("/mjr/am/collections");
+}
+
+export async function createCollection(name) {
+    return post("/mjr/am/collections", { name: String(name || "").trim() });
+}
+
+export async function getCollection(collectionId) {
+    const id = String(collectionId || "").trim();
+    return get(`/mjr/am/collections/${encodeURIComponent(id)}`);
+}
+
+export async function deleteCollection(collectionId) {
+    const id = String(collectionId || "").trim();
+    return post(`/mjr/am/collections/${encodeURIComponent(id)}/delete`, {});
+}
+
+export async function addAssetsToCollection(collectionId, assets) {
+    const id = String(collectionId || "").trim();
+    const list = Array.isArray(assets) ? assets : [];
+    return post(`/mjr/am/collections/${encodeURIComponent(id)}/add`, { assets: list });
+}
+
+export async function removeFilepathsFromCollection(collectionId, filepaths) {
+    const id = String(collectionId || "").trim();
+    const list = Array.isArray(filepaths) ? filepaths : [];
+    return post(`/mjr/am/collections/${encodeURIComponent(id)}/remove`, { filepaths: list });
+}
+
+export async function getCollectionAssets(collectionId) {
+    const id = String(collectionId || "").trim();
+    return get(`/mjr/am/collections/${encodeURIComponent(id)}/assets`);
+}
