@@ -48,3 +48,4 @@ SECURITY_FIXES.md
 backend/routes/core/test_security.py
 backend/routes/handlers/test_assets_delete.py
 SECURITY_AUDIT_COMPLETE.md
+node.zip
