@@ -66,7 +66,7 @@ export function getOrCreateMenu({
         },
         { signal: ac.signal, capture: true }
     );
-    document.addEventListener("scroll", hide, { capture: true, signal: ac.signal });
+    document.addEventListener("scroll", hide, { capture: true, passive: true, signal: ac.signal });
 
     document.body.appendChild(menu);
     return menu;

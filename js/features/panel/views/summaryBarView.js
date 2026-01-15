@@ -75,6 +75,11 @@ export function createSummaryBarView() {
         const parts = [`assets: ${countPart}`];
         if (selectedCount > 0) parts.push(`selected: ${selectedCount}`);
         parts.push(scope);
+        try {
+            const hidden = Number(gridContainer?.dataset?.mjrHiddenPngSiblings || 0) || 0;
+            const enabled = String(gridContainer?.dataset?.mjrHidePngSiblingsEnabled || "") === "1";
+            if (enabled && hidden > 0) parts.push(`hidden: ${hidden}`);
+        } catch {}
 
         try {
             text.textContent = parts.filter(Boolean).join(" | ");
@@ -88,4 +93,3 @@ export function createSummaryBarView() {
 
     return { bar, update };
 }
-

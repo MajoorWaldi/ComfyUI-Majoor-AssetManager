@@ -150,7 +150,7 @@ function showTagsPopover(x, y, asset, onChanged) {
             },
             { capture: true, signal: ac.signal }
         );
-        document.addEventListener("scroll", hide, { capture: true, signal: ac.signal });
+        document.addEventListener("scroll", hide, { capture: true, passive: true, signal: ac.signal });
     } catch {}
 
     // Clamp into viewport

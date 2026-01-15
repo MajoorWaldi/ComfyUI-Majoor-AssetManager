@@ -353,12 +353,31 @@ function _isHidePngSiblingsEnabled() {
     }
 }
 
+function _setCollisionTooltip(card, filename, count) {
+    if (!card || count == null) return;
+    const n = Number(count) || 0;
+    if (n < 2) return;
+    try {
+        const row = card.querySelector?.(".mjr-card-filename");
+        if (row) {
+            row.title = `${String(filename || "")}\nDuplicate filename: ${n} items in this view`;
+            return;
+        }
+    } catch {}
+    try {
+        card.title = `Duplicate filename: ${n} items in this view`;
+    } catch {}
+}
+
 function appendAssets(gridContainer, assets, state) {
     const hidePngSiblings = _isHidePngSiblingsEnabled();
     const selectedIds = getSelectedIdSet(gridContainer);
     const frag = document.createDocumentFragment();
     const newAssets = [];
     let added = 0;
+
+    if (state.hiddenPngSiblings == null) state.hiddenPngSiblings = 0;
+    if (!hidePngSiblings) state.hiddenPngSiblings = 0;
 
     const filenameCounts = state.filenameCounts || new Map();
     state.filenameCounts = filenameCounts;
@@ -384,6 +403,9 @@ function appendAssets(gridContainer, assets, state) {
                     const sibCards = Array.from(
                         gridContainer.querySelectorAll(`.mjr-asset-card[data-mjr-stem="${stemSel}"][data-mjr-ext="PNG"]`)
                     );
+                    try {
+                        state.hiddenPngSiblings += Number(sibCards.length || 0) || 0;
+                    } catch {}
                     for (const c of sibCards) {
                         try {
                             const sibAsset = c?._mjrAsset;
@@ -400,6 +422,9 @@ function appendAssets(gridContainer, assets, state) {
                     }
                 } catch {}
             } else if (extUpper === "PNG" && nonImageStems.has(stemLower)) {
+                try {
+                    state.hiddenPngSiblings += 1;
+                } catch {}
                 continue;
             }
         }
@@ -412,23 +437,31 @@ function appendAssets(gridContainer, assets, state) {
             filenameCounts.set(fnKey, next);
             if (next >= 2) {
                 asset._mjrNameCollision = true;
-                if (prev === 1) {
-                    // Update already-rendered cards to show "+" too.
-                    try {
-                        for (const a of state.assets || []) {
-                            if (_getFilenameKey(a?.filename) === fnKey) a._mjrNameCollision = true;
+                asset._mjrNameCollisionCount = next;
+
+                // Update already-tracked assets and rendered cards to show "+" and update tooltips.
+                try {
+                    for (const a of state.assets || []) {
+                        if (_getFilenameKey(a?.filename) === fnKey) {
+                            a._mjrNameCollision = true;
+                            a._mjrNameCollisionCount = next;
                         }
-                    } catch {}
-                    try {
-                        const sel = CSS.escape ? CSS.escape(fnKey) : fnKey;
-                        const badges = Array.from(
-                            gridContainer.querySelectorAll(`[data-mjr-filename-key="${sel}"] .mjr-file-badge`)
-                        );
-                        for (const b of badges) {
-                            setFileBadgeCollision(b, true);
-                        }
-                    } catch {}
-                }
+                    }
+                } catch {}
+                try {
+                    const sel = CSS.escape ? CSS.escape(fnKey) : fnKey;
+                    const cards = Array.from(gridContainer.querySelectorAll(`.mjr-asset-card[data-mjr-filename-key="${sel}"]`));
+                    for (const c of cards) {
+                        try {
+                            const badge = c.querySelector?.(".mjr-file-badge");
+                            setFileBadgeCollision(badge, true);
+                        } catch {}
+                        try {
+                            const a = c?._mjrAsset;
+                            _setCollisionTooltip(c, a?.filename, next);
+                        } catch {}
+                    }
+                } catch {}
             }
         }
 
@@ -442,6 +475,7 @@ function appendAssets(gridContainer, assets, state) {
             if (asset?._mjrNameCollision) {
                 const badge = card.querySelector?.(".mjr-file-badge");
                 setFileBadgeCollision(badge, true);
+                _setCollisionTooltip(card, asset?.filename, asset?._mjrNameCollisionCount || 2);
             }
         } catch {}
         try {
@@ -464,6 +498,11 @@ function appendAssets(gridContainer, assets, state) {
         // Update context menu asset list (bind is idempotent).
         // Context menus are bound by the panel.
     }
+
+    try {
+        gridContainer.dataset.mjrHidePngSiblingsEnabled = hidePngSiblings ? "1" : "0";
+        gridContainer.dataset.mjrHiddenPngSiblings = String(Number(state.hiddenPngSiblings || 0) || 0);
+    } catch {}
     return added;
 }
 
@@ -715,6 +754,10 @@ export async function loadAssets(gridContainer, query = "*", options = {}) {
         state.assets = [];
         state.filenameCounts = new Map();
         state.nonImageStems = new Set();
+        state.hiddenPngSiblings = 0;
+        try {
+            gridContainer.dataset.mjrHiddenPngSiblings = "0";
+        } catch {}
         gridContainer.innerHTML = "";
         showLoadingOverlay(gridContainer, state.query === "*" ? "Loading assets..." : `Searching for "${state.query}"...`);
     }
@@ -772,6 +815,10 @@ export async function loadAssetsFromList(gridContainer, assets, options = {}) {
         state.assets = [];
         state.filenameCounts = new Map();
         state.nonImageStems = new Set();
+        state.hiddenPngSiblings = 0;
+        try {
+            gridContainer.dataset.mjrHiddenPngSiblings = "0";
+        } catch {}
         gridContainer.innerHTML = "";
         showLoadingOverlay(gridContainer, list.length ? `Loading ${title}...` : `${title} is empty`);
     }
@@ -1048,11 +1095,12 @@ export async function restoreAnchor(gridContainer, anchor) {
 /**
  * Check if user is at bottom of grid (within threshold)
  */
-export function isAtBottom(gridContainer, threshold = 80) {
+export function isAtBottom(gridContainer, threshold = null) {
     const parent = gridContainer.parentElement;
     if (!parent) return false;
 
-    const atBottom = (parent.scrollHeight - (parent.scrollTop + parent.clientHeight)) < threshold;
+    const effectiveThreshold = Number(threshold) || Number(APP_CONFIG.BOTTOM_GAP_PX) || 80;
+    const atBottom = (parent.scrollHeight - (parent.scrollTop + parent.clientHeight)) < effectiveThreshold;
     return atBottom;
 }
 

@@ -40,6 +40,8 @@ export const APP_CONFIG = {
     INFINITE_SCROLL_ENABLED: true,
     INFINITE_SCROLL_ROOT_MARGIN: "800px",
     INFINITE_SCROLL_THRESHOLD: 0.01,
+    // Consider user "at bottom" when within this many pixels of the end.
+    BOTTOM_GAP_PX: 80,
 
     // Polling
     STATUS_POLL_INTERVAL: 5000, // 5 seconds

@@ -4,6 +4,8 @@ export function createPopoverManager(container) {
     let repositionRaf = 0;
     let dismissWhitelist = [];
     let containerScrollHandlerBound = false;
+    let windowScrollHandlerBound = false;
+    let windowResizeHandlerBound = false;
 
     const attachPopoverToPortal = (popover) => {
         if (!popover || !(popover instanceof HTMLElement)) return;
@@ -89,6 +91,60 @@ export function createPopoverManager(container) {
         });
     };
 
+    const ensureRepositionListeners = () => {
+        if (!openPopovers.size) return;
+        try {
+            if (!windowResizeHandlerBound) {
+                window.addEventListener("resize", scheduleReposition, { passive: true });
+                windowResizeHandlerBound = true;
+            }
+        } catch {}
+        try {
+            if (!windowScrollHandlerBound) {
+                // Scroll doesn't bubble; use capture to catch nested scroll containers.
+                window.addEventListener("scroll", scheduleReposition, { passive: true, capture: true });
+                windowScrollHandlerBound = true;
+            }
+        } catch {}
+        try {
+            if (!resizeObserver) {
+                resizeObserver = new ResizeObserver(scheduleReposition);
+                resizeObserver.observe(container);
+            }
+        } catch {}
+        try {
+            if (!containerScrollHandlerBound) {
+                // Bind to panel root as a fallback when window capture doesn't fire reliably.
+                container.addEventListener("scroll", scheduleReposition, { passive: true });
+                containerScrollHandlerBound = true;
+            }
+        } catch {}
+    };
+
+    const maybeRemoveRepositionListeners = () => {
+        if (openPopovers.size) return;
+        try {
+            if (windowResizeHandlerBound) window.removeEventListener("resize", scheduleReposition);
+        } catch {}
+        windowResizeHandlerBound = false;
+        try {
+            if (windowScrollHandlerBound) window.removeEventListener("scroll", scheduleReposition, { capture: true });
+        } catch {}
+        // Safari/Chromium ignore the options object mismatch sometimes; best-effort extra removal.
+        try {
+            if (windowScrollHandlerBound) window.removeEventListener("scroll", scheduleReposition, true);
+        } catch {}
+        windowScrollHandlerBound = false;
+        try {
+            if (containerScrollHandlerBound) container.removeEventListener("scroll", scheduleReposition);
+        } catch {}
+        containerScrollHandlerBound = false;
+        try {
+            if (resizeObserver) resizeObserver.disconnect();
+        } catch {}
+        resizeObserver = null;
+    };
+
     const close = (popover) => {
         if (!popover) return;
         try {
@@ -98,11 +154,13 @@ export function createPopoverManager(container) {
             restorePopoverFromPortal(popover);
         } catch {}
         openPopovers.delete(popover);
+        maybeRemoveRepositionListeners();
     };
 
     const open = (popover, anchor) => {
         if (!popover || !anchor) return;
         openPopovers.set(popover, { popover, anchor });
+        ensureRepositionListeners();
         positionPopover(popover, anchor);
         scheduleReposition();
     };
@@ -124,6 +182,7 @@ export function createPopoverManager(container) {
         }
         for (const popover of Array.from(openPopovers.keys())) close(popover);
         openPopovers.clear();
+        maybeRemoveRepositionListeners();
     };
 
     const setDismissWhitelist = (elements) => {
@@ -152,20 +211,6 @@ export function createPopoverManager(container) {
 
     const init = () => {
         document.addEventListener("mousedown", onDocMouseDown);
-        try {
-            window.addEventListener("resize", scheduleReposition);
-            window.addEventListener("scroll", scheduleReposition, true);
-            resizeObserver = new ResizeObserver(scheduleReposition);
-            resizeObserver.observe(container);
-        } catch {}
-        try {
-            // Some scroll containers (nested panels) don't reliably trigger the window capture listener
-            // across all browsers; bind to the panel root as a fallback.
-            if (!containerScrollHandlerBound) {
-                container.addEventListener("scroll", scheduleReposition, true);
-                containerScrollHandlerBound = true;
-            }
-        } catch {}
     };
 
     const dispose = () => {
@@ -173,21 +218,8 @@ export function createPopoverManager(container) {
             document.removeEventListener("mousedown", onDocMouseDown);
         } catch {}
         try {
-            if (resizeObserver) resizeObserver.disconnect();
+            maybeRemoveRepositionListeners();
         } catch {}
-        resizeObserver = null;
-        try {
-            window.removeEventListener("resize", scheduleReposition);
-        } catch {}
-        try {
-            window.removeEventListener("scroll", scheduleReposition, true);
-        } catch {}
-        try {
-            if (containerScrollHandlerBound) {
-                container.removeEventListener("scroll", scheduleReposition, true);
-            }
-        } catch {}
-        containerScrollHandlerBound = false;
         try {
             closeAll();
         } catch {}
