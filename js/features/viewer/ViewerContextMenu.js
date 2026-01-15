@@ -1,11 +1,12 @@
 import { buildAssetViewURL } from "../../api/endpoints.js";
-import { comfyAlert, comfyConfirm } from "../../app/dialogs.js";
+import { comfyAlert, comfyConfirm, comfyPrompt } from "../../app/dialogs.js";
 import { openInFolder, updateAssetRating, deleteAsset, renameAsset } from "../../api/client.js";
 import { ASSET_RATING_CHANGED_EVENT, ASSET_TAGS_CHANGED_EVENT } from "../../app/events.js";
 import { createTagsEditor } from "../../components/TagsEditor.js";
 import { safeDispatchCustomEvent } from "../../utils/events.js";
 import { getOrCreateMenu, createMenuItem, createMenuSeparator, showMenuAt } from "../../components/contextmenu/MenuCore.js";
 import { hideMenu, clearMenu } from "../../components/contextmenu/MenuCore.js";
+import { showAddToCollectionMenu } from "../collections/contextmenu/addToCollectionMenu.js";
 
 const MENU_SELECTOR = ".mjr-viewer-context-menu";
 const POPOVER_SELECTOR = ".mjr-viewer-popover";
@@ -184,6 +185,21 @@ export function bindViewerContextMenu({
                     await comfyAlert(res?.error || "Failed to open folder.");
                 }
             }, { disabled: !asset?.id })
+        );
+
+        menu.appendChild(
+            createItem("Add to collection...", "pi pi-bookmark", null, async () => {
+                try {
+                    hideMenu(menu);
+                } catch {}
+                try {
+                    await showAddToCollectionMenu({ x: e.clientX, y: e.clientY, assets: [asset] });
+                } catch (err) {
+                    try {
+                        console.error("Add to collection failed:", err);
+                    } catch {}
+                }
+            })
         );
 
         menu.appendChild(separator());

@@ -5,13 +5,14 @@
 import { get, hydrateAssetRatingTags } from "../../api/client.js";
 import { buildListURL } from "../../api/endpoints.js";
 import { createAssetCard } from "../../components/Card.js";
-import { createRatingBadge, createTagsBadge } from "../../components/Badges.js";
+import { createRatingBadge, createTagsBadge, setFileBadgeCollision } from "../../components/Badges.js";
 import { APP_CONFIG } from "../../app/config.js";
 import { getViewerInstance } from "../../components/Viewer.js";
 // Context menus are bound by the panel (GridContextMenu) to avoid duplicate handlers.
 import { ASSET_RATING_CHANGED_EVENT, ASSET_TAGS_CHANGED_EVENT } from "../../app/events.js";
 import { safeDispatchCustomEvent } from "../../utils/events.js";
 import { bindAssetDragStart } from "../dnd/DragDrop.js";
+import { loadMajoorSettings } from "../../app/settings.js";
 
 const GRID_STATE = new WeakMap();
 
@@ -257,6 +258,8 @@ function getOrCreateState(gridContainer) {
             done: false,
             seenKeys: new Set(),
             assets: [],
+            filenameCounts: new Map(),
+            nonImageStems: new Set(),
             sentinel: null,
             observer: null,
             scrollRoot: null,
@@ -302,18 +305,145 @@ function getSelectedIdSet(gridContainer) {
     return selected;
 }
 
+function _getFilenameKey(filename) {
+    try {
+        return String(filename || "").trim().toLowerCase();
+    } catch {
+        return "";
+    }
+}
+
+function _getExtUpper(filename) {
+    try {
+        return (String(filename || "").split(".").pop() || "").toUpperCase();
+    } catch {
+        return "";
+    }
+}
+
+function _getStemLower(filename) {
+    try {
+        const s = String(filename || "");
+        const idx = s.lastIndexOf(".");
+        const stem = idx > 0 ? s.slice(0, idx) : s;
+        return String(stem || "").trim().toLowerCase();
+    } catch {
+        return "";
+    }
+}
+
+function _detectKind(asset, extUpper) {
+    const k = String(asset?.kind || "").toLowerCase();
+    if (k) return k;
+    const images = new Set(["PNG", "JPG", "JPEG", "WEBP", "GIF", "BMP", "TIF", "TIFF"]);
+    const videos = new Set(["MP4", "WEBM", "MOV", "AVI", "MKV"]);
+    const audio = new Set(["MP3", "WAV", "OGG", "FLAC"]);
+    if (images.has(extUpper)) return "image";
+    if (videos.has(extUpper)) return "video";
+    if (audio.has(extUpper)) return "audio";
+    return "unknown";
+}
+
+function _isHidePngSiblingsEnabled() {
+    try {
+        const s = loadMajoorSettings();
+        return !!s?.siblings?.hidePngSiblings;
+    } catch {
+        return false;
+    }
+}
+
 function appendAssets(gridContainer, assets, state) {
+    const hidePngSiblings = _isHidePngSiblingsEnabled();
     const selectedIds = getSelectedIdSet(gridContainer);
     const frag = document.createDocumentFragment();
     const newAssets = [];
     let added = 0;
+
+    const filenameCounts = state.filenameCounts || new Map();
+    state.filenameCounts = filenameCounts;
+    const nonImageStems = state.nonImageStems || new Set();
+    state.nonImageStems = nonImageStems;
+
     for (const asset of assets || []) {
+        const filename = String(asset?.filename || "");
+        const extUpper = _getExtUpper(filename);
+        const stemLower = _getStemLower(filename);
+        const kind = _detectKind(asset, extUpper);
+
+        // Hide PNG siblings for videos: if a non-image exists with the same stem, hide the PNG.
+        if (hidePngSiblings && stemLower) {
+            if (kind !== "image") {
+                try {
+                    nonImageStems.add(stemLower);
+                } catch {}
+
+                // If the PNG was already rendered, remove it now (best-effort).
+                try {
+                    const stemSel = CSS.escape ? CSS.escape(stemLower) : stemLower;
+                    const sibCards = Array.from(
+                        gridContainer.querySelectorAll(`.mjr-asset-card[data-mjr-stem="${stemSel}"][data-mjr-ext="PNG"]`)
+                    );
+                    for (const c of sibCards) {
+                        try {
+                            const sibAsset = c?._mjrAsset;
+                            const sibKey = assetKey(sibAsset);
+                            if (sibKey) {
+                                try {
+                                    state.assets = (state.assets || []).filter((a) => assetKey(a) !== sibKey);
+                                } catch {}
+                            }
+                        } catch {}
+                        try {
+                            c.remove?.();
+                        } catch {}
+                    }
+                } catch {}
+            } else if (extUpper === "PNG" && nonImageStems.has(stemLower)) {
+                continue;
+            }
+        }
+
+        // Name collisions: same filename appears multiple times (different folders/roots).
+        const fnKey = _getFilenameKey(filename);
+        if (fnKey) {
+            const prev = Number(filenameCounts.get(fnKey) || 0) || 0;
+            const next = prev + 1;
+            filenameCounts.set(fnKey, next);
+            if (next >= 2) {
+                asset._mjrNameCollision = true;
+                if (prev === 1) {
+                    // Update already-rendered cards to show "+" too.
+                    try {
+                        for (const a of state.assets || []) {
+                            if (_getFilenameKey(a?.filename) === fnKey) a._mjrNameCollision = true;
+                        }
+                    } catch {}
+                    try {
+                        const sel = CSS.escape ? CSS.escape(fnKey) : fnKey;
+                        const badges = Array.from(
+                            gridContainer.querySelectorAll(`[data-mjr-filename-key="${sel}"] .mjr-file-badge`)
+                        );
+                        for (const b of badges) {
+                            setFileBadgeCollision(b, true);
+                        }
+                    } catch {}
+                }
+            }
+        }
+
         const key = assetKey(asset);
         if (!key) continue;
         if (state.seenKeys.has(key)) continue;
         state.seenKeys.add(key);
         newAssets.push(asset);
         const card = createAssetCard(asset);
+        try {
+            if (asset?._mjrNameCollision) {
+                const badge = card.querySelector?.(".mjr-file-badge");
+                setFileBadgeCollision(badge, true);
+            }
+        } catch {}
         try {
             const id = asset?.id != null ? String(asset.id) : "";
             if (id && selectedIds.has(id)) {
@@ -494,7 +624,7 @@ async function loadNextPage(gridContainer, state) {
         maybeKeepPinnedToBottom(state, before);
 
         const hasTotal = state.total != null && Number(state.total) > 0;
-        if ((page.count || 0) === 0 || added === 0 || (hasTotal && state.offset >= Number(state.total))) {
+        if ((page.count || 0) === 0 || (hasTotal && state.offset >= Number(state.total))) {
             state.done = true;
             stopObserver(state);
         }
@@ -583,6 +713,8 @@ export async function loadAssets(gridContainer, query = "*", options = {}) {
         state.loading = false;
         state.seenKeys = new Set();
         state.assets = [];
+        state.filenameCounts = new Map();
+        state.nonImageStems = new Set();
         gridContainer.innerHTML = "";
         showLoadingOverlay(gridContainer, state.query === "*" ? "Loading assets..." : `Searching for "${state.query}"...`);
     }
@@ -638,6 +770,8 @@ export async function loadAssetsFromList(gridContainer, assets, options = {}) {
         state.query = String(title || "Collection");
         state.seenKeys = new Set();
         state.assets = [];
+        state.filenameCounts = new Map();
+        state.nonImageStems = new Set();
         gridContainer.innerHTML = "";
         showLoadingOverlay(gridContainer, list.length ? `Loading ${title}...` : `${title} is empty`);
     }

@@ -275,7 +275,7 @@
 }
 
 .mjr-assets-manager .mjr-am-search {
-    margin-bottom: 18px;
+    margin-bottom: 8px;
     display: flex;
     align-items: center;
     gap: 10px;
@@ -283,9 +283,27 @@
 }
 
 .mjr-assets-manager .mjr-am-search {
-    padding-bottom: 12px;
+    padding-bottom: 6px;
     border-bottom: 1px solid var(--mjr-border);
-    margin-bottom: 12px;
+    margin-bottom: 6px;
+}
+
+.mjr-assets-manager .mjr-am-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin: 0 0 8px 0;
+    padding: 0;
+    min-height: 16px;
+    font-size: 11px;
+    color: var(--mjr-muted, rgba(255, 255, 255, 0.65));
+}
+
+.mjr-assets-manager .mjr-am-summary-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .mjr-assets-manager .mjr-am-search-pill {
@@ -428,7 +446,7 @@
     /* Avoid overflow when the panel becomes narrower than the min card size */
     grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--mjr-grid-min-size, 180px)), 1fr));
     gap: var(--mjr-grid-gap, 10px);
-    margin-top: 10px;
+    margin-top: 6px;
     min-height: 0;
 }
 

@@ -5,11 +5,14 @@
 /**
  * Create file type badge (overlaid on thumbnail)
  */
-export function createFileBadge(filename, kind) {
+export function createFileBadge(filename, kind, nameCollision = false) {
     const badge = document.createElement("div");
     badge.className = "mjr-file-badge";
 
     const ext = String(filename || "").split(".").pop()?.toUpperCase?.() || "";
+    try {
+        badge.dataset.mjrExt = ext;
+    } catch {}
 
     let bgColor = "rgba(0,0,0,0.7)";
     switch (ext) {
@@ -85,7 +88,7 @@ export function createFileBadge(filename, kind) {
             }
     }
 
-    badge.textContent = ext;
+    badge.textContent = ext + (nameCollision ? "+" : "");
     badge.style.cssText = `
         position: absolute;
         top: 6px;
@@ -104,6 +107,14 @@ export function createFileBadge(filename, kind) {
     `;
 
     return badge;
+}
+
+export function setFileBadgeCollision(badgeEl, nameCollision) {
+    if (!badgeEl) return;
+    try {
+        const ext = badgeEl.dataset?.mjrExt || "";
+        badgeEl.textContent = String(ext || "") + (nameCollision ? "+" : "");
+    } catch {}
 }
 
 /**

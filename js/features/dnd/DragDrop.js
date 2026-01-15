@@ -12,6 +12,7 @@ import { dndLog } from "./utils/log.js";
 import { buildPayloadViewURL, getDraggedAsset } from "./utils/payload.js";
 import { getDownloadMimeForFilename, isVideoPayload } from "./utils/video.js";
 import { isCanvasDropTarget, markCanvasDirty } from "./targets/canvas.js";
+import { applyDragOutToOS } from "./out/DragOut.js";
 import {
     applyHighlight,
     clearHighlight,
@@ -194,10 +195,7 @@ export const bindAssetDragStart = (containerEl) => {
                 dt.setData(DND_MIME, JSON.stringify(payload));
                 dt.setData("text/plain", String(asset.filename || ""));
                 const viewUrl = buildURL(payload);
-                dt.setData("text/uri-list", viewUrl);
-                const mime = getDownloadMimeForFilename(asset.filename);
-                dt.setData("DownloadURL", `${mime}:${asset.filename}:${viewUrl}`);
-                dt.effectAllowed = "copy";
+                applyDragOutToOS({ dt, asset, containerEl, card, viewUrl });
             } catch {}
 
             const preview = card.querySelector("img") || card.querySelector("video");
@@ -210,6 +208,9 @@ export const bindAssetDragStart = (containerEl) => {
         true
     );
 };
+
+// Stable alias (entry-point contract).
+export const enableAssetDrag = bindAssetDragStart;
 
 export const initDragDrop = () => {
     const existing = (() => {

@@ -31,6 +31,11 @@ export function createGridController({ gridContainer, loadAssets, loadAssetsFrom
             p.className = "mjr-muted";
             p.textContent = "Add a custom folder to browse.";
             gridContainer.appendChild(p);
+            try {
+                state.lastGridCount = 0;
+                state.lastGridTotal = 0;
+                gridContainer.dispatchEvent?.(new CustomEvent("mjr:grid-stats", { detail: { count: 0, total: 0 } }));
+            } catch {}
             return;
         }
 
@@ -38,7 +43,12 @@ export function createGridController({ gridContainer, loadAssets, loadAssetsFrom
             const res = await getCollectionAssets?.(state.collectionId);
             if (res?.ok && res.data && Array.isArray(res.data.assets)) {
                 const title = state.collectionName ? `Collection: ${state.collectionName}` : "Collection";
-                await loadAssetsFromList(gridContainer, res.data.assets, { title, reset: true });
+                const result = await loadAssetsFromList(gridContainer, res.data.assets, { title, reset: true });
+                try {
+                    state.lastGridCount = Number(result?.count || 0) || 0;
+                    state.lastGridTotal = Number(result?.total || 0) || 0;
+                    gridContainer.dispatchEvent?.(new CustomEvent("mjr:grid-stats", { detail: result || {} }));
+                } catch {}
                 return;
             }
             // If collection fetch fails, fall back to normal loading and clear the broken state.
@@ -46,7 +56,12 @@ export function createGridController({ gridContainer, loadAssets, loadAssetsFrom
             state.collectionName = "";
         }
 
-        await loadAssets(gridContainer, getQuery());
+        const result = await loadAssets(gridContainer, getQuery());
+        try {
+            state.lastGridCount = Number(result?.count || 0) || 0;
+            state.lastGridTotal = Number(result?.total || 0) || 0;
+            gridContainer.dispatchEvent?.(new CustomEvent("mjr:grid-stats", { detail: result || {} }));
+        } catch {}
     };
 
     return { reloadGrid };

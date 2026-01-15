@@ -41,6 +41,41 @@ MAX_TAGS_PER_ASSET = 50
 MAX_TAG_LENGTH = 100
 
 
+def _delete_file_best_effort(path: Path) -> Result[bool]:
+    """
+    Prefer moving to recycle bin (send2trash) when available, fallback to permanent delete.
+
+    Never raises: returns Result.
+    """
+    try:
+        if not path.exists() or not path.is_file():
+            return Result.Ok(True, method="noop")
+    except Exception as exc:
+        return Result.Err("DELETE_FAILED", f"Failed to stat file: {exc}")
+
+    # Prefer recycle bin when possible.
+    try:
+        from send2trash import send2trash  # type: ignore
+
+        try:
+            send2trash(str(path))
+            return Result.Ok(True, method="send2trash")
+        except Exception as exc:
+            # Fall back to unlink (still acceptable; better than aborting UX).
+            try:
+                path.unlink(missing_ok=True)
+                return Result.Ok(True, method="unlink_fallback", warning=str(exc))
+            except Exception as exc2:
+                return Result.Err("DELETE_FAILED", f"{exc2}")
+    except Exception:
+        # send2trash not available or failed to import.
+        try:
+            path.unlink(missing_ok=True)
+            return Result.Ok(True, method="unlink")
+        except Exception as exc:
+            return Result.Err("DELETE_FAILED", f"{exc}")
+
+
 def register_asset_routes(routes: web.RouteTableDef) -> None:
     async def _resolve_or_create_asset_id(
         *,
@@ -553,7 +588,9 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         file_deletion_error = None
         if resolved.exists() and resolved.is_file():
             try:
-                resolved.unlink(missing_ok=True)
+                del_res = _delete_file_best_effort(resolved)
+                if not del_res.ok:
+                    file_deletion_error = str(del_res.error or "delete failed")
             except Exception as exc:
                 file_deletion_error = str(exc)
 
@@ -784,7 +821,10 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
             resolved = asset_info["resolved"]
             if resolved and resolved.exists() and resolved.is_file():
                 try:
-                    resolved.unlink(missing_ok=True)
+                    del_res = _delete_file_best_effort(resolved)
+                    if not del_res.ok:
+                        file_deletion_errors.append({"asset_id": asset_info["id"], "error": str(del_res.error or "delete failed")})
+                        break
                 except Exception as exc:
                     file_deletion_errors.append({"asset_id": asset_info["id"], "error": f"{exc}"})
                     break

@@ -36,6 +36,9 @@ export const ENDPOINTS = {
     // File download
     DOWNLOAD: "/mjr/am/download",
 
+    // Drag-out (OS) helpers
+    BATCH_ZIP_CREATE: "/mjr/am/batch-zip",
+
     // Asset operations
     ASSET_DELETE: "/mjr/am/asset/delete",
     ASSET_RENAME: "/mjr/am/asset/rename",
@@ -109,6 +112,10 @@ export function buildCustomViewURL(filename, subfolder = "", rootId = "") {
         url += `&subfolder=${encodeURIComponent(subfolder)}`;
     }
     return url;
+}
+
+export function buildBatchZipDownloadURL(token) {
+    return `${ENDPOINTS.BATCH_ZIP_CREATE}/${encodeURIComponent(String(token || ""))}`;
 }
 
 export function buildAssetViewURL(asset) {

@@ -1,4 +1,5 @@
 Majoor_AssetsManager_Deep_Deep_Audit_Fixe04.md
+DEEP_AUDIT_REPORT.md
 
 # Python cache files
 __pycache__/
@@ -49,3 +50,5 @@ backend/routes/core/test_security.py
 backend/routes/handlers/test_assets_delete.py
 SECURITY_AUDIT_COMPLETE.md
 node.zip
+backend/routes/handlers/test_batch_zip.py
+nul

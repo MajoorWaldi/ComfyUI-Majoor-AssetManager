@@ -17,6 +17,7 @@ import { createCustomPopoverView } from "./views/customPopoverView.js";
 import { createFilterPopoverView } from "./views/filterPopoverView.js";
 import { createSortPopoverView } from "./views/sortPopoverView.js";
 import { createSearchView } from "./views/searchView.js";
+import { createSummaryBarView } from "./views/summaryBarView.js";
 
 import { normalizeQuery } from "./controllers/query.js";
 import { createGridController } from "./controllers/gridController.js";
@@ -72,6 +73,8 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         collectionsPopover
     });
 
+    const { bar: summaryBar, update: updateSummaryBar } = createSummaryBarView();
+
     const content = document.createElement("div");
     content.classList.add("mjr-am-content");
     let gridContainer = null;
@@ -126,6 +129,7 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
 
     content.appendChild(statusSection);
     content.appendChild(searchSection);
+    content.appendChild(summaryBar);
     content.appendChild(browseSection);
     container.appendChild(header);
     container.appendChild(content);
@@ -140,6 +144,47 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         getQuery,
         state
     });
+
+    // Summary bar updates: selection changes, load changes, scope/collection changes.
+    try {
+        updateSummaryBar({ state, gridContainer });
+        const onStats = () => updateSummaryBar({ state, gridContainer });
+        gridContainer.addEventListener("mjr:grid-stats", onStats);
+        document.addEventListener?.("mjr-settings-changed", onStats);
+
+        // Observe DOM changes for card count / selection class changes.
+        let raf = null;
+        const schedule = () => {
+            if (raf) cancelAnimationFrame(raf);
+            raf = requestAnimationFrame(() => {
+                raf = null;
+                updateSummaryBar({ state, gridContainer });
+            });
+        };
+        const mo = new MutationObserver(() => schedule());
+        mo.observe(gridContainer, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+        gridContainer._mjrSummaryBarObserver = mo;
+        gridContainer._mjrSummaryBarDispose = () => {
+            try {
+                gridContainer.removeEventListener("mjr:grid-stats", onStats);
+            } catch {}
+            try {
+                document.removeEventListener?.("mjr-settings-changed", onStats);
+            } catch {}
+            try {
+                mo.disconnect();
+            } catch {}
+        };
+    } catch {}
+
+    // Allow context menus to request a refresh (e.g. after "Remove from collection").
+    try {
+        gridContainer.addEventListener("mjr:reload-grid", () => {
+            try {
+                gridController.reloadGrid();
+            } catch {}
+        });
+    } catch {}
 
     const customRootsController = createCustomRootsController({
         state,

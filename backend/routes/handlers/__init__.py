@@ -8,6 +8,7 @@ from .search import register_search_routes
 from .scan import register_scan_routes
 from .assets import register_asset_routes
 from .collections import register_collections_routes
+from .batch_zip import register_batch_zip_routes
 
 __all__ = [
     "register_health_routes",
@@ -17,4 +18,5 @@ __all__ = [
     "register_scan_routes",
     "register_asset_routes",
     "register_collections_routes",
+    "register_batch_zip_routes",
 ]

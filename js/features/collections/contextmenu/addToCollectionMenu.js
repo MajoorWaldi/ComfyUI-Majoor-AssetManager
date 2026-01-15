@@ -42,6 +42,26 @@ function simplifyAsset(a) {
     };
 }
 
+function formatAddResultMessage({ collectionName, selectedCount, addRes }) {
+    const added = Number(addRes?.data?.added ?? 0) || 0;
+    const skippedExisting = Number(addRes?.data?.skipped_existing ?? 0) || 0;
+    const skippedDuplicate = Number(addRes?.data?.skipped_duplicate ?? 0) || 0;
+
+    const name = String(collectionName || "").trim() || "collection";
+    let msg = `Added ${added} item(s) to "${name}".`;
+
+    if (skippedExisting > 0) {
+        msg += `\n\nSkipped ${skippedExisting} item(s): already present in the collection.`;
+    }
+    if (skippedDuplicate > 0) {
+        msg += `\n\nIgnored ${skippedDuplicate} duplicate(s) in selection.`;
+    }
+    if (added === 0 && skippedExisting > 0 && selectedCount > 0) {
+        msg = `Nothing added to "${name}".\n\nAll selected item(s) were already present in the collection.`;
+    }
+    return msg;
+}
+
 export async function showAddToCollectionMenu({ x, y, assets }) {
     const selected = Array.isArray(assets) ? assets.map(simplifyAsset).filter(Boolean) : [];
     if (!selected.length) {
@@ -67,7 +87,7 @@ export async function showAddToCollectionMenu({ x, y, assets }) {
             await comfyAlert(addRes?.error || "Failed to add assets to collection.");
             return;
         }
-        await comfyAlert(`Added ${selected.length} item(s) to "${created.data?.name || name}".`);
+        await comfyAlert(formatAddResultMessage({ collectionName: created.data?.name || name, selectedCount: selected.length, addRes }));
         return;
     }
 
@@ -89,7 +109,7 @@ export async function showAddToCollectionMenu({ x, y, assets }) {
             await comfyAlert(addRes?.error || "Failed to add assets to collection.");
             return;
         }
-        await comfyAlert(`Added ${selected.length} item(s) to "${created.data?.name || name}".`);
+        await comfyAlert(formatAddResultMessage({ collectionName: created.data?.name || name, selectedCount: selected.length, addRes }));
     });
     menu.appendChild(createIt);
     menu.appendChild(separator());
@@ -106,7 +126,7 @@ export async function showAddToCollectionMenu({ x, y, assets }) {
                     await comfyAlert(addRes?.error || "Failed to add assets to collection.");
                     return;
                 }
-                await comfyAlert(`Added ${selected.length} item(s) to "${name}".`);
+                await comfyAlert(formatAddResultMessage({ collectionName: name, selectedCount: selected.length, addRes }));
             })
         );
     }

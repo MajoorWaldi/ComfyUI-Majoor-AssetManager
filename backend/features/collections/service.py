@@ -236,16 +236,26 @@ class CollectionsService:
 
             existing = data.get("items") if isinstance(data.get("items"), list) else []
             seen = set()
+            existing_seen = set()
             for it in existing:
                 if isinstance(it, dict):
                     fp = it.get("filepath")
                     if fp:
-                        seen.add(_normalize_fp(str(fp)))
+                        k = _normalize_fp(str(fp))
+                        seen.add(k)
+                        existing_seen.add(k)
 
             added = 0
+            skipped_existing = 0
+            skipped_duplicate = 0
             for it in cleaned:
                 key = _normalize_fp(it["filepath"])
                 if key in seen:
+                    # Already in collection (or duplicated in the same request); report as skipped.
+                    if key in existing_seen:
+                        skipped_existing += 1
+                    else:
+                        skipped_duplicate += 1
                     continue
                 existing.append(it)
                 seen.add(key)
@@ -259,7 +269,15 @@ class CollectionsService:
             except Exception as exc:
                 return Result.Err(ErrorCode.DB_ERROR, f"Failed to update collection: {exc}")
 
-        return Result.Ok({"id": str(data.get("id") or collection_id), "added": int(added), "count": len(existing)})
+        return Result.Ok(
+            {
+                "id": str(data.get("id") or collection_id),
+                "added": int(added),
+                "skipped_existing": int(skipped_existing),
+                "skipped_duplicate": int(skipped_duplicate),
+                "count": len(existing),
+            }
+        )
 
     def remove_filepaths(self, collection_id: str, filepaths: List[str]) -> Result[Dict[str, Any]]:
         if not isinstance(filepaths, list) or not filepaths:

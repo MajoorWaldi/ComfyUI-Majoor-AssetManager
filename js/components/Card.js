@@ -284,13 +284,23 @@ export function createAssetCard(asset) {
         } catch {}
     }
 
+    // Helpful datasets for cross-card behaviors (selection, siblings hide, name collisions).
+    try {
+        const filename = String(asset?.filename || "");
+        const ext = (filename.split(".").pop() || "").toUpperCase();
+        const stem = filename.includes(".") ? filename.slice(0, filename.lastIndexOf(".")) : filename;
+        card.dataset.mjrFilenameKey = filename.trim().toLowerCase();
+        card.dataset.mjrExt = ext;
+        card.dataset.mjrStem = String(stem || "").trim().toLowerCase();
+    } catch {}
+
     const viewUrl = buildAssetViewURL(asset);
 
     // Thumbnail
     const thumb = createThumbnail(asset, viewUrl);
 
     // Add file type badge (top left)
-    const fileBadge = createFileBadge(asset.filename, asset.kind);
+    const fileBadge = createFileBadge(asset.filename, asset.kind, !!asset?._mjrNameCollision);
     thumb.appendChild(fileBadge);
 
     // Add rating badge (top right)

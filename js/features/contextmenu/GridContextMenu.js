@@ -4,7 +4,7 @@
 
 import { buildAssetViewURL } from "../../api/endpoints.js";
 import { comfyAlert, comfyConfirm, comfyPrompt } from "../../app/dialogs.js";
-import { openInFolder, updateAssetRating, deleteAsset, renameAsset } from "../../api/client.js";
+import { openInFolder, updateAssetRating, deleteAsset, renameAsset, removeFilepathsFromCollection } from "../../api/client.js";
 import { ASSET_RATING_CHANGED_EVENT, ASSET_TAGS_CHANGED_EVENT } from "../../app/events.js";
 import { createTagsEditor } from "../../components/TagsEditor.js";
 import { safeDispatchCustomEvent } from "../../utils/events.js";
@@ -36,6 +36,15 @@ const getSelectedAssets = (gridContainer) => {
         }
     } catch {}
     return assets;
+};
+
+const getAssetFilepath = (asset) => {
+    try {
+        const fp = asset?.filepath || asset?.path || asset?.file_info?.filepath || "";
+        return fp ? String(fp) : "";
+    } catch {
+        return "";
+    }
 };
 
 const clearSelection = (gridContainer) => {
@@ -245,6 +254,46 @@ export function bindGridContextMenu({
                 await showAddToCollectionMenu({ x: e.clientX, y: e.clientY, assets: list });
             })
         );
+
+        // Remove from current collection (only when in collection view)
+        const state = (() => {
+            try {
+                return getState?.() || {};
+            } catch {
+                return {};
+            }
+        })();
+        const collectionId = String(state?.collectionId || "").trim();
+        if (collectionId) {
+            const selectedAssets = getSelectedAssets(gridContainer);
+            const list = selectedAssets.length ? selectedAssets : [asset];
+            const filepaths = list.map(getAssetFilepath).filter(Boolean);
+            const label = filepaths.length > 1 ? `Remove from collection (${filepaths.length})` : "Remove from collection";
+            menu.appendChild(
+                createItem(label, "pi pi-bookmark", null, async () => {
+                    try {
+                        menu.style.display = "none";
+                    } catch {}
+                    if (!filepaths.length) {
+                        await comfyAlert("No file path available for this asset.");
+                        return;
+                    }
+                    const confirmed = await comfyConfirm(`Remove ${filepaths.length} item(s) from this collection?`);
+                    if (!confirmed) return;
+
+                    const res = await removeFilepathsFromCollection(collectionId, filepaths);
+                    if (!res?.ok) {
+                        await comfyAlert(res?.error || "Failed to remove from collection.");
+                        return;
+                    }
+
+                    // Refresh the collection view (best effort).
+                    try {
+                        gridContainer?.dispatchEvent?.(new CustomEvent("mjr:reload-grid"));
+                    } catch {}
+                })
+            );
+        }
 
         menu.appendChild(separator());
 

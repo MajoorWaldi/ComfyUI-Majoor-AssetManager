@@ -57,8 +57,8 @@ def _try_delete_windows_path(path: str) -> None:
 
     # Last-resort fallback via cmd builtins (kept best-effort and silent).
     try:
-        subprocess.run(["cmd", "/c", "del", "/f", "/q", nt_path], check=False, capture_output=True)
-        subprocess.run(["cmd", "/c", "rd", "/s", "/q", nt_path], check=False, capture_output=True)
+        subprocess.run(["cmd", "/c", f'del /f /q "{nt_path}"'], check=False, capture_output=True)
+        subprocess.run(["cmd", "/c", f'rd /s /q "{nt_path}"'], check=False, capture_output=True)
     except Exception:
         pass
 
@@ -76,8 +76,15 @@ def _cleanup_windows_reserved_custom_nodes() -> Optional[str]:
         except OSError:
             return None
 
+        reserved = {"CON", "PRN", "AUX", "NUL"}
+        reserved.update({f"COM{i}" for i in range(1, 10)})
+        reserved.update({f"LPT{i}" for i in range(1, 10)})
+
         for name in entries:
-            if name.strip().lower() != "nul":
+            # Windows device names are reserved even with extensions and trailing dots/spaces.
+            cleaned = str(name or "").strip().rstrip(". ")
+            base = cleaned.split(".", 1)[0].strip().upper()
+            if base not in reserved:
                 continue
             try:
                 victim = str((custom_nodes_dir / name).resolve())

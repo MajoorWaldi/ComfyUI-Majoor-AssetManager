@@ -662,7 +662,7 @@ export function createViewer() {
             name.style.cssText =
                 "max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; opacity:0.95;";
 
-            const extBadge = createFileBadge(a.filename, a.kind);
+            const extBadge = createFileBadge(a.filename, a.kind, !!a?._mjrNameCollision);
             try {
                 extBadge.style.position = "static";
                 extBadge.style.top = "";

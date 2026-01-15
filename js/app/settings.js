@@ -13,6 +13,9 @@ const DEFAULT_SETTINGS = {
     grid: {
         pageSize: APP_CONFIG.DEFAULT_PAGE_SIZE
     },
+    siblings: {
+        hidePngSiblings: true
+    },
     autoScan: {
         enabled: APP_CONFIG.AUTO_SCAN_ENABLED,
         onStartup: APP_CONFIG.AUTO_SCAN_ON_STARTUP
@@ -195,6 +198,20 @@ export const registerMajoorSettings = (app, onApplied) => {
             settings.ratingTagsSync.enabled = !!val;
             saveMajoorSettings(settings);
             notifyApplied("ratingTagsSync.enabled");
+        }
+    });
+
+    app.ui.settings.addSetting({
+        id: `${SETTINGS_PREFIX}.General.HideSiblings`,
+        name: "Majoor: Hide PNG siblings (video previews)",
+        tooltip: "If a video has a matching .png, hide the .png from the grid.",
+        type: "boolean",
+        defaultValue: !!settings.siblings?.hidePngSiblings,
+        onChange: (val) => {
+            settings.siblings = settings.siblings || {};
+            settings.siblings.hidePngSiblings = !!val;
+            saveMajoorSettings(settings);
+            notifyApplied("siblings.hidePngSiblings");
         }
     });
 
