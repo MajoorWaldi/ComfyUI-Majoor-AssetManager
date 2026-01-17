@@ -1,5 +1,10 @@
 export function createGridController({ gridContainer, loadAssets, loadAssetsFromList, getCollectionAssets, disposeGrid, getQuery, state }) {
     const reloadGrid = async () => {
+        // Expose the current query on the container so external listeners (ComfyUI executed events)
+        // can decide whether to do incremental upserts or avoid disrupting an active search.
+        try {
+            gridContainer.dataset.mjrQuery = String(getQuery?.() ?? "*") || "*";
+        } catch {}
         gridContainer.dataset.mjrScope = state.scope;
         gridContainer.dataset.mjrCustomRootId = state.customRootId || "";
         gridContainer.dataset.mjrFilterKind = state.kindFilter || "";

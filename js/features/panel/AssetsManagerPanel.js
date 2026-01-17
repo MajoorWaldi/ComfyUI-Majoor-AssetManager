@@ -464,6 +464,7 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     };
 
     let lastKnownScan = null;
+    let lastKnownTotalAssets = null;
     let hasSeenFirstCounters = false;
     let pendingReloadCount = 0;
     let isReloading = false;
@@ -488,13 +489,31 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         if (!hasSeenFirstCounters) {
             hasSeenFirstCounters = true;
             lastKnownScan = counters.last_scan_end;
+            lastKnownTotalAssets = Number(counters.total_assets ?? null);
             return;
         }
 
         const hasNewScan = counters.last_scan_end && counters.last_scan_end !== lastKnownScan;
-        if (!hasNewScan) return;
+        const totalAssets = Number(counters.total_assets ?? null);
+
+        // Fallback for "new files appeared" without a full scan end update (e.g. incremental indexing).
+        // Only auto-refresh when browsing output with default filters to avoid disrupting searches.
+        const isDefaultBrowse =
+            state.scope === "output" &&
+            !state.collectionId &&
+            String(getQuery?.() ?? "*").trim() === "*" &&
+            !state.kindFilter &&
+            !state.workflowOnly &&
+            !(Number(state.minRating || 0) > 0) &&
+            !state.dateRangeFilter &&
+            !state.dateExactFilter;
+
+        const hasNewTotal = Number.isFinite(totalAssets) && Number.isFinite(lastKnownTotalAssets) && totalAssets > lastKnownTotalAssets;
+
+        if (!hasNewScan && !(isDefaultBrowse && hasNewTotal)) return;
 
         lastKnownScan = counters.last_scan_end;
+        lastKnownTotalAssets = Number.isFinite(totalAssets) ? totalAssets : lastKnownTotalAssets;
         await queuedReload();
     };
 
