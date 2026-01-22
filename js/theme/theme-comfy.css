@@ -1138,6 +1138,22 @@
     background: rgba(255, 255, 255, 0.2);
 }
 
+/* Viewer close button pinned to overlay corner */
+.mjr-viewer-close {
+    border-color: rgba(255, 255, 255, 0.18) !important;
+    background: rgba(0, 0, 0, 0.35) !important;
+}
+
+.mjr-viewer-close:hover {
+    background: rgba(255, 70, 70, 0.18) !important;
+    border-color: rgba(255, 70, 70, 0.35) !important;
+}
+
+.mjr-viewer-close .pi {
+    font-size: 16px;
+    line-height: 1;
+}
+
 .mjr-viewer-content {
     flex: 1;
     position: relative;
@@ -1226,6 +1242,75 @@
     text-align: center;
 }
 
+.mjr-viewer-tools {
+    /* tools row in header (created by js/features/viewer/toolbar.js) */
+}
+
+.mjr-viewer-tools-group {
+    padding: 0 10px 0 10px;
+    border-left: 2px solid rgba(255,255,255,0.10);
+}
+
+.mjr-viewer-tools-group:first-child {
+    border-left: none;
+    padding-left: 4px;
+}
+
+.mjr-viewer-tools-group-label {
+    color: rgba(255,255,255,0.75);
+    letter-spacing: 0.2px;
+}
+
+.mjr-viewer-tools-group[style*="--mjr-group-accent"] .mjr-viewer-tools-group-label {
+    color: rgba(var(--mjr-group-accent), 0.90);
+}
+
+.mjr-viewer-tools-group[style*="--mjr-group-accent"] {
+    border-left-color: rgba(var(--mjr-group-accent), 0.35);
+}
+
+.mjr-viewer-tools-group[data-group="compare"][data-active="1"] {
+    background: rgba(var(--mjr-group-accent), 0.10);
+    border-left-color: rgba(var(--mjr-group-accent), 0.60);
+    border-radius: 10px;
+    padding: 6px 10px;
+    box-shadow: inset 0 0 0 1px rgba(var(--mjr-group-accent), 0.22);
+}
+
+.mjr-viewer-tools-group[data-group="compare"][data-active="1"] .mjr-viewer-tools-select {
+    border-color: rgba(var(--mjr-group-accent), 0.60);
+    box-shadow: 0 0 0 2px rgba(var(--mjr-group-accent), 0.18);
+}
+
+.mjr-viewer-tools-select:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(64,160,255,0.22);
+}
+
+/* Native dropdowns: hint dark UI and style options when the browser allows it. */
+.mjr-viewer-header {
+    color-scheme: dark;
+}
+
+.mjr-viewer-tools-select {
+    background: rgba(0,0,0,0.55) !important;
+    color: rgba(255,255,255,0.92) !important;
+    border-color: rgba(255,255,255,0.18) !important;
+}
+
+.mjr-viewer-tools-select option {
+    background: var(--comfy-menu-bg, #2a2a2a);
+    color: var(--content-fg, var(--input-text, #ddd));
+}
+
+.mjr-viewer-tools-range-input:focus {
+    outline: none;
+}
+
+.mjr-viewer-tool-btn--reset {
+    border-color: rgba(255,255,255,0.22) !important;
+}
+
 /* ========== Custom Video Controls (no native bar) ========== */
 .mjr-video-host {
     position: relative;
@@ -1262,6 +1347,10 @@
     display: grid;
     align-items: center;
     grid-template-columns: auto 1fr auto auto auto;
+}
+
+.mjr-video-controls--viewerbar .mjr-video-row--top {
+    grid-template-columns: auto auto 1fr auto auto;
 }
 
 .mjr-video-controls--preview .mjr-video-row--top {
@@ -1342,11 +1431,44 @@
 
 /* Preview: keep controls visible because the area is small. */
 .mjr-video-controls--preview {
-    left: 8px;
-    right: 8px;
-    bottom: 8px;
+    position: absolute;
+    left: auto;
+    right: 10px;
+    top: auto;
+    bottom: 10px;
     opacity: 1;
     pointer-events: auto;
+    background: transparent;
+    border: none;
+    padding: 0;
+    display: block;
+    width: auto;
+    height: auto;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+
+.mjr-video-preview-btn {
+    width: 38px;
+    height: 38px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.22);
+    background: rgba(0,0,0,0.42);
+    color: rgba(255,255,255,0.92);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.mjr-video-preview-btn:hover {
+    background: rgba(0,0,0,0.50);
+    border-color: rgba(255,255,255,0.28);
+}
+
+.mjr-video-preview-btn .pi {
+    font-size: 16px;
+    line-height: 1;
 }
 
 .mjr-video-btn {
@@ -1369,11 +1491,49 @@
     border-color: rgba(64, 160, 255, 0.55);
 }
 
+.mjr-video-btn--in {
+    border-color: rgba(70, 255, 120, 0.55);
+    background: rgba(70, 255, 120, 0.12);
+}
+
+.mjr-video-btn--in:hover {
+    background: rgba(70, 255, 120, 0.18);
+}
+
+.mjr-video-btn--out {
+    border-color: rgba(255, 70, 70, 0.55);
+    background: rgba(255, 70, 70, 0.10);
+}
+
+.mjr-video-btn--out:hover {
+    background: rgba(255, 70, 70, 0.16);
+}
+
 .mjr-video-time {
     font-size: 12px;
     color: rgba(255, 255, 255, 0.9);
     min-width: 92px;
     text-align: center;
+    user-select: none;
+}
+
+.mjr-video-timegroup {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    min-width: 0;
+}
+
+.mjr-video-range-count {
+    font-size: 12px;
+    color: rgba(64, 190, 255, 0.92);
+    background: rgba(64, 190, 255, 0.10);
+    border: 1px solid rgba(64, 190, 255, 0.25);
+    border-radius: 999px;
+    padding: 1px 8px;
+    line-height: 16px;
+    font-variant-numeric: tabular-nums;
     user-select: none;
 }
 
@@ -1384,6 +1544,302 @@
 .mjr-video-range--seek {
     flex: 1;
     min-width: 80px;
+    position: relative;
+    z-index: 1;
+    /* We draw our own playhead/markers; hide the native thumb "dot". */
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.mjr-video-range--seek::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 0;
+    height: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+}
+
+.mjr-video-range--seek::-moz-range-thumb {
+    width: 0;
+    height: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+}
+
+.mjr-video-seek-wrap {
+    position: relative;
+    min-width: 80px;
+    flex: 1;
+    display: flex;
+    align-items: center;
+}
+
+.mjr-video-seek-zones {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 10px;
+    transform: translateY(-50%);
+    border-radius: 999px;
+    overflow: hidden;
+    pointer-events: none;
+    z-index: 2;
+}
+
+.mjr-video-seek-zone {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+}
+
+/* 0..In: trimmed-out range. */
+.mjr-video-seek-zone--leftTrim {
+    background: rgba(255, 70, 70, 0.18);
+}
+
+/* In..Out: selected playback range highlight. */
+.mjr-video-seek-zone--selected {
+    background: rgba(64, 190, 255, 0.55);
+}
+
+.mjr-video-seek-zones.is-fullrange .mjr-video-seek-zone--selected {
+    background: rgba(255, 255, 255, 0.12);
+}
+
+/* Out..End: show out-of-range frames as a different color. */
+.mjr-video-seek-zone--rightTrim {
+    background: rgba(255, 70, 70, 0.20);
+}
+
+.mjr-video-seek-overlay {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 0;
+    pointer-events: none;
+    z-index: 3;
+}
+
+.mjr-video-seek-handle {
+    position: absolute;
+    top: 50%;
+    width: 16px;
+    height: 32px;
+    transform: translate(-50%, -50%);
+    cursor: ew-resize;
+    pointer-events: auto;
+    touch-action: none;
+    user-select: none;
+    z-index: 4;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    box-shadow: 0 4px 10px rgba(0,0,0,0.35);
+}
+
+.mjr-video-seek-handle:hover {
+    background: rgba(255, 255, 255, 0.10);
+    border-color: rgba(255, 255, 255, 0.24);
+}
+
+.mjr-video-seek-handle--in::after,
+.mjr-video-seek-handle--out::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 2px;
+    height: 18px;
+    transform: translate(-50%, -50%);
+    background: rgba(255, 70, 70, 0.95);
+    border-radius: 2px;
+}
+
+.mjr-video-seek-handle--in::after {
+    background: rgba(70, 255, 120, 0.95);
+}
+
+.mjr-video-seek-handle--in::before,
+.mjr-video-seek-handle--out::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    width: 0;
+    height: 0;
+    transform: translateX(-50%);
+}
+
+.mjr-video-seek-handle--in::before {
+    top: 4px;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-bottom: 6px solid rgba(70, 255, 120, 0.95);
+}
+
+.mjr-video-seek-handle--out::before {
+    bottom: 4px;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 6px solid rgba(255, 70, 70, 0.95);
+}
+
+.mjr-video-seek-ticks {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: -16px;
+    height: 12px;
+    border-bottom: 1px solid rgba(255,255,255,0.10);
+    opacity: 0.9;
+}
+
+.mjr-video-seek-labels {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: -34px;
+    height: 14px;
+    pointer-events: none;
+    font-size: 10px;
+    line-height: 14px;
+    color: rgba(255,255,255,0.72);
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 1px 0 rgba(0,0,0,0.55);
+}
+
+.mjr-video-seek-label {
+    position: absolute;
+    transform: translateX(-50%);
+    white-space: nowrap;
+}
+
+.mjr-video-seek-playhead-label {
+    position: absolute;
+    top: 12px;
+    transform: translateX(-50%);
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(0,0,0,0.55);
+    border: 1px solid rgba(255,255,255,0.14);
+    color: rgba(255,255,255,0.92);
+    font-size: 10px;
+    line-height: 14px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+}
+
+.mjr-video-seek-mark {
+    position: absolute;
+    top: -10px;
+    width: 14px;
+    height: 20px;
+    background: transparent;
+    transform: translateX(-50%);
+    cursor: ew-resize;
+    pointer-events: auto;
+    touch-action: none;
+    z-index: 4;
+    --mjr-mark-color: rgba(255, 70, 70, 0.95);
+}
+
+.mjr-video-seek-mark--in {
+    --mjr-mark-color: rgba(70, 255, 120, 0.95);
+}
+
+.mjr-video-seek-mark::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    transform: translateX(-50%);
+    background: var(--mjr-mark-color);
+    border-radius: 2px;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.35);
+}
+
+.mjr-video-seek-mark::after {
+    content: "";
+    position: absolute;
+    top: -5px;
+    left: 50%;
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-bottom: 6px solid var(--mjr-mark-color);
+    transform: translateX(-50%);
+}
+
+.mjr-video-seek-mark--in::after {
+    border-bottom-color: var(--mjr-mark-color);
+}
+
+.mjr-video-seek-mark--out::after {
+    top: auto;
+    bottom: -5px;
+    border-bottom: none;
+    border-top: 6px solid var(--mjr-mark-color);
+}
+
+.mjr-video-seek-playhead {
+    position: absolute;
+    top: -12px;
+    width: 2px;
+    height: 24px;
+    background: rgba(255, 200, 70, 0.95);
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.35);
+    transform: translateX(-1px);
+}
+
+.mjr-video-controls--viewerbar {
+    position: static;
+    left: auto;
+    right: auto;
+    bottom: auto;
+    opacity: 1;
+    pointer-events: auto;
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.78);
+}
+
+.mjr-video-controls--viewerbar .mjr-video-btn {
+    padding: 6px 8px;
+    font-size: 12px;
+}
+
+.mjr-video-controls--viewerbar .mjr-video-btn .pi {
+    font-size: 14px;
+    line-height: 1;
+}
+
+.mjr-video-controls--viewerbar .mjr-video-time,
+.mjr-video-controls--viewerbar .mjr-video-frame {
+    font-variant-numeric: tabular-nums;
+}
+
+.mjr-video-controls--viewerbar .mjr-video-frame {
+    min-width: 110px;
+    text-align: left;
+}
+
+.mjr-video-controls--viewerbar .mjr-video-time {
+    min-width: 120px;
+    text-align: right;
+}
+
+.mjr-video-controls--viewerbar .mjr-video-range--seek {
+    height: 18px;
 }
 
 .mjr-video-range--volume {

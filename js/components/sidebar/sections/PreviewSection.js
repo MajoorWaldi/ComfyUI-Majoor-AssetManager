@@ -34,6 +34,7 @@ export function createPreviewSection(asset) {
         const video = document.createElement("video");
         video.src = viewUrl;
         video.controls = false;
+        video.autoplay = true;
         video.loop = true;
         video.muted = true;
         video.playsInline = true;
@@ -44,6 +45,18 @@ export function createPreviewSection(asset) {
             object-fit: contain;
         `;
         previewContainer.appendChild(video);
+        // Best-effort auto-play (muted loop). Some browsers require a direct play() attempt even with autoplay.
+        try {
+            const tryPlay = () => {
+                try {
+                    const p = video.play?.();
+                    if (p && typeof p.catch === "function") p.catch(() => {});
+                } catch {}
+            };
+            video.addEventListener("loadedmetadata", tryPlay, { passive: true });
+            video.addEventListener("canplay", tryPlay, { passive: true });
+            tryPlay();
+        } catch {}
         try {
             mountVideoControls(video, { variant: "preview", hostEl: previewContainer });
         } catch {}

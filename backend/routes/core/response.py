@@ -6,6 +6,25 @@ from aiohttp import web
 from backend.shared import Result
 
 
+def safe_error_message(exc: Exception, generic_message: str) -> str:
+    """
+    Return a safe message for clients.
+
+    By default, avoid leaking internal details. When `MJR_DEBUG` is enabled,
+    include the exception string to help debugging.
+    """
+    try:
+        debug = str(__import__("os").environ.get("MJR_DEBUG", "")).strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        debug = False
+    if debug:
+        try:
+            return f"{generic_message}: {exc}"
+        except Exception:
+            return generic_message
+    return generic_message
+
+
 def _json_response(result: Result, status: Optional[int] = None):
     """
     Convert Result to JSON response.

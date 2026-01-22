@@ -2,13 +2,38 @@
  * API Client - Safe fetch wrapper (never throws)
  */
 
-const SETTINGS_KEY = "mjrSettings";
-let _obsEnabledCache = null;
-let _obsCacheAt = 0;
-let _rtSyncEnabledCache = null;
-let _rtSyncCacheAt = 0;
-let _tagsCache = null;
-let _tagsCacheAt = 0;
+import { SETTINGS_KEY } from "../app/settingsStore.js";
+
+/**
+ * @template T
+ * @typedef {{
+ *  ok: boolean,
+ *  data: (T|null),
+ *  error?: (string|null),
+ *  code?: string,
+ *  meta?: any,
+ *  status?: number
+ * }} ApiResult
+ */
+
+/**
+ * Compact viewer-oriented media info returned by `/mjr/am/viewer/info`.
+ *
+ * @typedef {{
+ *  kind?: ('image'|'video'|'unknown'),
+ *  mime?: (string|null),
+ *  width?: (number|null),
+ *  height?: (number|null),
+ *  fps?: (number|string|null),
+ *  fps_raw?: (string|null),
+ *  frame_count?: (number|null),
+ *  duration_s?: (number|null)
+ * }} ViewerInfo
+ */
+
+let _obsCache = { value: null, at: 0 };
+let _rtSyncCache = { value: null, at: 0 };
+let _tagsCache = { value: null, at: 0 };
 const TAGS_CACHE_TTL_MS = 30_000;
 const DEFAULT_TAGS_CACHE_TTL_MS = TAGS_CACHE_TTL_MS;
 const CLIENT_GLOBAL_KEY = "__MJR_API_CLIENT__";
@@ -17,7 +42,7 @@ function _getTagsCacheTTL() {
     try {
         const raw = localStorage?.getItem?.(SETTINGS_KEY) || "{}";
         const parsed = JSON.parse(raw);
-        const ttl = parsed?.cache?.tagsTTL ?? parsed?.cache?.tags_ttl_ms ?? null;
+        const ttl = parsed?.cache?.tagsTTLms ?? parsed?.cache?.tagsTTL ?? parsed?.cache?.tags_ttl_ms ?? null;
         const n = Number(ttl);
         if (!Number.isFinite(n)) return DEFAULT_TAGS_CACHE_TTL_MS;
         return Math.max(1_000, Math.min(10 * 60_000, Math.floor(n)));
@@ -37,6 +62,7 @@ function _isRetryableError(error) {
     try {
         if (!error) return false;
         const name = String(error.name || "");
+        if (name === "AbortError") return false;
         if (name === "TypeError") return true;
         const msg = String(error.message || "").toLowerCase();
         return msg.includes("fetch") || msg.includes("network") || msg.includes("failed");
@@ -46,18 +72,15 @@ function _isRetryableError(error) {
 }
 
 export function invalidateObsCache() {
-    _obsEnabledCache = null;
-    _obsCacheAt = 0;
+    _obsCache = { value: null, at: 0 };
 }
 
 export function invalidateRatingTagsSyncCache() {
-    _rtSyncEnabledCache = null;
-    _rtSyncCacheAt = 0;
+    _rtSyncCache = { value: null, at: 0 };
 }
 
 export function invalidateTagsCache() {
-    _tagsCache = null;
-    _tagsCacheAt = 0;
+    _tagsCache = { value: null, at: 0 };
 }
 
 // Best-effort cache invalidation when settings change (ComfyUI settings, dev tools, etc.).
@@ -86,43 +109,41 @@ try {
 
 const _readObsEnabled = () => {
     const now = Date.now();
-    if (_obsEnabledCache !== null && now - _obsCacheAt < 2000) {
-        return _obsEnabledCache;
+    if (_obsCache.value !== null && now - (_obsCache.at || 0) < 2000) {
+        return _obsCache.value;
     }
-    _obsCacheAt = now;
     try {
         const raw = localStorage?.getItem?.(SETTINGS_KEY);
         if (!raw) {
-            _obsEnabledCache = false;
-            return _obsEnabledCache;
+            _obsCache = { value: false, at: now };
+            return _obsCache.value;
         }
         const parsed = JSON.parse(raw);
-        _obsEnabledCache = !!parsed?.observability?.enabled;
-        return _obsEnabledCache;
+        _obsCache = { value: !!parsed?.observability?.enabled, at: now };
+        return _obsCache.value;
     } catch {
-        _obsEnabledCache = false;
-        return _obsEnabledCache;
+        _obsCache = { value: false, at: now };
+        return _obsCache.value;
     }
 };
 
 const _readRatingTagsSyncEnabled = () => {
     const now = Date.now();
-    if (_rtSyncEnabledCache !== null && now - _rtSyncCacheAt < 2000) {
-        return _rtSyncEnabledCache;
+    if (_rtSyncCache.value !== null && now - (_rtSyncCache.at || 0) < 2000) {
+        return _rtSyncCache.value;
     }
-    _rtSyncCacheAt = now;
     try {
         const raw = localStorage?.getItem?.(SETTINGS_KEY);
         if (!raw) {
-            _rtSyncEnabledCache = false;
-            return _rtSyncEnabledCache;
+            _rtSyncCache = { value: false, at: now };
+            return _rtSyncCache.value;
         }
         const parsed = JSON.parse(raw);
-        _rtSyncEnabledCache = !!parsed?.ratingTagsSync?.enabled;
-        return _rtSyncEnabledCache;
+        _rtSyncCache = { value: !!parsed?.ratingTagsSync?.enabled, at: now };
+        return _rtSyncCache.value;
     } catch {
-        _rtSyncEnabledCache = false;
-        return _rtSyncEnabledCache;
+        _rtSyncCache = { value: false, at: now };
+        return _rtSyncCache.value;
     }
 };
 
@@ -130,6 +151,7 @@ const _readRatingTagsSyncEnabled = () => {
  * Fetch wrapper that always returns {ok, data, error}
  * Never throws - returns error object instead
  */
+/** @returns {Promise<ApiResult<any>>} */
 export async function fetchAPI(url, options = {}, retryCount = 0) {
     try {
         const headers = typeof Headers !== "undefined" ? new Headers(options.headers || {}) : { ...(options.headers || {}) };
@@ -189,6 +211,11 @@ export async function fetchAPI(url, options = {}, retryCount = 0) {
         }
         return result; // Backend returns {ok, data, error, code, meta}
     } catch (error) {
+        try {
+            if (String(error?.name || "") === "AbortError") {
+                return { ok: false, error: "Aborted", code: "ABORTED", data: null };
+            }
+        } catch {}
         // Retry network failures a few times (best-effort).
         if (retryCount < MAX_RETRIES && _isRetryableError(error)) {
             try {
@@ -211,17 +238,18 @@ export async function fetchAPI(url, options = {}, retryCount = 0) {
 /**
  * GET request helper
  */
-export async function get(url) {
-    return fetchAPI(url, { method: "GET" });
+export async function get(url, options = {}) {
+    return fetchAPI(url, { ...(options || {}), method: "GET" });
 }
 
 /**
  * POST request helper
  */
-export async function post(url, body) {
+export async function post(url, body, options = {}) {
     return fetchAPI(url, {
+        ...(options || {}),
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...((options && options.headers) || {}) },
         body: JSON.stringify(body)
     });
 }
@@ -284,10 +312,10 @@ export async function updateAssetTags(assetId, tags) {
     });
     if (result?.ok) {
         try {
-            if (Array.isArray(_tagsCache)) {
-                const next = new Set(_tagsCache);
+            if (Array.isArray(_tagsCache.value)) {
+                const next = new Set(_tagsCache.value);
                 for (const t of Array.isArray(tags) ? tags : []) next.add(t);
-                _tagsCache = Array.from(next);
+                _tagsCache = { value: Array.from(next), at: Date.now() };
             } else {
                 invalidateTagsCache();
             }
@@ -303,14 +331,13 @@ export async function updateAssetTags(assetId, tags) {
  */
 export async function getAvailableTags() {
     const now = Date.now();
-    if (Array.isArray(_tagsCache) && now - _tagsCacheAt < _getTagsCacheTTL()) {
-        return { ok: true, data: _tagsCache, error: null, code: "OK", meta: { cached: true } };
+    if (Array.isArray(_tagsCache.value) && now - (_tagsCache.at || 0) < _getTagsCacheTTL()) {
+        return { ok: true, data: _tagsCache.value, error: null, code: "OK", meta: { cached: true } };
     }
 
     const result = await get("/mjr/am/tags");
     if (result?.ok && Array.isArray(result.data)) {
-        _tagsCache = result.data;
-        _tagsCacheAt = now;
+        _tagsCache = { value: result.data, at: now };
     }
     return result;
 }
@@ -318,14 +345,24 @@ export async function getAvailableTags() {
 /**
  * Get full asset metadata by ID
  */
-export async function getAssetMetadata(assetId) {
-    return get(`/mjr/am/asset/${assetId}`);
+export async function getAssetMetadata(assetId, options = {}) {
+    return get(`/mjr/am/asset/${assetId}`, options);
+}
+
+/**
+ * Get compact viewer media info by asset ID (fps/frame count/dimensions/etc).
+ */
+/** @returns {Promise<ApiResult<ViewerInfo>>} */
+export async function getViewerInfo(assetId, options = {}) {
+    const id = String(assetId ?? "").trim();
+    if (!id) return { ok: false, data: null, error: "Missing assetId", code: "INVALID_INPUT" };
+    return get(`/mjr/am/viewer/info?asset_id=${encodeURIComponent(id)}`, options);
 }
 
 /**
  * Batch fetch assets by ID (no per-asset tool invocations / self-heal).
  */
-export async function getAssetsBatch(assetIds) {
+export async function getAssetsBatch(assetIds, options = {}) {
     const ids = Array.isArray(assetIds) ? assetIds : [];
     const cleaned = [];
     for (const id of ids) {
@@ -335,7 +372,7 @@ export async function getAssetsBatch(assetIds) {
         if (cleaned.length >= 200) break;
     }
     if (!cleaned.length) return { ok: true, data: [], error: null, code: "OK" };
-    return post("/mjr/am/assets/batch", { asset_ids: cleaned });
+    return post("/mjr/am/assets/batch", { asset_ids: cleaned }, options);
 }
 
 export async function hydrateAssetRatingTags(assetId) {
@@ -347,11 +384,30 @@ export async function hydrateAssetRatingTags(assetId) {
 /**
  * Get metadata for a file path (works even when file is not indexed in DB).
  */
-export async function getFileMetadata(filePath) {
+export async function getFileMetadata(filePath, options = {}) {
     if (!filePath || typeof filePath !== "string") {
         return { ok: false, data: null, error: "Missing file path", code: "INVALID_INPUT" };
     }
-    return get(`/mjr/am/metadata?path=${encodeURIComponent(filePath)}`);
+    return get(`/mjr/am/metadata?path=${encodeURIComponent(filePath)}`, options);
+}
+
+/**
+ * Get metadata for a file reference (preferred over absolute paths).
+ * Works on /view URLs where ComfyUI provides type/filename/subfolder.
+ */
+export async function getFileMetadataScoped(
+    { type = "output", filename = "", subfolder = "", root_id = "", rootId = "" } = {},
+    options = {}
+) {
+    const t = String(type || "output").trim().toLowerCase() || "output";
+    const fn = String(filename || "").trim();
+    const sub = String(subfolder || "").trim();
+    const rid = String(root_id || rootId || "").trim();
+    if (!fn) return { ok: false, data: null, error: "Missing filename", code: "INVALID_INPUT" };
+    let url = `/mjr/am/metadata?type=${encodeURIComponent(t)}&filename=${encodeURIComponent(fn)}`;
+    if (sub) url += `&subfolder=${encodeURIComponent(sub)}`;
+    if (rid) url += `&root_id=${encodeURIComponent(rid)}`;
+    return get(url, options);
 }
 
 export async function setProbeBackendMode(mode) {
@@ -363,6 +419,15 @@ export async function setProbeBackendMode(mode) {
 
 export async function openInFolder(assetId) {
     return post("/mjr/am/open-in-folder", { asset_id: assetId });
+}
+
+/**
+ * Best-effort database maintenance (PRAGMA optimize / ANALYZE).
+ * Returns 200 even on degraded runs; check `ok/code`.
+ */
+/** @returns {Promise<ApiResult<{steps?: string[], degraded?: boolean}>>} */
+export async function optimizeDb() {
+    return post("/mjr/am/db/optimize", {});
 }
 
 export async function deleteAsset(assetId) {

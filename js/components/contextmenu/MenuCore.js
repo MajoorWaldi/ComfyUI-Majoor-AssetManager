@@ -5,12 +5,54 @@
  * Avoids duplicated DOM + event wiring and prevents selector collisions.
  */
 
-const _DEFAULT_Z = 10001;
+export const MENU_Z_INDEX = Object.freeze({
+    MAIN: 10001,
+    SUBMENU: 10002,
+    POPOVER: 10003,
+    COLLECTIONS: 10005,
+});
+
+const _DEFAULT_Z = MENU_Z_INDEX.MAIN;
 
 function _asClassName(value) {
     const s = String(value || "").trim();
     if (!s) return "";
     return s.startsWith(".") ? s.slice(1) : s;
+}
+
+export function safeEscapeSelector(value) {
+    const str = String(value ?? "");
+    try {
+        if (typeof CSS?.escape === "function") return CSS.escape(str);
+    } catch {}
+    // Fallback: escape special CSS selector characters (conservative).
+    return str.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, "\\$1");
+}
+
+export function destroyMenu(menu) {
+    if (!menu) return;
+    try {
+        menu._mjrAbortController?.abort?.();
+    } catch {}
+    try {
+        menu._mjrAbortController = null;
+    } catch {}
+    try {
+        menu._mjrOnHideCallbacks = [];
+    } catch {}
+    try {
+        menu._mjrSessionCleanup = null;
+    } catch {}
+    try {
+        menu.remove?.();
+    } catch {}
+}
+
+export function setMenuSessionCleanup(menu, fn) {
+    if (!menu) return;
+    try {
+        menu._mjrSessionCleanup = typeof fn === "function" ? fn : null;
+    } catch {}
 }
 
 export function getOrCreateMenu({
@@ -21,36 +63,77 @@ export function getOrCreateMenu({
     onHide = null,
 } = {}) {
     const sel = String(selector || "").trim();
-    if (!sel) throw new Error("MenuCore.getOrCreateMenu: missing selector");
+    if (!sel) {
+        console.warn("[MenuCore] getOrCreateMenu: missing selector");
+        return null;
+    }
 
     const existing = document.querySelector(sel);
-    if (existing) return existing;
+    if (existing) {
+        try {
+            if (!Array.isArray(existing._mjrOnHideCallbacks)) existing._mjrOnHideCallbacks = [];
+            if (typeof onHide === "function") existing._mjrOnHideCallbacks.push(onHide);
+        } catch {}
+        return existing;
+    }
 
     const menu = document.createElement("div");
     menu.className = `${_asClassName(className) || _asClassName(sel)} mjr-context-menu`;
-    menu.style.cssText = `
-        position: fixed;
-        background: var(--comfy-menu-bg);
-        border: 1px solid var(--border-color);
-        border-radius: 6px;
-        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
-        min-width: ${Math.max(180, Number(minWidth) || 220)}px;
-        z-index: ${Number(zIndex) || _DEFAULT_Z};
-        display: none;
-        padding: 4px 0;
-    `;
+    try {
+        menu.setAttribute("role", "menu");
+        menu.setAttribute("aria-label", "Context menu");
+    } catch {}
+    // Prefer CSS for visuals; keep only dynamic values inline (width + z-index).
+    try {
+        menu.style.position = "fixed";
+        menu.style.display = "none";
+        menu.style.minWidth = `${Math.max(180, Number(minWidth) || 220)}px`;
+        menu.style.zIndex = String(Number(zIndex) || _DEFAULT_Z);
+    } catch {}
 
     const ac = new AbortController();
     menu._mjrAbortController = ac;
+
+    try {
+        menu._mjrOnHideCallbacks = [];
+        if (typeof onHide === "function") menu._mjrOnHideCallbacks.push(onHide);
+    } catch {}
+
+    const runOnHide = () => {
+        try {
+            const fn = menu._mjrSessionCleanup;
+            if (typeof fn === "function") {
+                try {
+                    fn();
+                } catch (err) {
+                    console.error("[MenuCore] Session cleanup failed:", err);
+                }
+                try {
+                    menu._mjrSessionCleanup = null;
+                } catch {}
+            }
+        } catch {}
+
+        try {
+            const list = Array.isArray(menu._mjrOnHideCallbacks) ? menu._mjrOnHideCallbacks : [];
+            for (const fn of list) {
+                try {
+                    fn?.();
+                } catch (err) {
+                    console.error("[MenuCore] onHide failed:", err);
+                }
+            }
+        } catch {}
+    };
 
     const hide = () => {
         try {
             menu.style.display = "none";
         } catch {}
-        try {
-            onHide?.();
-        } catch {}
+        runOnHide();
     };
+
+    menu._mjrHide = hide;
 
     document.addEventListener(
         "click",
@@ -74,6 +157,10 @@ export function getOrCreateMenu({
 
 export function hideMenu(menu) {
     try {
+        if (typeof menu?._mjrHide === "function") {
+            menu._mjrHide();
+            return;
+        }
         menu.style.display = "none";
     } catch {}
 }
@@ -108,6 +195,11 @@ export function showMenuAt(menu, x, y) {
 export function createMenuItem(label, iconClass, rightHint, onClick, { disabled = false } = {}) {
     const item = document.createElement("div");
     item.className = "mjr-context-menu-item";
+    try {
+        item.setAttribute("role", "menuitem");
+        item.setAttribute("tabindex", disabled ? "-1" : "0");
+        item.setAttribute("aria-disabled", disabled ? "true" : "false");
+    } catch {}
     item.style.cssText = `
         padding: 8px 14px;
         display: flex;
@@ -152,9 +244,31 @@ export function createMenuItem(label, iconClass, rightHint, onClick, { disabled 
         e.stopPropagation();
         e.preventDefault();
         if (disabled) return;
+        if (item.dataset?.executing === "1") return;
+        try {
+            item.dataset.executing = "1";
+            item.style.pointerEvents = "none";
+            item.style.opacity = "0.7";
+        } catch {}
         try {
             await onClick?.();
-        } catch {}
+        } catch (err) {
+            console.error("[ContextMenu] Action failed:", err);
+        } finally {
+            try {
+                item.dataset.executing = "0";
+                item.style.pointerEvents = "";
+                item.style.opacity = disabled ? "0.45" : "1";
+            } catch {}
+        }
+    });
+
+    item.addEventListener("keydown", (e) => {
+        if (disabled) return;
+        if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            item.click();
+        }
     });
 
     return item;

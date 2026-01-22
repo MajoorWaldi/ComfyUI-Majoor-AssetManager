@@ -4,13 +4,27 @@
  */
 
 import { buildAssetViewURL } from "../api/endpoints.js";
-import { updateAssetRating, getAssetMetadata, getAssetsBatch } from "../api/client.js";
+import { updateAssetRating, getAssetMetadata, getAssetsBatch, getViewerInfo, getFileMetadata, getFileMetadataScoped } from "../api/client.js";
 import { ASSET_RATING_CHANGED_EVENT, ASSET_TAGS_CHANGED_EVENT } from "../app/events.js";
 import { bindViewerContextMenu } from "../features/viewer/ViewerContextMenu.js";
 import { createFileBadge, createRatingBadge, createTagsBadge } from "./Badges.js";
 import { APP_CONFIG } from "../app/config.js";
 import { safeDispatchCustomEvent } from "../utils/events.js";
 import { mountVideoControls } from "./VideoControls.js";
+import { createDefaultViewerState } from "../features/viewer/state.js";
+import { createViewerLifecycle, destroyMediaProcessorsIn, safeAddListener, safeCall } from "../features/viewer/lifecycle.js";
+import { createViewerToolbar } from "../features/viewer/toolbar.js";
+import { installViewerKeyboard } from "../features/viewer/keyboard.js";
+import { createViewerGrid } from "../features/viewer/grid.js";
+import { installViewerProbe } from "../features/viewer/probe.js";
+import { createViewerLoupe } from "../features/viewer/loupe.js";
+import { renderABCompareView } from "../features/viewer/abCompare.js";
+import { renderSideBySideView } from "../features/viewer/sideBySide.js";
+import { createViewerMetadataHydrator } from "../features/viewer/metadata.js";
+import { createViewerPanZoom } from "../features/viewer/panzoom.js";
+import { createViewerMediaFactory } from "../features/viewer/mediaFactory.js";
+import { drawScopesLight } from "../features/viewer/scopes.js";
+import { ensureViewerMetadataAsset, buildViewerMetadataBlocks } from "../features/viewer/genInfo.js";
 
 /**
  * Viewer modes
@@ -37,108 +51,271 @@ export function createViewer() {
         z-index: 10000;
         display: none;
         flex-direction: column;
+        box-sizing: border-box;
     `;
     // Ensure the overlay can receive focus so keyboard shortcuts work reliably.
     // (We still install a capture listener on `window` to beat ComfyUI global handlers.)
     overlay.tabIndex = -1;
     overlay.setAttribute("role", "dialog");
 
-    // Header with controls
-    const header = document.createElement("div");
+    const lifecycle = createViewerLifecycle(overlay);
+    const lifecycleUnsubs = lifecycle.unsubs || [];
+
+    const state = createDefaultViewerState();
+    state.mode = VIEWER_MODES.SINGLE;
+
+    let panzoom = null;
+    let mediaFactory = null;
+
+    function mediaTransform() {
+        try {
+            return panzoom?.mediaTransform?.() || "";
+        } catch {
+            return "";
+        }
+    }
+
+    function clampPanToBounds() {
+        try {
+            panzoom?.clampPanToBounds?.();
+        } catch {}
+    }
+
+    function applyTransform() {
+        try {
+            panzoom?.applyTransform?.();
+        } catch {}
+    }
+
+    function setZoom(next, opts) {
+        try {
+            panzoom?.setZoom?.(next, opts);
+        } catch {}
+    }
+
+    function updatePanCursor() {
+        try {
+            panzoom?.updatePanCursor?.();
+        } catch {}
+    }
+
+    function getPrimaryMedia() {
+        try {
+            return panzoom?.getPrimaryMedia?.() || null;
+        } catch {
+            return null;
+        }
+    }
+
+    function getMediaNaturalSize(mediaEl) {
+        try {
+            return panzoom?.getMediaNaturalSize?.(mediaEl) || { w: 0, h: 0 };
+        } catch {
+            return { w: 0, h: 0 };
+        }
+    }
+
+    function getViewportRect() {
+        try {
+            return panzoom?.getViewportRect?.() || null;
+        } catch {
+            return null;
+        }
+    }
+
+    function computeOneToOneZoom() {
+        try {
+            return panzoom?.computeOneToOneZoom?.() ?? null;
+        } catch {
+            return null;
+        }
+    }
+
+    function updateMediaNaturalSize() {
+        try {
+            panzoom?.updateMediaNaturalSize?.();
+        } catch {}
+    }
+
+    function attachMediaLoadHandlers(mediaEl) {
+        try {
+            panzoom?.attachMediaLoadHandlers?.(mediaEl, { clampPanToBounds, applyTransform });
+        } catch {}
+    }
+
+    function createMediaElement(asset, url) {
+        try {
+            return mediaFactory?.createMediaElement?.(asset, url) || document.createElement("div");
+        } catch {
+            return document.createElement("div");
+        }
+    }
+
+    function createCompareMediaElement(asset, url) {
+        try {
+            return mediaFactory?.createCompareMediaElement?.(asset, url) || document.createElement("div");
+        } catch {
+            return document.createElement("div");
+        }
+    }
+
+    let toolbar = null;
+
+    // Header (toolbar)
+    let header = document.createElement("div");
     header.className = "mjr-viewer-header";
     header.style.cssText = `
         display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 12px 20px;
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px 16px;
         background: rgba(0, 0, 0, 0.8);
         border-bottom: 1px solid rgba(255, 255, 255, 0.1);
         color: white;
     `;
-
-    // Left controls
-    const leftControls = document.createElement("div");
-    leftControls.style.cssText = "display: flex; gap: 12px; align-items: center;";
-
-    // Filename + badges
-    const leftMeta = document.createElement("div");
-    leftMeta.style.cssText = "display:flex; align-items:center; gap:10px; min-width:0;";
-
-    const filename = document.createElement("span");
+    let filename = document.createElement("span");
     filename.className = "mjr-viewer-filename";
     filename.style.cssText =
         "font-size: 14px; font-weight: 500; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;";
-
-    const badgesBar = document.createElement("div");
+    let badgesBar = document.createElement("div");
     badgesBar.className = "mjr-viewer-badges";
     badgesBar.style.cssText = "display:flex; gap:8px; align-items:center; flex-wrap:wrap;";
+    let filenameRight = null;
+    let badgesBarRight = null;
+    let rightMeta = null;
+    try {
+        header.appendChild(filename);
+        header.appendChild(badgesBar);
+    } catch {}
 
-    leftMeta.appendChild(filename);
-    leftMeta.appendChild(badgesBar);
+    try {
+        toolbar = createViewerToolbar({
+            VIEWER_MODES,
+            state,
+            lifecycle,
+            getCanAB: () => canAB(),
+            onClose: () => closeViewer(),
+            onMode: (mode) => {
+                try {
+                    if (mode === VIEWER_MODES.AB_COMPARE && !canAB()) return;
+                    if (mode === VIEWER_MODES.SIDE_BY_SIDE && !canSide()) return;
+                    state.mode = mode;
+                    updateUI();
+                    try {
+                        toolbar?.syncToolsUIFromState?.();
+                    } catch {}
+                } catch {}
+            },
+            onZoomIn: () => {
+                try {
+                    setZoom((Number(state.zoom) || 1) + 0.25, { clientX: state._lastPointerX, clientY: state._lastPointerY });
+                } catch {}
+            },
+            onZoomOut: () => {
+                try {
+                    setZoom((Number(state.zoom) || 1) - 0.25, { clientX: state._lastPointerX, clientY: state._lastPointerY });
+                } catch {}
+            },
+            onZoomReset: () => {
+                try {
+                    setZoom(1);
+                } catch {}
+            },
+            onZoomOneToOne: () => {
+                try {
+                    const tryApply = () => {
+                        const z = computeOneToOneZoom();
+                        if (z == null) return false;
+                        const near = Math.abs((Number(state.zoom) || 1) - z) < 0.01;
+                        setZoom(near ? 1 : z, { clientX: state._lastPointerX, clientY: state._lastPointerY });
+                        return true;
+                    };
 
-    // Mode selector
-    const modeButtons = document.createElement("div");
-    modeButtons.className = "mjr-viewer-mode-buttons";
-    modeButtons.style.cssText = "display: flex; gap: 6px;";
+                    // Sometimes processors haven't set canvas natural size yet; retry once after a frame.
+                    if (tryApply()) return;
+                    try {
+                        requestAnimationFrame(() => {
+                            try {
+                                updateMediaNaturalSize();
+                            } catch {}
+                            try {
+                                tryApply();
+                            } catch {}
+                        });
+                    } catch {}
+                } catch {}
+            },
+            onCompareModeChanged: () => {
+                try {
+                    if (state.mode === VIEWER_MODES.AB_COMPARE) {
+                        renderAsset();
+                        // Rebind the player bar to the newly created video elements (wipe/difference re-renders AB view).
+                        syncPlayerBar();
+                    }
+                } catch {}
+            },
+            onExportFrame: () => {
+                try {
+                    void exportCurrentFrame({ toClipboard: false });
+                } catch {}
+            },
+            onCopyFrame: () => {
+                try {
+                    void exportCurrentFrame({ toClipboard: true });
+                } catch {}
+            },
+            onToolsChanged: () => {
+                try {
+                    toolbar?.syncToolsUIFromState?.();
+                } catch {}
+                try {
+                    if (state.mode === VIEWER_MODES.AB_COMPARE) {
+                        const m = String(state.abCompareMode || "wipe");
+                        if (m !== "wipe" && m !== "wipeV") {
+                            abView?._mjrDiffRequest?.();
+                        }
+                    }
+                } catch {}
+                try {
+                    if (!state.probeEnabled) probeTooltip.style.display = "none";
+                } catch {}
+                try {
+                    if (!state.loupeEnabled) loupeWrap.style.display = "none";
+                } catch {}
+                try {
+                    scheduleOverlayRedraw();
+                } catch {}
+                try {
+                    scheduleApplyGrade?.();
+                } catch {}
+                try {
+                    void renderGenInfoPanel();
+                } catch {}
+            },
+        });
+        if (toolbar?.headerEl) header = toolbar.headerEl;
+        if (toolbar?.filenameEl) filename = toolbar.filenameEl;
+        if (toolbar?.badgesBarEl) badgesBar = toolbar.badgesBarEl;
+        if (toolbar?.filenameRightEl) filenameRight = toolbar.filenameRightEl;
+        if (toolbar?.badgesBarRightEl) badgesBarRight = toolbar.badgesBarRightEl;
+        if (toolbar?.rightMetaEl) rightMeta = toolbar.rightMetaEl;
+    } catch {}
 
-    const singleBtn = createModeButton("Single", VIEWER_MODES.SINGLE);
-    const abBtn = createModeButton("A/B", VIEWER_MODES.AB_COMPARE);
-    const sideBtn = createModeButton("Side", VIEWER_MODES.SIDE_BY_SIDE);
-
-    modeButtons.appendChild(singleBtn);
-    modeButtons.appendChild(abBtn);
-    modeButtons.appendChild(sideBtn);
-
-    leftControls.appendChild(leftMeta);
-    leftControls.appendChild(modeButtons);
-
-    // Right controls
-    const rightControls = document.createElement("div");
-    rightControls.style.cssText = "display: flex; gap: 12px; align-items: center;";
-
-    // Zoom controls
-    const zoomOut = createIconButton("−", "Zoom Out");
-    const zoomReset = createIconButton("100%", "Reset Zoom");
-    const zoomIn = createIconButton("+", "Zoom In");
-
-    // Zoom HUD (shows current zoom percentage)
-    const zoomHUD = document.createElement("div");
-    zoomHUD.className = "mjr-viewer-zoom-hud";
-    zoomHUD.style.cssText = `
-        position: absolute;
-        top: 20px;
-        right: 20px;
-        padding: 6px 12px;
-        background: rgba(0, 0, 0, 0.7);
-        color: white;
-        border-radius: 4px;
-        font-size: 14px;
-        pointer-events: none;
-        opacity: 0;
-        transition: opacity 0.3s ease;
-        z-index: 1000;
+    // Content area (stage + optional right sidebar)
+    const contentRow = document.createElement("div");
+    contentRow.className = "mjr-viewer-content-row";
+    contentRow.style.cssText = `
+        flex: 1;
+        display: flex;
+        min-height: 0;
+        overflow: hidden;
     `;
 
-    // Close button
-    const closeBtn = createIconButton("✕", "Close (Esc)");
-    closeBtn.style.fontSize = "20px";
-
-    rightControls.appendChild(zoomOut);
-    rightControls.appendChild(zoomReset);
-    rightControls.appendChild(zoomIn);
-    rightControls.appendChild(closeBtn);
-
-    // Add zoom HUD to header
-    header.appendChild(zoomHUD);
-
-    header.appendChild(leftControls);
-    header.appendChild(rightControls);
-
-    // Content area
     const content = document.createElement("div");
     content.className = "mjr-viewer-content";
     content.style.cssText = `
         flex: 1;
+        min-width: 0;
         position: relative;
         overflow: hidden;
         display: flex;
@@ -182,6 +359,119 @@ export function createViewer() {
     content.appendChild(abView);
     content.appendChild(sideView);
 
+    // Overlay layer (grid + probe + loupe). Rendered above media, pointer-events disabled to avoid
+    // interfering with pan/zoom gestures.
+    const overlayLayer = document.createElement("div");
+    overlayLayer.className = "mjr-viewer-overlay-layer";
+    overlayLayer.style.cssText = `
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        z-index: 50;
+    `;
+
+    const gridCanvas = document.createElement("canvas");
+    gridCanvas.className = "mjr-viewer-grid-canvas";
+    gridCanvas.style.cssText = `
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: none;
+    `;
+
+    const probeTooltip = document.createElement("div");
+    probeTooltip.className = "mjr-viewer-probe";
+    probeTooltip.style.cssText = `
+        position: absolute;
+        display: none;
+        padding: 6px 8px;
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.8);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        color: rgba(255, 255, 255, 0.92);
+        font-size: 11px;
+        line-height: 1.2;
+        white-space: pre;
+        max-width: 280px;
+        transform: translate3d(0,0,0);
+    `;
+
+    const loupeWrap = document.createElement("div");
+    loupeWrap.className = "mjr-viewer-loupe";
+    loupeWrap.style.cssText = `
+        position: absolute;
+        display: none;
+        width: 120px;
+        height: 120px;
+        border-radius: 8px;
+        overflow: hidden;
+        border: 1px solid rgba(255,255,255,0.16);
+        box-shadow: 0 8px 18px rgba(0,0,0,0.45);
+        background: rgba(0,0,0,0.65);
+        transform: translate3d(0,0,0);
+    `;
+
+    const loupeCanvas = document.createElement("canvas");
+    loupeCanvas.width = 120;
+    loupeCanvas.height = 120;
+    loupeCanvas.style.cssText = "width:100%; height:100%; display:block; image-rendering: pixelated;";
+    loupeWrap.appendChild(loupeCanvas);
+
+    overlayLayer.appendChild(gridCanvas);
+    overlayLayer.appendChild(probeTooltip);
+    overlayLayer.appendChild(loupeWrap);
+    content.appendChild(overlayLayer);
+
+    // Sidebar: generation info (prompt/model/etc). Must never throw.
+    // This panel spans the full overlay height and we reserve space for it by adding
+    // `padding-right` to the overlay while open (true side-by-side layout).
+    const genInfoOverlay = document.createElement("div");
+    genInfoOverlay.className = "mjr-viewer-geninfo";
+    genInfoOverlay.style.cssText = `
+        position: absolute;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: min(420px, 48vw);
+        display: none;
+        flex-direction: column;
+        overflow: hidden;
+        background: rgba(0, 0, 0, 0.88);
+        border-left: 1px solid rgba(255,255,255,0.12);
+        pointer-events: auto;
+        backdrop-filter: blur(10px);
+        z-index: 10001;
+    `;
+    const genInfoHeader = document.createElement("div");
+    genInfoHeader.style.cssText = `
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(255,255,255,0.10);
+        color: rgba(255,255,255,0.92);
+    `;
+    const genInfoTitle = document.createElement("div");
+    genInfoTitle.textContent = "Generation Info";
+    genInfoTitle.style.cssText = "font-size: 13px; font-weight: 600;";
+    genInfoHeader.appendChild(genInfoTitle);
+    const genInfoBody = document.createElement("div");
+    genInfoBody.style.cssText = `
+        flex: 1;
+        overflow: auto;
+        padding: 12px;
+        color: rgba(255,255,255,0.92);
+    `;
+    genInfoOverlay.appendChild(genInfoHeader);
+    genInfoOverlay.appendChild(genInfoBody);
+
+    // Mount the row (stage)
+    try {
+        contentRow.appendChild(content);
+    } catch {}
+
     // Footer with navigation
     const footer = document.createElement("div");
     footer.className = "mjr-viewer-footer";
@@ -204,443 +494,635 @@ export function createViewer() {
     const nextBtn = createIconButton("›", "Next (→)");
     nextBtn.style.fontSize = "24px";
 
-    footer.appendChild(prevBtn);
-    footer.appendChild(indexInfo);
-    footer.appendChild(nextBtn);
+    const navBar = document.createElement("div");
+    navBar.className = "mjr-viewer-nav";
+    navBar.style.cssText = "display:flex; align-items:center; gap:20px;";
+
+    navBar.appendChild(prevBtn);
+    navBar.appendChild(indexInfo);
+    navBar.appendChild(nextBtn);
+
+    const playerBarHost = document.createElement("div");
+    playerBarHost.className = "mjr-viewer-playerbar";
+    playerBarHost.style.cssText = "display:none; width: 100%;";
+
+    footer.appendChild(navBar);
+    footer.appendChild(playerBarHost);
 
     overlay.appendChild(header);
-    overlay.appendChild(content);
+    overlay.appendChild(contentRow);
     overlay.appendChild(footer);
+    overlay.appendChild(genInfoOverlay);
 
-    // Viewer state
-    const state = {
-        mode: VIEWER_MODES.SINGLE,
-        assets: [],
-        currentIndex: 0,
-        zoom: 1,
-        panX: 0,
-        panY: 0,
-        // Direct transform (no animation targets)
-        _lastPointerX: null,
-        _lastPointerY: null,
-        _mediaW: 0,
-        _mediaH: 0,
-        compareAsset: null,
-        targetZoom: 1
-    };
-
-    // Metadata hydration cache for viewer-visible assets (so rating/tags show even if the grid
-    // passed a lightweight asset object).
-    const _metaCache = new Map(); // id -> { at:number, data:any }
-    const META_TTL_MS = APP_CONFIG.VIEWER_META_TTL_MS ?? 30_000;
-    const META_MAX_ENTRIES = APP_CONFIG.VIEWER_META_MAX_ENTRIES ?? 500;
-
-    // Track hydration requests to prevent race conditions
-    let hydrationRequestId = 0;
-
-    const cleanupMetaCache = () => {
-        if (_metaCache.size <= META_MAX_ENTRIES) return;
-        const now = Date.now();
-
-        // Remove expired entries first.
-        try {
-            for (const [key, value] of _metaCache.entries()) {
-                if (!value) continue;
-                if (now - (value.at || 0) > META_TTL_MS) {
-                    _metaCache.delete(key);
-                }
-            }
-        } catch {}
-
-        if (_metaCache.size <= META_MAX_ENTRIES) return;
-        // Still too large: remove oldest by timestamp.
-        try {
-            const sorted = Array.from(_metaCache.entries()).sort((a, b) => (a?.[1]?.at || 0) - (b?.[1]?.at || 0));
-            const excess = _metaCache.size - META_MAX_ENTRIES;
-            for (let i = 0; i < excess; i++) {
-                const key = sorted[i]?.[0];
-                if (key != null) _metaCache.delete(key);
-            }
-        } catch {}
-    };
-
-    const applyMetadata = (asset, meta) => {
-        if (!asset || !meta || typeof meta !== "object") return;
-        try {
-            if (meta.rating !== undefined) asset.rating = meta.rating;
-        } catch {}
-        try {
-            if (meta.tags !== undefined) asset.tags = meta.tags;
-        } catch {}
-    };
-
-    const hydrateAssetMetadata = async (asset) => {
-        const id = asset?.id;
-        if (id == null) return;
-        const key = String(id);
-        const now = Date.now();
-        const cached = _metaCache.get(key);
-        if (cached && now - (cached.at || 0) < META_TTL_MS) {
-            applyMetadata(asset, cached.data);
-            return;
-        }
-        try {
-            const res = await getAssetMetadata(id);
-            if (res?.ok && res.data) {
-                _metaCache.set(key, { at: now, data: res.data });
-                cleanupMetaCache();
-                applyMetadata(asset, res.data);
-            }
-        } catch {}
-    };
-
-    const hydrateAssetsMetadataBatch = async (assets) => {
-        const list = Array.isArray(assets) ? assets : [];
-        const now = Date.now();
-        const toFetch = [];
-        for (const asset of list) {
-            const id = asset?.id;
-            if (id == null) continue;
-            const key = String(id);
-            const cached = _metaCache.get(key);
-            if (cached && now - (cached.at || 0) < META_TTL_MS) {
-                applyMetadata(asset, cached.data);
-                continue;
-            }
-            toFetch.push(id);
-        }
-        if (!toFetch.length) return;
-
-        try {
-            const res = await getAssetsBatch(toFetch);
-            const items = Array.isArray(res?.data) ? res.data : [];
-            for (const meta of items) {
-                const id = meta?.id;
-                if (id == null) continue;
-                const key = String(id);
-                _metaCache.set(key, { at: now, data: meta });
-            }
-            cleanupMetaCache();
-            // Apply to local asset objects
-            for (const asset of list) {
-                const id = asset?.id;
-                if (id == null) continue;
-                const cached = _metaCache.get(String(id));
-                if (cached && cached.data) applyMetadata(asset, cached.data);
-            }
-        } catch {}
-    };
+    const metadataHydrator = createViewerMetadataHydrator({
+        state,
+        VIEWER_MODES,
+        APP_CONFIG,
+        getAssetMetadata,
+        getAssetsBatch,
+    });
+    const _viewerInfoCache = new Map();
 
     const hydrateVisibleMetadata = async () => {
-        // Increment request ID to invalidate previous requests
-        const currentRequestId = ++hydrationRequestId;
-
         try {
-            if (state.mode === VIEWER_MODES.SINGLE) {
-                const current = state.assets[state.currentIndex];
-                if (current) {
-                    await hydrateAssetsMetadataBatch([current]);
-                    // Check if this request is still valid before rendering
-                    if (currentRequestId !== hydrationRequestId) return;
-                }
-                renderBadges();
-                return;
-            }
-            const visible = Array.isArray(state.assets) ? state.assets.slice(0, 4) : [];
-            const batch = visible.slice();
-            if (state.compareAsset) batch.push(state.compareAsset);
-            await hydrateAssetsMetadataBatch(batch);
-
-            // Check if this request is still valid before rendering
-            if (currentRequestId === hydrationRequestId) {
-                renderBadges();
-            }
+            await metadataHydrator?.hydrateVisibleMetadata?.();
         } catch {}
     };
 
-    const updateMediaNaturalSize = () => {
+    try {
+        panzoom = createViewerPanZoom({
+            overlay,
+            content,
+            singleView,
+            abView,
+            sideView,
+            state,
+            VIEWER_MODES,
+            scheduleOverlayRedraw,
+            lifecycle,
+        });
+    } catch {
+        panzoom = null;
+    }
+
+    const clearCanvas = (ctx, w, h) => {
         try {
-            let root = singleView;
-            if (state.mode === VIEWER_MODES.AB_COMPARE) root = abView;
-            else if (state.mode === VIEWER_MODES.SIDE_BY_SIDE) root = sideView;
-            const el = root?.querySelector?.(".mjr-viewer-media");
-            if (!el) return;
-            if (el.tagName === "IMG") {
-                const w = Number(el.naturalWidth) || 0;
-                const h = Number(el.naturalHeight) || 0;
-                if (w > 0 && h > 0) {
-                    state._mediaW = w;
-                    state._mediaH = h;
-                }
-                return;
-            }
-            if (el.tagName === "VIDEO") {
-                const w = Number(el.videoWidth) || 0;
-                const h = Number(el.videoHeight) || 0;
-                if (w > 0 && h > 0) {
-                    state._mediaW = w;
-                    state._mediaH = h;
-                }
-            }
+            ctx.clearRect(0, 0, w, h);
         } catch {}
     };
 
-    const attachMediaLoadHandlers = (mediaEl) => {
-        if (!mediaEl || mediaEl._mjrMediaSizeBound) return;
-        mediaEl._mjrMediaSizeBound = true;
-        const sync = () => {
-            updateMediaNaturalSize();
-            clampPanToBounds();
-            applyTransform();
-        };
+    // Overlay drawing (grid + probe + loupe)
+    let _overlayRAF = null;
+    function scheduleOverlayRedraw() {
         try {
-            if (mediaEl.tagName === "IMG") {
-                mediaEl.addEventListener("load", () => requestAnimationFrame(sync), { once: true });
-            } else if (mediaEl.tagName === "VIDEO") {
-                mediaEl.addEventListener("loadedmetadata", () => requestAnimationFrame(sync), { once: true });
+            if (overlay.style.display === "none") return;
+            if (_overlayRAF != null) return;
+            _overlayRAF = requestAnimationFrame(() => {
+                _overlayRAF = null;
+                try {
+                    redrawOverlays();
+                } catch {}
+            });
+        } catch {}
+    }
+
+    const getOverlayMedia = () => {
+        try {
+            if (state?.mode === VIEWER_MODES.SINGLE) {
+                return singleView?.querySelector?.(".mjr-viewer-media") || null;
+            }
+            if (state?.mode === VIEWER_MODES.AB_COMPARE) {
+                return abView?.querySelector?.(".mjr-viewer-media") || null;
+            }
+            if (state?.mode === VIEWER_MODES.SIDE_BY_SIDE) {
+                return sideView?.querySelector?.(".mjr-viewer-media") || null;
             }
         } catch {}
+        return null;
     };
 
-    const clampPanToBounds = () => {
+    const grid = createViewerGrid({
+        gridCanvas,
+        content,
+        state,
+        VIEWER_MODES,
+        getPrimaryMedia: getOverlayMedia,
+        getViewportRect,
+        clearCanvas,
+    });
+
+    const redrawOverlays = () => {
+        const hasPanHint = (() => {
+            try {
+                const at = Number(state?._panHintAt) || 0;
+                return at > 0 && Date.now() - at < 900;
+            } catch {
+                return false;
+            }
+        })();
         try {
-            // FIX: Verify overlay is visible before calculating bounds
-            if (overlay.style.display === 'none') return;
+            const showHud = Boolean(state?.hudEnabled);
+            const showScopes = String(state?.scopesMode || "off") !== "off";
+            const showMask = Boolean(state?.overlayMaskEnabled);
+            gridCanvas.style.display =
+                state.gridMode === 0 && !showMask && !hasPanHint && !showHud && !showScopes ? "none" : "";
+        } catch {}
 
-            const MIN_ZOOM = 0.1;
-            const MAX_ZOOM = 16;
-            const zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Number(state.zoom) || 1));
-            if (!(zoom > 1.001)) {
-                state.panX = 0;
-                state.panY = 0;
-                return;
-            }
+        const size = grid.ensureCanvasSize();
+        if (!(size.w > 0 && size.h > 0)) return;
+        const wantGridOrMask = (Number(state.gridMode) || 0) !== 0 || Boolean(state?.overlayMaskEnabled);
+        if (wantGridOrMask) {
+            grid.redrawGrid(size);
+        } else {
+            try {
+                const ctx = gridCanvas.getContext("2d");
+                if (ctx) clearCanvas(ctx, size.w, size.h);
+            } catch {}
+        }
 
-            const current = state.assets[state.currentIndex];
-            let aw = Number(current?.width) || 0;
-            let ah = Number(current?.height) || 0;
-            if (!(aw > 0 && ah > 0)) {
-                updateMediaNaturalSize();
-                aw = Number(state._mediaW) || 0;
-                ah = Number(state._mediaH) || 0;
-            }
-            if (!(aw > 0 && ah > 0)) return;
-            const aspect = aw / ah;
-            if (!Number.isFinite(aspect) || aspect <= 0) return;
-
-            const getViewportSize = () => {
-                const fallbackW = Math.max(Number(content?.clientWidth) || 0, Number(overlay?.clientWidth) || 0);
-                const fallbackH = Math.max(Number(content?.clientHeight) || 0, Number(overlay?.clientHeight) || 0);
-                const clampToFallback = (w, h) => ({
-                    w: Math.max(Number(w) || 0, fallbackW),
-                    h: Math.max(Number(h) || 0, fallbackH),
-                });
-                if (state.mode === VIEWER_MODES.SINGLE) {
-                    return clampToFallback(singleView.clientWidth, singleView.clientHeight);
+        if (hasPanHint) {
+            try {
+                const ctx = gridCanvas.getContext("2d");
+                if (ctx) {
+                    const rect = content?.getBoundingClientRect?.();
+                    const x0 = Number(state?._panHintX);
+                    const y0 = Number(state?._panHintY);
+                    const x = rect && Number.isFinite(x0) ? x0 - rect.left : size.w / 2;
+                    const y = rect && Number.isFinite(y0) ? y0 - rect.top : size.h * 0.78;
+                    const pad = 10;
+                    const tx = Math.max(pad, Math.min(size.w - pad, x));
+                    const ty = Math.max(pad, Math.min(size.h - pad, y));
+                    ctx.save();
+                    ctx.font = "12px var(--comfy-font, ui-sans-serif, system-ui)";
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "middle";
+                    const msg = "Zoom in to pan";
+                    const metrics = ctx.measureText(msg);
+                    const w = Math.min(size.w - 2 * pad, Math.max(140, metrics.width + 26));
+                    const h = 26;
+                    ctx.fillStyle = "rgba(0,0,0,0.65)";
+                    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    const rx = tx - w / 2;
+                    const ry = ty - h / 2;
+                    const r = 10;
+                    ctx.moveTo(rx + r, ry);
+                    ctx.arcTo(rx + w, ry, rx + w, ry + h, r);
+                    ctx.arcTo(rx + w, ry + h, rx, ry + h, r);
+                    ctx.arcTo(rx, ry + h, rx, ry, r);
+                    ctx.arcTo(rx, ry, rx + w, ry, r);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.stroke();
+                    ctx.fillStyle = "rgba(255,255,255,0.92)";
+                    ctx.fillText(msg, tx, ty);
+                    ctx.restore();
                 }
-                if (state.mode === VIEWER_MODES.AB_COMPARE) {
-                    return clampToFallback(abView.clientWidth, abView.clientHeight);
+            } catch {}
+        }
+
+        // Minimal pro HUD (opt-in): zoom + resolution + kind.
+        try {
+            if (state?.hudEnabled) {
+                const ctx = gridCanvas.getContext("2d");
+                if (ctx) {
+                    const current = state?.assets?.[state?.currentIndex] || null;
+                    const kind = String(current?.kind || "unknown");
+                    const w = Number(current?.width) || Number(state?._mediaW) || 0;
+                    const h = Number(current?.height) || Number(state?._mediaH) || 0;
+                    const z = Math.round((Number(state?.zoom) || 1) * 100);
+                    const line1 = `${z}%  ${w > 0 && h > 0 ? `${w}x${h}` : ""}`.trim();
+                    const line2 = `${kind}${current?.filename ? `  ${String(current.filename)}` : ""}`.trim();
+
+                    ctx.save();
+                    ctx.font = "12px var(--comfy-font, ui-sans-serif, system-ui)";
+                    ctx.textAlign = "left";
+                    ctx.textBaseline = "top";
+                    const pad = 10;
+                    const boxPad = 8;
+                    const w1 = ctx.measureText(line1).width;
+                    const w2 = ctx.measureText(line2).width;
+                    const bw = Math.min(size.w - 2 * pad, Math.max(180, Math.max(w1, w2) + boxPad * 2));
+                    const bh = 44;
+                    const x = pad;
+                    const y = pad;
+                    ctx.fillStyle = "rgba(0,0,0,0.55)";
+                    ctx.strokeStyle = "rgba(255,255,255,0.14)";
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    const r = 10;
+                    ctx.moveTo(x + r, y);
+                    ctx.arcTo(x + bw, y, x + bw, y + bh, r);
+                    ctx.arcTo(x + bw, y + bh, x, y + bh, r);
+                    ctx.arcTo(x, y + bh, x, y, r);
+                    ctx.arcTo(x, y, x + bw, y, r);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.stroke();
+                    ctx.fillStyle = "rgba(255,255,255,0.92)";
+                    ctx.fillText(line1, x + boxPad, y + 7);
+                    ctx.fillStyle = "rgba(255,255,255,0.72)";
+                    ctx.fillText(line2, x + boxPad, y + 24);
+                    ctx.restore();
                 }
-                const children = Array.from(sideView.children || []).filter((el) => el && el.nodeType === 1);
-                if (children.length) {
-                    let minW = Infinity;
-                    let minH = Infinity;
-                    for (const child of children) {
-                        const w = Number(child.clientWidth) || 0;
-                        const h = Number(child.clientHeight) || 0;
-                        if (w > 0) minW = Math.min(minW, w);
-                        if (h > 0) minH = Math.min(minH, h);
+            }
+        } catch {}
+
+        // Scopes (optional): RGB histogram + luma waveform (downscaled, best-effort).
+        try {
+            const scopesMode = String(state?.scopesMode || "off");
+            if (scopesMode !== "off") {
+                const ctx = gridCanvas.getContext("2d");
+                if (ctx) {
+                    let root = singleView;
+                    if (state?.mode === VIEWER_MODES.AB_COMPARE) root = abView;
+                    else if (state?.mode === VIEWER_MODES.SIDE_BY_SIDE) root = sideView;
+                    const any = root?.querySelector?.("canvas.mjr-viewer-media") || overlay?.querySelector?.("canvas.mjr-viewer-media");
+                    if (any && any instanceof HTMLCanvasElement) {
+                        drawScopesLight(ctx, { w: size.w, h: size.h }, any, { mode: scopesMode, channel: state?.channel });
                     }
-                    if (Number.isFinite(minW) && Number.isFinite(minH)) {
-                        return clampToFallback(minW, minH);
-                    }
                 }
-                return clampToFallback(sideView.clientWidth, sideView.clientHeight);
+            }
+        } catch {}
+
+        if (state.mode !== VIEWER_MODES.SINGLE) {
+            try {
+                probeTooltip.style.display = "none";
+            } catch {}
+            try {
+                loupeWrap.style.display = "none";
+            } catch {}
+        }
+    };
+
+    // ----------------------------------------------------------------------------
+    // Generation Info side panel (prompt/model/etc)
+    // ----------------------------------------------------------------------------
+
+    const stopGenInfoFetch = () => {
+        try {
+            state._genInfoAbort?.abort?.();
+        } catch {}
+        state._genInfoAbort = null;
+        try {
+            state._genInfoReqId = (Number(state._genInfoReqId) || 0) + 1;
+        } catch {}
+    };
+
+    const ensureGenInfoAsset = async (asset, { signal } = {}) => {
+        try {
+            return await ensureViewerMetadataAsset(asset, {
+                getAssetMetadata,
+                getFileMetadata,
+                getFileMetadataScoped,
+                metadataCache: metadataHydrator,
+                signal,
+            });
+        } catch {
+            return asset;
+        }
+    };
+
+    const shouldShowGenInfoLoading = (asset) => {
+        try {
+            if (!asset || typeof asset !== "object") return false;
+            if (asset?.geninfo || asset?.prompt || asset?.workflow || asset?.metadata) return false;
+            const mime = String(asset?.mime || asset?.mimetype || asset?.type || "").toLowerCase();
+            if (mime.startsWith("video/")) return true;
+            const p = String(asset?.filepath || asset?.path || asset?.filename || asset?.name || "").toLowerCase();
+            const ext = p.split(".").pop() || "";
+            if (["mp4", "webm", "mov", "mkv", "avi", "m4v", "gif"].includes(ext)) return true;
+            // If we have nothing at all, show a loading hint while hydration runs.
+            return true;
+        } catch {
+            return false;
+        }
+    };
+
+    const renderGenInfoPanel = async () => {
+        try {
+            const open = Boolean(state?.genInfoOpen);
+            genInfoOverlay.style.display = open ? "flex" : "none";
+            // Reserve space so the viewer shrinks and the panel sits side-by-side (not overlayed).
+            try {
+                overlay.style.paddingRight = open ? "min(420px, 48vw)" : "0px";
+            } catch {}
+            if (!open) {
+                stopGenInfoFetch();
+                try {
+                    genInfoBody.innerHTML = "";
+                } catch {}
+                return;
+            }
+        } catch {
+            return;
+        }
+
+        // Abort any previous in-flight work, then mint a fresh request id for this render.
+        // (Ordering matters: `stopGenInfoFetch()` bumps `_genInfoReqId`.)
+        stopGenInfoFetch();
+        const reqId = (Number(state?._genInfoReqId) || 0) + 1;
+        try {
+            state._genInfoReqId = reqId;
+        } catch {}
+        const ac = new AbortController();
+        state._genInfoAbort = ac;
+
+        const renderNow = (payload) => {
+            try {
+                genInfoBody.innerHTML = "";
+            } catch {}
+
+            const onRetry = () => {
+                try {
+                    if (!state?.genInfoOpen) state.genInfoOpen = true;
+                } catch {}
+                try {
+                    void renderGenInfoPanel();
+                } catch {}
             };
 
-            const { w: vw, h: vh } = getViewportSize();
-            if (!(vw > 0 && vh > 0)) {
-                // FIX: If dimensions are zero (e.g., just after display:block but before paint),
-                // defer the calculation to the next animation frame
-                if (overlay.style.display !== 'none') {
-                    requestAnimationFrame(clampPanToBounds);
+            const addBlock = (title, assetObj) => {
+                try {
+                    try {
+                        genInfoBody.appendChild(
+                            buildViewerMetadataBlocks({
+                                title,
+                                asset: assetObj,
+                                ui: { loading: Boolean(payload?.loading), onRetry },
+                            })
+                        );
+                        return;
+                    } catch {}
+                    const block = document.createElement("div");
+                    block.style.cssText = "display:flex; flex-direction:column; gap:10px; margin-bottom: 14px;";
+                    const h = document.createElement("div");
+                    h.textContent = title || "Asset";
+                    h.style.cssText =
+                        "font-size: 12px; font-weight: 600; letter-spacing: 0.02em; color: rgba(255,255,255,0.86);";
+                    block.appendChild(h);
+
+                    const section = (() => {
+                        try {
+                            return createGenerationSection(assetObj);
+                        } catch {
+                            return null;
+                        }
+                    })();
+                    if (section) {
+                        block.appendChild(section);
+                    } else {
+                        const empty = document.createElement("div");
+                        empty.style.cssText =
+                            "padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.72);";
+                        empty.textContent = "No generation data found for this file.";
+                        block.appendChild(empty);
+                    }
+
+                    try {
+                        const raw = assetObj?.metadata_raw;
+                        if (raw != null) {
+                            const details = document.createElement("details");
+                            details.style.cssText =
+                                "border: 1px solid rgba(255,255,255,0.10); border-radius: 10px; background: rgba(255,255,255,0.04); overflow: hidden;";
+                            const summary = document.createElement("summary");
+                            summary.textContent = "Raw metadata";
+                            summary.style.cssText =
+                                "cursor: pointer; padding: 10px 12px; color: rgba(255,255,255,0.78); user-select: none;";
+                            const pre = document.createElement("pre");
+                            pre.style.cssText =
+                                "margin:0; padding: 10px 12px; max-height: 280px; overflow:auto; font-size: 11px; line-height: 1.35; color: rgba(255,255,255,0.86);";
+                            let txt = "";
+                            try {
+                                if (typeof raw === "string") txt = raw;
+                                else txt = JSON.stringify(raw, null, 2);
+                            } catch {
+                                txt = String(raw);
+                            }
+                            if (txt.length > 40_000) txt = `${txt.slice(0, 40_000)}\n…(truncated)…`;
+                            pre.textContent = txt;
+                            details.appendChild(summary);
+                            details.appendChild(pre);
+                            block.appendChild(details);
+                        }
+                    } catch {}
+
+                    genInfoBody.appendChild(block);
+                } catch {}
+            };
+
+            try {
+                if (payload?.mode === VIEWER_MODES.AB_COMPARE && payload?.a && payload?.b) {
+                    addBlock(`A: ${payload?.aLabel || "Current"}`, payload.a);
+                    addBlock(`B: ${payload?.bLabel || "Compare"}`, payload.b);
+                    return;
                 }
+            } catch {}
+            try {
+                addBlock(payload?.title || "Current", payload?.asset || null);
+            } catch {}
+        };
+
+        // Initial pass (cached/light).
+        try {
+            const current = state?.assets?.[state?.currentIndex] || null;
+            if (!current) {
+                renderNow({ title: "Current", asset: null });
+                return;
+            }
+            if (state?.mode === VIEWER_MODES.AB_COMPARE) {
+                const other =
+                    state?.compareAsset ||
+                    (Array.isArray(state.assets) && state.assets.length === 2
+                        ? state.assets[1 - (state.currentIndex || 0)]
+                        : null) ||
+                    null;
+                const a0 = metadataHydrator?.getCached?.(current?.id)?.data || current;
+                const b0 = other ? metadataHydrator?.getCached?.(other?.id)?.data || other : null;
+                renderNow({
+                    mode: VIEWER_MODES.AB_COMPARE,
+                    a: a0,
+                    b: b0,
+                    aLabel: current?.filename || current?.name || "",
+                    bLabel: other?.filename || other?.name || "",
+                    loading: shouldShowGenInfoLoading(a0) || shouldShowGenInfoLoading(b0),
+                });
+            } else {
+                const a0 = metadataHydrator?.getCached?.(current?.id)?.data || current;
+                renderNow({
+                    title: current?.filename || current?.name || "Current",
+                    asset: a0,
+                    loading: shouldShowGenInfoLoading(a0),
+                });
+            }
+        } catch {}
+
+        // Fetch full metadata if needed, then re-render.
+        try {
+            const current = state?.assets?.[state?.currentIndex] || null;
+            if (!current) return;
+            if (state._genInfoReqId !== reqId) return;
+
+            if (state?.mode === VIEWER_MODES.AB_COMPARE) {
+                const other =
+                    state?.compareAsset ||
+                    (Array.isArray(state.assets) && state.assets.length === 2
+                        ? state.assets[1 - (state.currentIndex || 0)]
+                        : null) ||
+                    null;
+                const aFull = await ensureGenInfoAsset(current, { signal: ac.signal });
+                const bFull = other ? await ensureGenInfoAsset(other, { signal: ac.signal }) : null;
+                if (state._genInfoReqId !== reqId) return;
+                renderNow({
+                    mode: VIEWER_MODES.AB_COMPARE,
+                    a: aFull,
+                    b: bFull,
+                    aLabel: current?.filename || current?.name || "",
+                    bLabel: other?.filename || other?.name || "",
+                    loading: false,
+                });
                 return;
             }
 
-            // Compute the "contain" base size inside the viewport.
-            const viewportAspect = vw / vh;
-            let baseW = vw;
-            let baseH = vh;
-            if (aspect >= viewportAspect) {
-                baseW = vw;
-                baseH = vw / aspect;
-            } else {
-                baseH = vh;
-                baseW = vh * aspect;
-            }
-
-            const scaledW = baseW * zoom;
-            const scaledH = baseH * zoom;
-
-            const overflowVH = Math.max(0, scaledW - vw);
-            const overflowVV = Math.max(0, scaledH - vh);
-            const overflowImageW = Math.max(0, scaledW - baseW);
-            const overflowImageH = Math.max(0, scaledH - baseH);
-            const overscrollW = Math.max(0, baseW - vw);
-            const overscrollH = Math.max(0, baseH - vh);
-            const maxPanX =
-                Math.max(overflowVH, overflowImageW, overscrollW) / 2 * zoom;
-            const maxPanY =
-                Math.max(overflowVV, overflowImageH, overscrollH) / 2 * zoom;
-
-            // Clamp pan values directly (no animation targets)
-            state.panX = Math.max(-maxPanX, Math.min(maxPanX, state.panX));
-            state.panY = Math.max(-maxPanY, Math.min(maxPanY, state.panY));
+            const full = await ensureGenInfoAsset(current, { signal: ac.signal });
+            if (state._genInfoReqId !== reqId) return;
+            renderNow({
+                title: current?.filename || current?.name || "Current",
+                asset: full,
+                loading: false,
+            });
         } catch {}
     };
 
-    const mediaTransform = () => {
-        const zoom = Math.max(0.1, Math.min(16, Number(state.zoom) || 1));
-        const x = Number(state.panX) || 0;
-        const y = Number(state.panY) || 0;
-        // Use translate3d for GPU acceleration and scale together for better performance
-        // Use translate-before-scale but normalize by zoom so panning is in screen pixels
-        // (otherwise translate gets scaled and clamping becomes incorrect at high zoom).
-        const nx = x / zoom;
-        const ny = y / zoom;
-        return `translate3d(${nx}px, ${ny}px, 0) scale(${zoom})`;
-    };
+    // No close button in panel (toggle via toolbar / shortcut).
 
-    const setZoom = (next, { clientX = null, clientY = null } = {}) => {
-        // Clamp zoom to reasonable limits (0.1x to 16x)
-        const MIN_ZOOM = 0.1;
-        const MAX_ZOOM = 16;
-        const prevZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Number(state.zoom) || 1));
-        const clamped = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Number(next) || 1));
-        const nextZoom = Math.round(clamped * 100) / 100;
+    // ----------------------------------------------------------------------------
+    // Export frame (PNG download + clipboard copy)
+    // ----------------------------------------------------------------------------
 
-        // Calculate new pan values (direct, no animation)
-        let newPanX = state.panX;
-        let newPanY = state.panY;
-
-        // Zoom towards pointer when available (keep the point under cursor stable).
-        if (clientX != null && clientY != null && Number.isFinite(prevZoom) && prevZoom > 0 && nextZoom !== prevZoom) {
-            try {
-                const rect = content.getBoundingClientRect();
-                const cx = rect.left + rect.width / 2;
-                const cy = rect.top + rect.height / 2;
-                const uX = (Number(clientX) || 0) - cx;
-                const uY = (Number(clientY) || 0) - cy;
-                const r = nextZoom / prevZoom;
-                newPanX = Math.round(((Number(state.panX) || 0) * r + (1 - r) * uX) * 10) / 10;
-                newPanY = Math.round(((Number(state.panY) || 0) * r + (1 - r) * uY) * 10) / 10;
-            } catch {}
-        } else if (nextZoom !== prevZoom) {
-            // When zooming without a pointer, preserve relative pan.
-            const r = nextZoom / prevZoom;
-            newPanX = Math.round(((Number(state.panX) || 0) * r) * 10) / 10;
-            newPanY = Math.round(((Number(state.panY) || 0) * r) * 10) / 10;
-        }
-
-        state.zoom = nextZoom;
-        state.panX = newPanX;
-        state.panY = newPanY;
-
-        if (Math.abs(state.zoom - 1) < 0.001) {
-            state.zoom = 1;
-            state.panX = 0;
-            state.panY = 0;
-        }
-
-        state.targetZoom = state.zoom;
-
-        // Apply transform directly (no animation)
-        applyTransform();
-        updatePanCursor();
-        showZoomHUD();
-    };
-
-    const applyTransform = () => {
+    const _getExportSourceCanvas = () => {
         try {
-            clampPanToBounds();
-            const t = mediaTransform();
-            for (const el of overlay.querySelectorAll(".mjr-viewer-media")) {
-                try {
-                    el.style.transform = t;
-                } catch {}
+            if (state?.mode === VIEWER_MODES.SINGLE) {
+                const c = singleView?.querySelector?.("canvas.mjr-viewer-media");
+                return c instanceof HTMLCanvasElement ? c : null;
             }
-        } catch {}
-    };
-
-    // Zoom HUD functionality
-    let zoomHUDElement = null;
-    let zoomHUDTimeout = null;
-
-    // Find the zoom HUD element
-    zoomHUDElement = overlay.querySelector('.mjr-viewer-zoom-hud');
-
-    const showZoomHUD = () => {
-        if (!zoomHUDElement) return;
-
-        // Clear any pending hide timeout
-        if (zoomHUDTimeout) {
-            clearTimeout(zoomHUDTimeout);
-            zoomHUDTimeout = null;
+            if (state?.mode === VIEWER_MODES.AB_COMPARE) {
+                const m = String(state?.abCompareMode || "wipe");
+                if (m === "wipe" || m === "wipeV") {
+                    const a = abView?.querySelector?.('canvas.mjr-viewer-media[data-mjr-compare-role="A"]');
+                    const b = abView?.querySelector?.('canvas.mjr-viewer-media[data-mjr-compare-role="B"]');
+                    if (a instanceof HTMLCanvasElement && b instanceof HTMLCanvasElement) return { a, b, mode: m };
+                }
+                const d = abView?.querySelector?.('canvas.mjr-viewer-media[data-mjr-compare-role="D"]');
+                if (d instanceof HTMLCanvasElement) return d;
+                const any = abView?.querySelector?.("canvas.mjr-viewer-media");
+                return any instanceof HTMLCanvasElement ? any : null;
+            }
+            if (state?.mode === VIEWER_MODES.SIDE_BY_SIDE) {
+                const any = sideView?.querySelector?.("canvas.mjr-viewer-media");
+                return any instanceof HTMLCanvasElement ? any : null;
+            }
+            return null;
+        } catch {
+            return null;
         }
-
-        // Calculate zoom percentage
-        const fitScale = 1; // Assuming 1 is the "fit to screen" scale
-        const zoomPercentage = Math.round((state.zoom / fitScale) * 100);
-
-        // Update HUD text
-        zoomHUDElement.textContent = `${zoomPercentage}%`;
-
-        // Show HUD with fade-in effect
-        zoomHUDElement.style.opacity = '1';
-
-        // Set timeout to hide HUD after delay
-        zoomHUDTimeout = setTimeout(() => {
-            if (zoomHUDElement) {
-                zoomHUDElement.style.opacity = '0';
-            }
-            zoomHUDTimeout = null;
-        }, 800); // Hide after 800ms
     };
+
+    const _canvasToBlob = (canvas, mime = "image/png", quality = 0.92) =>
+        new Promise((resolve) => {
+            try {
+                if (canvas?.toBlob) {
+                    canvas.toBlob((b) => resolve(b), mime, quality);
+                    return;
+                }
+            } catch {}
+            try {
+                const dataUrl = canvas?.toDataURL?.(mime, quality);
+                if (!dataUrl || typeof dataUrl !== "string") return resolve(null);
+                const parts = dataUrl.split(",");
+                const b64 = parts[1] || "";
+                const bin = atob(b64);
+                const arr = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+                resolve(new Blob([arr], { type: mime }));
+            } catch {
+                resolve(null);
+            }
+        });
+
+    async function exportCurrentFrame({ toClipboard = false } = {}) {
+        try {
+            const src = _getExportSourceCanvas();
+            if (!src) return false;
+
+            let canvas = null;
+            if (src instanceof HTMLCanvasElement) {
+                canvas = src;
+            } else if (src?.a && src?.b) {
+                const a = src.a;
+                const b = src.b;
+                const w = Math.max(1, Math.min(Number(a.width) || 0, Number(b.width) || 0));
+                const h = Math.max(1, Math.min(Number(a.height) || 0, Number(b.height) || 0));
+                if (!(w > 1 && h > 1)) return false;
+                const out = document.createElement("canvas");
+                out.width = w;
+                out.height = h;
+                const ctx = out.getContext("2d");
+                if (!ctx) return false;
+                try {
+                    ctx.drawImage(b, 0, 0, w, h);
+                } catch {}
+                const p = Math.max(0, Math.min(100, Number(state?._abWipePercent) || 50)) / 100;
+                try {
+                    ctx.save();
+                    ctx.beginPath();
+                    if (src.mode === "wipeV") {
+                        ctx.rect(0, 0, w, h * p);
+                    } else {
+                        ctx.rect(0, 0, w * p, h);
+                    }
+                    ctx.clip();
+                    ctx.drawImage(a, 0, 0, w, h);
+                    ctx.restore();
+                } catch {}
+                canvas = out;
+            }
+
+            if (!canvas) return false;
+            const blob = await _canvasToBlob(canvas, "image/png");
+            if (!blob) return false;
+
+            if (toClipboard) {
+                try {
+                    const ClipboardItemCtor = globalThis?.ClipboardItem;
+                    const clip = navigator?.clipboard;
+                    if (!ClipboardItemCtor || !clip?.write) return false;
+                    await clip.write([new ClipboardItemCtor({ "image/png": blob })]);
+                    return true;
+                } catch {
+                    return false;
+                }
+            }
+
+            // Download (best-effort)
+            try {
+                const current = state?.assets?.[state?.currentIndex] || null;
+                const base = String(current?.filename || "frame").replace(/[\\\\/:*?\"<>|]+/g, "_");
+                const name = `${base.replace(/\\.[^.]+$/, "") || "frame"}_export.png`;
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = name;
+                a.rel = "noopener";
+                a.click();
+                try {
+                    setTimeout(() => URL.revokeObjectURL(url), 2000);
+                } catch {}
+                return true;
+            } catch {
+                return false;
+            }
+        } catch {
+            return false;
+        }
+    }
 
     // Smooth animation loop using requestAnimationFrame (only when needed)
     // REMOVED: Animation loop (requestAnimationFrame) for performance
     // Direct transform updates only
 
-    const updatePanCursor = () => {
-        try {
-            if (overlay.style.display === "none") {
-                content.style.cursor = "";
-                return;
-            }
-            const zoomed = (Number(state.zoom) || 1) > 1.01;
-            if (!zoomed) {
-                content.style.cursor = "";
-                return;
-            }
-            content.style.cursor = "grab";
-        } catch {}
-    };
-
     const renderBadges = () => {
-        try {
-            badgesBar.innerHTML = "";
-        } catch {}
+        const clear = (el) => {
+            try {
+                if (el) el.innerHTML = "";
+            } catch {}
+        };
+        clear(badgesBar);
+        clear(badgesBarRight);
 
-        const isSingle = state.mode === VIEWER_MODES.SINGLE;
-        const items = isSingle
-            ? [state.assets[state.currentIndex]].filter(Boolean)
-            : Array.isArray(state.assets)
-              ? state.assets.slice(0, 4)
-              : [];
-
-        for (const a of items) {
-            if (!a) continue;
+        const makePill = (asset, { showName } = {}) => {
+            if (!asset) return null;
             const pill = document.createElement("div");
             pill.className = "mjr-viewer-asset-pill";
             pill.style.cssText = `
@@ -656,14 +1138,12 @@ export function createViewer() {
                 overflow: hidden;
             `;
 
-            // In Single mode the filename is already displayed as the main title.
-            // Only show per-asset names in compare modes (A/B, side-by-side) where multiple assets are visible.
             const name = document.createElement("span");
-            name.textContent = String(a.filename || "");
+            name.textContent = String(asset.filename || "");
             name.style.cssText =
                 "max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; opacity:0.95;";
 
-            const extBadge = createFileBadge(a.filename, a.kind, !!a?._mjrNameCollision);
+            const extBadge = createFileBadge(asset.filename, asset.kind, !!asset?._mjrNameCollision);
             try {
                 extBadge.style.position = "static";
                 extBadge.style.top = "";
@@ -674,7 +1154,7 @@ export function createViewer() {
                 extBadge.style.pointerEvents = "none";
             } catch {}
 
-            const stars = createRatingBadge(a.rating || 0);
+            const stars = createRatingBadge(asset.rating || 0);
             if (stars) {
                 try {
                     stars.style.position = "static";
@@ -685,7 +1165,7 @@ export function createViewer() {
                 } catch {}
             }
 
-            const tags = createTagsBadge(Array.isArray(a.tags) ? a.tags : []);
+            const tags = createTagsBadge(Array.isArray(asset.tags) ? asset.tags : []);
             if (tags) {
                 try {
                     tags.style.position = "static";
@@ -697,15 +1177,49 @@ export function createViewer() {
             }
 
             pill.appendChild(extBadge);
-            if (!isSingle) pill.appendChild(name);
+            if (showName) pill.appendChild(name);
             if (stars) pill.appendChild(stars);
             if (tags && tags.style.display !== "none") pill.appendChild(tags);
 
             try {
-                if (a.filepath) pill.title = String(a.filepath);
+                if (asset.filepath) pill.title = String(asset.filepath);
             } catch {}
+            return pill;
+        };
 
-            badgesBar.appendChild(pill);
+        const isSingle = state.mode === VIEWER_MODES.SINGLE;
+        const isAB = state.mode === VIEWER_MODES.AB_COMPARE && canAB();
+        const isSide = state.mode === VIEWER_MODES.SIDE_BY_SIDE && canSide();
+
+        // A/B and Side-by-side: when we have a right badge bar, split per side to keep the header readable.
+        if ((isAB || isSide) && badgesBarRight) {
+            const a0 = state.assets?.[0] || null;
+            const a1 = isAB
+                ? state.assets?.[1] || null
+                : state.assets?.[Math.max(0, (state.assets?.length || 1) - 1)] || null;
+            const leftPill = makePill(a0, { showName: false });
+            const rightPill = makePill(a1, { showName: false });
+            try {
+                if (leftPill) badgesBar.appendChild(leftPill);
+            } catch {}
+            try {
+                if (rightPill) badgesBarRight.appendChild(rightPill);
+            } catch {}
+            return;
+        }
+
+        const items = isSingle
+            ? [state.assets[state.currentIndex]].filter(Boolean)
+            : Array.isArray(state.assets)
+              ? state.assets.slice(0, 4)
+              : [];
+
+        for (const a of items) {
+            const pill = makePill(a, { showName: !isSingle });
+            if (!pill) continue;
+            try {
+                badgesBar.appendChild(pill);
+            } catch {}
         }
     };
 
@@ -728,14 +1242,26 @@ export function createViewer() {
 
         // Update filename
         const current = state.assets[state.currentIndex];
-        if (state.mode === VIEWER_MODES.AB_COMPARE && canAB()) {
-            filename.textContent = "A/B Compare";
-        } else if (state.mode === VIEWER_MODES.SIDE_BY_SIDE && canSide()) {
-            filename.textContent = state.assets.length > 2 ? "Side-by-side (2×2)" : "Side-by-side";
-        } else if (current) {
-            filename.textContent = current.filename || '';
-        }
-
+        const isAB = state.mode === VIEWER_MODES.AB_COMPARE && canAB();
+        const isSide = state.mode === VIEWER_MODES.SIDE_BY_SIDE && canSide();
+        const leftAsset = isAB || isSide ? state.assets?.[0] || null : current || null;
+        const rightAsset = isAB
+            ? state.assets?.[1] || null
+            : isSide && Array.isArray(state.assets) && state.assets.length >= 2
+              ? state.assets[state.assets.length - 1]
+              : null;
+        try {
+            filename.textContent = leftAsset?.filename || "";
+        } catch {}
+        try {
+            if (rightMeta && filenameRight && rightAsset && rightAsset !== leftAsset) {
+                rightMeta.style.display = "flex";
+                filenameRight.textContent = rightAsset?.filename || "";
+            } else if (rightMeta && filenameRight) {
+                rightMeta.style.display = "none";
+                filenameRight.textContent = "";
+            }
+        } catch {}
         // Update index
         if (state.mode === VIEWER_MODES.AB_COMPARE && canAB()) {
             indexInfo.textContent = "2 selected";
@@ -745,30 +1271,36 @@ export function createViewer() {
             indexInfo.textContent = `${state.currentIndex + 1} / ${state.assets.length}`;
         }
 
-        // Update mode buttons
+        if (state.mode === VIEWER_MODES.AB_COMPARE && !canAB()) state.mode = VIEWER_MODES.SINGLE;
+        if (state.mode === VIEWER_MODES.SIDE_BY_SIDE && !canSide()) state.mode = VIEWER_MODES.SINGLE;
         try {
-            abBtn.disabled = !canAB();
-            sideBtn.disabled = !canSide();
-            abBtn.style.opacity = abBtn.disabled ? "0.35" : (abBtn.dataset.mode === state.mode ? "1" : "0.6");
-            sideBtn.style.opacity = sideBtn.disabled ? "0.35" : (sideBtn.dataset.mode === state.mode ? "1" : "0.6");
+            toolbar?.syncModeButtons?.({ canAB, canSide });
         } catch {}
-        [singleBtn, abBtn, sideBtn].forEach(btn => {
-            if (btn === abBtn || btn === sideBtn) return;
-            btn.style.opacity = btn.dataset.mode === state.mode ? "1" : "0.6";
-            btn.style.fontWeight = btn.dataset.mode === state.mode ? "600" : "400";
-        });
-
-        if (state.mode === VIEWER_MODES.AB_COMPARE && !canAB()) {
-            state.mode = VIEWER_MODES.SINGLE;
-        }
-        if (state.mode === VIEWER_MODES.SIDE_BY_SIDE && !canSide()) {
-            state.mode = VIEWER_MODES.SINGLE;
-        }
 
         // Show/hide views
         singleView.style.display = state.mode === VIEWER_MODES.SINGLE ? 'flex' : 'none';
         abView.style.display = state.mode === VIEWER_MODES.AB_COMPARE ? 'block' : 'none';
         sideView.style.display = state.mode === VIEWER_MODES.SIDE_BY_SIDE ? 'flex' : 'none';
+
+        // Cleanup hidden views to prevent processor loops and listener buildup.
+        try {
+            if (state.mode !== VIEWER_MODES.SINGLE) {
+                destroyMediaProcessorsIn(singleView);
+                singleView.innerHTML = "";
+            }
+        } catch {}
+        try {
+            if (state.mode !== VIEWER_MODES.AB_COMPARE) {
+                destroyMediaProcessorsIn(abView);
+                abView.innerHTML = "";
+            }
+        } catch {}
+        try {
+            if (state.mode !== VIEWER_MODES.SIDE_BY_SIDE) {
+                destroyMediaProcessorsIn(sideView);
+                sideView.innerHTML = "";
+            }
+        } catch {}
 
         renderBadges();
 
@@ -783,6 +1315,18 @@ export function createViewer() {
 
         // Render current asset
         renderAsset();
+        // Mount/unmount the video player bar depending on current media.
+        syncPlayerBar();
+        try {
+            toolbar?.syncToolsUIFromState?.();
+        } catch {}
+        try {
+            scheduleApplyGrade?.();
+        } catch {}
+        scheduleOverlayRedraw();
+        try {
+            void renderGenInfoPanel();
+        } catch {}
 
         // Hydrate rating/tags for visible assets and refresh the badge bar.
         try {
@@ -802,414 +1346,439 @@ export function createViewer() {
         const viewUrl = buildAssetViewURL(current);
 
         if (state.mode === VIEWER_MODES.SINGLE) {
+            try {
+                destroyMediaProcessorsIn(singleView);
+            } catch {}
             singleView.innerHTML = '';
             state._mediaW = 0;
             state._mediaH = 0;
             const media = createMediaElement(current, viewUrl);
             singleView.appendChild(media);
         } else if (state.mode === VIEWER_MODES.AB_COMPARE) {
-            if (canAB()) renderABCompare(current, viewUrl);
+            if (canAB()) {
+                renderABCompareView({
+                    abView,
+                    state,
+                    currentAsset: current,
+                    viewUrl,
+                    buildAssetViewURL,
+                    createCompareMediaElement,
+                    destroyMediaProcessorsIn,
+                });
+            }
         } else if (state.mode === VIEWER_MODES.SIDE_BY_SIDE) {
-            if (canSide()) renderSideBySide(current, viewUrl);
+            if (canSide()) {
+                renderSideBySideView({
+                    sideView,
+                    state,
+                    currentAsset: current,
+                    viewUrl,
+                    buildAssetViewURL,
+                    createMediaElement,
+                    destroyMediaProcessorsIn,
+                });
+            }
         }
         applyTransform();
         updatePanCursor();
     }
 
-    // Create image or video element
-    function createMediaElement(asset, url) {
-        const container = document.createElement("div");
-        container.className = "mjr-video-host";
-        container.style.cssText = `
-            width: 100%;
-            height: 100%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            position: relative;
-        `;
+    const destroyPlayerBar = () => {
+        try {
+            if (state._videoControlsDestroy) state._videoControlsDestroy();
+        } catch {}
+        state._videoControlsDestroy = null;
+        state._videoControlsMounted = null;
+        state._activeVideoEl = null;
+        try {
+            state._videoSyncAbort?.abort?.();
+        } catch {}
+        state._videoSyncAbort = null;
+        try {
+            state._videoMetaAbort?.abort?.();
+        } catch {}
+        state._videoMetaAbort = null;
+        try {
+            state._scopesVideoAbort?.abort?.();
+        } catch {}
+        state._scopesVideoAbort = null;
+        try {
+            playerBarHost.innerHTML = "";
+        } catch {}
+        try {
+            playerBarHost.style.display = "none";
+        } catch {}
+        try {
+            navBar.style.display = "";
+        } catch {}
+    };
 
-        if (asset.kind === 'video') {
-            const video = document.createElement("video");
-            video.className = "mjr-viewer-media";
-            video.src = url;
-            video.controls = false;
-            video.autoplay = true;
-            video.loop = true;
-            video.playsInline = true;
-            video.style.cssText = `
-                max-width: 100%;
-                max-height: 100%;
-                object-fit: contain;
-                transform: ${mediaTransform()};
-                transform-origin: center center;
-            `;
-            attachMediaLoadHandlers(video);
-            try {
-                video.addEventListener(
-                    "canplay",
-                    () => {
-                        try {
-                            const p = video.play?.();
-                            if (p && typeof p.catch === "function") p.catch(() => {});
-                        } catch {}
-                    },
-                    { once: true }
-                );
-            } catch {}
-            container.appendChild(video);
-            // Custom controls: avoid native player bar to keep layout stable.
-            try {
-                mountVideoControls(video, { variant: "viewer", hostEl: container, fullscreenEl: overlay });
-            } catch {}
-        } else {
-            const img = document.createElement("img");
-            img.className = "mjr-viewer-media";
-            img.src = url;
-            img.style.cssText = `
-                max-width: 100%;
-                max-height: 100%;
-                object-fit: contain;
-                transform: ${mediaTransform()};
-                transform-origin: center center;
-            `;
-            attachMediaLoadHandlers(img);
-            container.appendChild(img);
-        }
-
-        return container;
-    }
-
-    // Create media element for compare modes (A/B and side-by-side).
-    // Important: the returned element fills the container so both layers share identical sizing/centering,
-    // which avoids "half-width re-centering" and other overlay drift.
-    function createCompareMediaElement(asset, url) {
-        if (asset.kind === "video") {
-            const video = document.createElement("video");
-            video.className = "mjr-viewer-media";
-            video.src = url;
-            video.controls = false;
-            video.loop = true;
-            video.muted = true;
-            video.playsInline = true;
-            video.autoplay = true;
-            video.style.cssText = `
-                width: 100%;
-                height: 100%;
-                object-fit: contain;
-                transform: ${mediaTransform()};
-                transform-origin: center center;
-            `;
-            attachMediaLoadHandlers(video);
-            return video;
-        }
-
-        const img = document.createElement("img");
-        img.className = "mjr-viewer-media";
-        img.src = url;
-        img.style.cssText = `
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
-            transform: ${mediaTransform()};
-            transform-origin: center center;
-        `;
-        attachMediaLoadHandlers(img);
-        return img;
-    }
-
-    // Render A/B compare view
-    function renderABCompare(current, viewUrl) {
-        abView.innerHTML = '';
-
-        const other =
-            state.compareAsset ||
-            (state.assets.length === 2 ? state.assets[1 - state.currentIndex] : null) ||
-            current;
-        const compareUrl = buildAssetViewURL(other);
-
-        // Base layer (B)
-        const baseLayer = document.createElement("div");
-        baseLayer.style.cssText = `
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-        `;
-        const baseMedia = createCompareMediaElement(other, compareUrl);
-        baseLayer.appendChild(baseMedia);
-
-        // Top layer (A) with slider
-        const topLayer = document.createElement("div");
-        topLayer.style.cssText = `
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-        `;
-        // IMPORTANT: keep A aligned to B by keeping the top layer full-size and clipping it,
-        // instead of shrinking the layer width (which would re-center A differently).
-        const supportsClipPath = (() => {
-            try {
-                return !!window.CSS?.supports?.("clip-path: inset(0 50% 0 0)");
-            } catch {
-                return false;
-            }
-        })();
-        const setClipPercent = (percent) => {
-            const clamped = Math.max(0, Math.min(100, percent));
-            const right = 100 - clamped;
-            if (supportsClipPath) {
-                const value = `inset(0 ${right}% 0 0)`;
-                topLayer.style.clipPath = value;
-                topLayer.style.webkitClipPath = value;
+    const syncPlayerBar = () => {
+        try {
+            const current = state.assets[state.currentIndex];
+            if (current?.kind !== "video") {
+                destroyPlayerBar();
                 return;
             }
-            // Fallback for older browsers: use deprecated `clip` (works only with absolute positioning)
-            // Clip rectangle: show left `percent%` of the layer.
-            const rect = abView.getBoundingClientRect();
-            const w = rect.width || 1;
-            const h = rect.height || 1;
-            const px = Math.round((w * clamped) / 100);
-            topLayer.style.clip = `rect(0px, ${px}px, ${h}px, 0px)`;
-        };
-        setClipPercent(50);
-        const topMedia = createCompareMediaElement(current, viewUrl);
-        topLayer.appendChild(topMedia);
 
-        // Slider handle
-        const slider = document.createElement("div");
-        slider.style.cssText = `
-            position: absolute;
-            top: 0;
-            left: 50%;
-            width: 3px;
-            height: 100%;
-            background: white;
-            cursor: ew-resize;
-            z-index: 10;
-        `;
-
-        const handle = document.createElement("div");
-        handle.style.cssText = `
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            width: 40px;
-            height: 40px;
-            background: white;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 16px;
-            color: black;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-        `;
-        handle.textContent = "\u2194";
-        slider.appendChild(handle);
-
-        // Drag functionality (pointer-capture; avoids leaking document-level listeners on re-render)
-        let isDragging = false;
-        const onPointerMove = (e) => {
-            if (!isDragging) return;
-            const rect = abView.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const percent = (x / rect.width) * 100;
-            const clamped = Math.max(0, Math.min(100, percent));
-            setClipPercent(clamped);
-            slider.style.left = `${clamped}%`;
-        };
-        const stopDrag = () => {
-            isDragging = false;
-        };
-        slider.addEventListener("pointerdown", (e) => {
-            isDragging = true;
+            // Keep the player bar visible for video even in compare modes.
+            let videoEl = null;
+            let allVideos = [];
             try {
-                slider.setPointerCapture(e.pointerId);
-            } catch {}
-            onPointerMove(e);
-        });
-        slider.addEventListener("pointermove", onPointerMove);
-        slider.addEventListener("pointerup", stopDrag);
-        slider.addEventListener("pointercancel", stopDrag);
-
-        abView.appendChild(baseLayer);
-        abView.appendChild(topLayer);
-        abView.appendChild(slider);
-
-        // FIX: Synchronize videos in A/B comparison mode
-        if (baseMedia.tagName === 'VIDEO' && topMedia.tagName === 'VIDEO') {
-            let syncing = false;
-
-            const bindSync = (leader, follower) => {
-                leader.addEventListener('play', () => {
-                    if (syncing) return;
-                    follower.play().catch(() => {});
-                });
-                leader.addEventListener('pause', () => {
-                    if (syncing) return;
-                    follower.pause();
-                });
-                leader.addEventListener('timeupdate', () => {
-                    if (syncing) return;
-                    // Use a threshold to avoid jitter and infinite loops
-                    if (Math.abs(leader.currentTime - follower.currentTime) > 0.15) {
-                        syncing = true;
-                        follower.currentTime = leader.currentTime;
-                        syncing = false;
-                    }
-                });
-                leader.addEventListener('seeking', () => {
-                    if (syncing) return;
-                    syncing = true;
-                    follower.currentTime = leader.currentTime;
-                    syncing = false;
-                });
-            };
-
-            // Bidirectional sync
-            bindSync(baseMedia, topMedia);
-            bindSync(topMedia, baseMedia);
-
-            // Mute one video to avoid audio echo
-            topMedia.muted = true;
-            baseMedia.muted = false;
-        }
-    }
-
-    // Render side-by-side view
-    function renderSideBySide(current, viewUrl) {
-        sideView.innerHTML = '';
-
-        const items = state.assets.slice(0, 4);
-        const count = items.length;
-        if (count > 2) {
-            // 2x2 grid (3 or 4 items). Do not wrap in another container: theme CSS targets direct children.
-            sideView.style.display = "grid";
-            sideView.style.gridTemplateColumns = "1fr 1fr";
-            sideView.style.gridTemplateRows = "1fr 1fr";
-            sideView.style.gap = "2px";
-            sideView.style.padding = "2px";
-
-            for (let i = 0; i < 4; i++) {
-                const cell = document.createElement("div");
-                cell.style.cssText = `
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    background: rgba(255,255,255,0.05);
-                    overflow: hidden;
-                `;
-                const a = items[i];
-                if (a) {
-                    const u = buildAssetViewURL(a);
-                    cell.appendChild(createMediaElement(a, u));
+                if (state.mode === VIEWER_MODES.SINGLE) {
+                    allVideos = Array.from(singleView.querySelectorAll?.(".mjr-viewer-video-src") || []);
+                } else if (state.mode === VIEWER_MODES.AB_COMPARE) {
+                    allVideos = Array.from(abView.querySelectorAll?.(".mjr-viewer-video-src") || []);
+                } else if (state.mode === VIEWER_MODES.SIDE_BY_SIDE) {
+                    allVideos = Array.from(sideView.querySelectorAll?.(".mjr-viewer-video-src") || []);
                 }
-                sideView.appendChild(cell);
+            } catch {
+                allVideos = [];
             }
-            return;
-        }
+            try {
+                // Prefer the "A" role when available (current asset in compare views).
+                videoEl = allVideos.find((v) => String(v?.dataset?.mjrCompareRole || "") === "A") || allVideos[0] || null;
+            } catch {
+                videoEl = allVideos[0] || null;
+            }
+            if (!videoEl) {
+                destroyPlayerBar();
+                return;
+            }
 
-        const other =
-            state.compareAsset ||
-            (state.assets.length === 2 ? state.assets[1 - state.currentIndex] : null) ||
-            current;
-        const compareUrl = buildAssetViewURL(other);
+            // Re-mount only if the underlying video element changed.
+            if (state._activeVideoEl && state._activeVideoEl === videoEl && state._videoControlsDestroy) {
+                try {
+                    navBar.style.display = "none";
+                    playerBarHost.style.display = "";
+                } catch {}
+                return;
+            }
 
-        const leftPanel = document.createElement("div");
-        leftPanel.style.cssText = `
-            flex: 1;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: rgba(255,255,255,0.05);
-            overflow: hidden;
-        `;
-        const leftMedia = createMediaElement(current, viewUrl);
-        leftPanel.appendChild(leftMedia);
+            destroyPlayerBar();
 
-        const rightPanel = document.createElement("div");
-        rightPanel.style.cssText = `
-            flex: 1;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: rgba(255,255,255,0.05);
-            overflow: hidden;
-        `;
-        const rightMedia = createMediaElement(other, compareUrl);
-        rightPanel.appendChild(rightMedia);
+            try {
+                navBar.style.display = "none";
+            } catch {}
+            try {
+                playerBarHost.style.display = "";
+            } catch {}
 
-        sideView.style.display = "flex";
-        sideView.style.flexDirection = "row";
-        sideView.style.gap = "2px";
-        sideView.style.padding = "0";
-        sideView.appendChild(leftPanel);
-        sideView.appendChild(rightPanel);
-
-        // Synchronize videos in side-by-side mode (when both panels are videos).
-        // Note: `createMediaElement()` returns a container DIV, so we must query for the actual <video>.
-        const leftVideo = leftMedia?.querySelector?.("video");
-        const rightVideo = rightMedia?.querySelector?.("video");
-        if (leftVideo && rightVideo) {
-            let syncing = false;
-
-            const bindSync = (leader, follower) => {
-                leader.addEventListener('play', () => {
-                    if (syncing) return;
-                    follower.play().catch(() => {});
-                });
-                leader.addEventListener('pause', () => {
-                    if (syncing) return;
-                    follower.pause();
-                });
-                leader.addEventListener('timeupdate', () => {
-                    if (syncing) return;
-                    if (Math.abs(leader.currentTime - follower.currentTime) > 0.15) {
-                        syncing = true;
-                        follower.currentTime = leader.currentTime;
-                        syncing = false;
+            // Try to provide initial FPS/frameCount synchronously so the ruler shows correct values immediately.
+            let initialFps = undefined;
+            let initialFrameCount = undefined;
+            try {
+                const parseFps = (v) => {
+                    const n = Number(v);
+                    if (Number.isFinite(n) && n > 0) return n;
+                    const s = String(v || "").trim();
+                    if (!s) return null;
+                    if (s.includes("/")) {
+                        const [a, b] = s.split("/");
+                        const na = Number(a);
+                        const nb = Number(b);
+                        if (Number.isFinite(na) && Number.isFinite(nb) && nb !== 0) return na / nb;
                     }
-                });
-                leader.addEventListener('seeking', () => {
-                    if (syncing) return;
-                    syncing = true;
-                    follower.currentTime = leader.currentTime;
-                    syncing = false;
-                });
-            };
+                    const f = Number.parseFloat(s);
+                    if (Number.isFinite(f) && f > 0) return f;
+                    return null;
+                };
+                const parseFrameCount = (v) => {
+                    const n = Number(v);
+                    if (!Number.isFinite(n) || n <= 0) return null;
+                    return Math.floor(n);
+                };
 
-            // Bidirectional sync
-            bindSync(leftVideo, rightVideo);
-            bindSync(rightVideo, leftVideo);
+                const pickFromMeta = (assetMeta) => {
+                    try {
+                        const raw = assetMeta?.metadata_raw;
+                        if (!raw || typeof raw !== "object") return { fps: null, frameCount: null };
+                        const ff = raw?.raw_ffprobe || {};
+                        const vs = ff?.video_stream || {};
+                        const fpsRaw = raw?.fps ?? vs?.avg_frame_rate ?? vs?.r_frame_rate;
+                        const fps = parseFps(fpsRaw);
+                        const frameCount = parseFrameCount(vs?.nb_frames ?? vs?.nb_read_frames ?? raw?.frame_count ?? raw?.frames);
+                        return { fps, frameCount };
+                    } catch {
+                        return { fps: null, frameCount: null };
+                    }
+                };
 
-            // Mute right video to avoid audio echo
-            rightVideo.muted = true;
-            leftVideo.muted = false;
+                // Prefer the current in-memory asset payload (search results may already include metadata_raw).
+                const fromCurrent = pickFromMeta(current);
+                if (fromCurrent.fps != null) initialFps = fromCurrent.fps;
+                if (fromCurrent.frameCount != null) initialFrameCount = fromCurrent.frameCount;
+
+                // Fallback to cached full metadata if present.
+                if (initialFps == null || initialFrameCount == null) {
+                    const cached = metadataHydrator?.getCached?.(current?.id);
+                    const fromCache = cached?.data ? pickFromMeta(cached.data) : { fps: null, frameCount: null };
+                    if (initialFps == null && fromCache.fps != null) initialFps = fromCache.fps;
+                    if (initialFrameCount == null && fromCache.frameCount != null) initialFrameCount = fromCache.frameCount;
+                }
+            } catch {}
+
+            const mounted = mountVideoControls(videoEl, {
+                variant: "viewerbar",
+                hostEl: playerBarHost,
+                fullscreenEl: overlay,
+                initialFps,
+                initialFrameCount,
+            });
+            state._videoControlsMounted = mounted || null;
+            state._videoControlsDestroy = mounted?.destroy || null;
+            state._activeVideoEl = videoEl;
+
+            // Keep scopes responsive for video: refresh on seek/play/pause/timeupdate and animate while playing.
+            try {
+                state._scopesVideoAbort?.abort?.();
+            } catch {}
+            try {
+                const ac = new AbortController();
+                state._scopesVideoAbort = ac;
+                const refresh = () => {
+                    try {
+                        if (String(state?.scopesMode || "off") === "off") return;
+                    } catch {}
+                    scheduleOverlayRedraw();
+                };
+                videoEl.addEventListener("seeked", refresh, { signal: ac.signal, passive: true });
+                videoEl.addEventListener("timeupdate", refresh, { signal: ac.signal, passive: true });
+                videoEl.addEventListener("loadeddata", refresh, { signal: ac.signal, passive: true });
+                videoEl.addEventListener("play", refresh, { signal: ac.signal, passive: true });
+                videoEl.addEventListener("pause", refresh, { signal: ac.signal, passive: true });
+
+                const scopesFps = Math.max(1, Math.min(30, Math.floor(Number(APP_CONFIG.VIEWER_SCOPES_FPS) || 10)));
+                const interval = 1000 / scopesFps;
+                const tick = () => {
+                    if (ac.signal.aborted) return;
+                    try {
+                        if (overlay.style.display === "none") return;
+                    } catch {}
+                    try {
+                        if (String(state?.scopesMode || "off") !== "off" && !videoEl.paused) {
+                            const now = performance.now();
+                            const last = Number(state?._scopesLastAt) || 0;
+                            if (now - last >= interval) {
+                                state._scopesLastAt = now;
+                                scheduleOverlayRedraw();
+                            }
+                        }
+                    } catch {}
+                    try {
+                        requestAnimationFrame(tick);
+                    } catch {}
+                };
+                try {
+                    requestAnimationFrame(tick);
+                } catch {}
+            } catch {}
+
+            // If multiple videos are visible (compare modes), keep them synced to the controlled one.
+            try {
+                state._videoSyncAbort?.abort?.();
+            } catch {}
+            try {
+                if (allVideos.length > 1) {
+                    const ac = new AbortController();
+                    state._videoSyncAbort = ac;
+                    let syncing = false;
+                    const threshold = 0.15;
+                    const followers = allVideos.filter((v) => v && v !== videoEl);
+
+                    const syncTimeTo = () => {
+                        if (syncing) return;
+                        try {
+                            for (const f of followers) {
+                                if (!f) continue;
+                                if (Math.abs((Number(videoEl.currentTime) || 0) - (Number(f.currentTime) || 0)) > threshold) {
+                                    syncing = true;
+                                    f.currentTime = videoEl.currentTime;
+                                    syncing = false;
+                                }
+                            }
+                        } catch {
+                            syncing = false;
+                        }
+                    };
+
+                    const syncPlayState = (playing) => {
+                        if (syncing) return;
+                        for (const f of followers) {
+                            try {
+                                if (!f) continue;
+                                if (playing) {
+                                    const p = f.play?.();
+                                    if (p && typeof p.catch === "function") p.catch(() => {});
+                                } else {
+                                    f.pause?.();
+                                }
+                            } catch {}
+                        }
+                    };
+
+                    const syncVolume = () => {
+                        if (syncing) return;
+                        for (const f of followers) {
+                            try {
+                                if (!f) continue;
+                                f.muted = Boolean(videoEl.muted);
+                                f.volume = Number(videoEl.volume) || 0;
+                            } catch {}
+                        }
+                    };
+
+                    videoEl.addEventListener("play", () => syncPlayState(true), { signal: ac.signal, passive: true });
+                    videoEl.addEventListener("pause", () => syncPlayState(false), { signal: ac.signal, passive: true });
+                    videoEl.addEventListener("timeupdate", syncTimeTo, { signal: ac.signal, passive: true });
+                    videoEl.addEventListener("seeking", syncTimeTo, { signal: ac.signal, passive: true });
+                    videoEl.addEventListener("volumechange", syncVolume, { signal: ac.signal, passive: true });
+
+                    // Keep followers in a quiet state (analysis/compare generally shouldn't blast audio).
+                    try {
+                        for (const f of followers) {
+                            if (!f) continue;
+                            f.muted = true;
+                        }
+                    } catch {}
+                }
+            } catch {}
+
+            // Best-effort: use backend viewer-info to set FPS / frame count for the ruler.
+            // Must never throw or block the UI.
+            try {
+                const parseFps = (v) => {
+                    const n = Number(v);
+                    if (Number.isFinite(n) && n > 0) return n;
+                    const s = String(v || "").trim();
+                    if (!s) return null;
+                    // Fraction forms like "30000/1001"
+                    if (s.includes("/")) {
+                        const [a, b] = s.split("/");
+                        const na = Number(a);
+                        const nb = Number(b);
+                        if (Number.isFinite(na) && Number.isFinite(nb) && nb !== 0) return na / nb;
+                    }
+                    const f = Number.parseFloat(s);
+                    if (Number.isFinite(f) && f > 0) return f;
+                    return null;
+                };
+                const parseFrameCount = (v) => {
+                    const n = Number(v);
+                    if (!Number.isFinite(n) || n <= 0) return null;
+                    return Math.floor(n);
+                };
+
+                const applyFromViewerInfo = (info) => {
+                    try {
+                        if (!info || typeof info !== "object") return;
+                        const fps = parseFps(info?.fps ?? info?.fps_raw);
+                        const frameCount = parseFrameCount(info?.frame_count);
+                        if (fps != null || frameCount != null) mounted?.setMediaInfo?.({ fps, frameCount });
+                    } catch {}
+                };
+
+                // Apply cached viewer info immediately if present.
+                try {
+                    const cached = _viewerInfoCache.get(String(current?.id ?? ""));
+                    if (cached) applyFromViewerInfo(cached);
+                } catch {}
+
+                // Fetch fresh in background (cancel if asset changes).
+                try {
+                    state._videoMetaAbort?.abort?.();
+                } catch {}
+                const ac = new AbortController();
+                state._videoMetaAbort = ac;
+                void (async () => {
+                    try {
+                        const res = await getViewerInfo(current?.id, { signal: ac.signal });
+                        if (!res?.ok || !res.data) return;
+                        // Still the same active video element?
+                        if (state._activeVideoEl !== videoEl) return;
+                        try {
+                            _viewerInfoCache.set(String(current?.id ?? ""), res.data);
+                        } catch {}
+                        applyFromViewerInfo(res.data);
+                    } catch {}
+                })();
+            } catch {}
+        } catch {
+            destroyPlayerBar();
         }
-    }
+    };
 
-    // Mode switchers
-    singleBtn.addEventListener('click', () => {
-        state.mode = VIEWER_MODES.SINGLE;
-        updateUI();
+    // ----------------------------------------------------------------------------
+    // Image processing (Nuke-like): exposure, gamma, channels, false color, zebra
+    // ----------------------------------------------------------------------------
+
+    const MAX_PROC_PIXELS = APP_CONFIG.VIEWER_MAX_PROC_PIXELS ?? 12_000_000;
+
+    const getGradeParams = () => ({
+        exposureEV: Number(state.exposureEV) || 0,
+        gamma: Math.max(0.1, Math.min(3, Number(state.gamma) || 1)),
+        channel: state.channel || "rgb",
+        analysisMode: state.analysisMode || "none",
+        zebraThreshold: Math.max(0, Math.min(1, Number(state.zebraThreshold) || 0.95)),
     });
-    abBtn.addEventListener('click', () => {
-        if (!canAB()) return;
-        state.mode = VIEWER_MODES.AB_COMPARE;
-        updateUI();
-    });
-    sideBtn.addEventListener('click', () => {
-        if (!canSide()) return;
-        state.mode = VIEWER_MODES.SIDE_BY_SIDE;
-        updateUI();
-    });
+
+    const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0));
+
+    const applyGradeToVisibleMedia = () => {
+        const params = getGradeParams();
+        try {
+            const els = overlay.querySelectorAll(".mjr-viewer-media");
+            for (const el of els) {
+                try {
+                    const proc = el?._mjrProc;
+                    if (proc?.setParams) proc.setParams(params);
+                } catch {}
+            }
+        } catch {}
+    };
+
+    const isDefaultGrade = (params) => {
+        try {
+            if (!params) return true;
+            const exposureEV = Number(params.exposureEV) || 0;
+            const gamma = Number(params.gamma) || 1;
+            const channel = String(params.channel || "rgb");
+            const analysisMode = String(params.analysisMode || "none");
+            return (
+                Math.abs(exposureEV) < 0.0001 &&
+                Math.abs(gamma - 1) < 0.0001 &&
+                channel === "rgb" &&
+                analysisMode === "none"
+            );
+        } catch {
+            return true;
+        }
+    };
+
+    const MAX_PROC_PIXELS_VIDEO = APP_CONFIG.VIEWER_MAX_PROC_PIXELS_VIDEO ?? 3_000_000;
+    const VIDEO_GRADE_THROTTLE_FPS = APP_CONFIG.VIEWER_VIDEO_GRADE_THROTTLE_FPS ?? 15;
+
+    try {
+        mediaFactory = createViewerMediaFactory({
+            overlay,
+            state,
+            mediaTransform,
+            updateMediaNaturalSize,
+            clampPanToBounds,
+            applyTransform,
+            scheduleOverlayRedraw,
+            getGradeParams,
+            isDefaultGrade,
+            tonemap: null,
+            maxProcPixels: MAX_PROC_PIXELS,
+            maxProcPixelsVideo: MAX_PROC_PIXELS_VIDEO,
+            videoGradeThrottleFps: VIDEO_GRADE_THROTTLE_FPS,
+            safeAddListener,
+            safeCall,
+        });
+    } catch {
+        mediaFactory = null;
+    }
 
     // Navigation
     prevBtn.addEventListener('click', () => {
@@ -1226,32 +1795,25 @@ export function createViewer() {
         }
     });
 
-    // Zoom controls
-    zoomIn.addEventListener('click', () => {
-        setZoom((Number(state.zoom) || 1) + 0.25, { clientX: state._lastPointerX, clientY: state._lastPointerY });
-        // setZoom now handles transform application directly
-    });
+    // Nuke-like processing controls (images only): channel/exposure/gamma/analysis.
+    let _gradeRAF = null;
+    const scheduleApplyGrade = () => {
+        try {
+            if (_gradeRAF != null) return;
+            _gradeRAF = requestAnimationFrame(() => {
+                _gradeRAF = null;
+                try {
+                    applyGradeToVisibleMedia();
+                } catch {}
+            });
+        } catch {}
+    };
 
-    zoomOut.addEventListener('click', () => {
-        setZoom((Number(state.zoom) || 1) - 0.25, { clientX: state._lastPointerX, clientY: state._lastPointerY });
-        // setZoom now handles transform application directly
-    });
-
-    zoomReset.addEventListener('click', () => {
-        setZoom(1);
-        // setZoom now handles transform application directly
-    });
-
-    // Close
-    closeBtn.addEventListener('click', () => {
-        closeViewer();
-    });
-
-    overlay.addEventListener('click', (e) => {
-        if (e.target === overlay) {
-            closeViewer();
-        }
-    });
+    const syncToolsUIFromState = () => {
+        try {
+            toolbar?.syncToolsUIFromState?.();
+        } catch {}
+    };
 
     // Mouse wheel zoom (trackpad-friendly). Capture + preventDefault so ComfyUI canvas doesn't zoom underneath.
     const navigateViewerAssets = (direction) => {
@@ -1307,326 +1869,157 @@ export function createViewer() {
         // setZoom now handles transform application directly
     };
 
-    try {
-        if (!content._mjrWheelZoomBound) {
-            content.addEventListener("wheel", onWheelZoom, { passive: false, capture: true });
-            content._mjrWheelZoomBound = true;
-        }
-    } catch {}
+    // Pixel probe + loupe sampling (Radiance-inspired).
 
-    // Track pointer position to zoom towards cursor for button/keyboard zoom.
-    try {
-        if (!content._mjrPointerTrackBound) {
-            content.addEventListener(
-                "mousemove",
-                (e) => {
-                    state._lastPointerX = e.clientX;
-                    state._lastPointerY = e.clientY;
-                },
-                { passive: true, capture: true }
-            );
-            content._mjrPointerTrackBound = true;
-        }
-    } catch {}
-
-    // Pan (middle-mouse-like click+drag) when zoomed in.
-    // When zoomed, left-dragging over the viewer content immediately pans (no threshold).
-    const pan = { active: false, pointerId: null, startX: 0, startY: 0, startPanX: 0, startPanY: 0 };
-
-    const onPanPointerDown = (e) => {
-        if (overlay.style.display === "none") return;
-        if (!((Number(state.zoom) || 1) > 1.01)) return;
-        const isLeft = e.button === 0;
-        const isMiddle = e.button === 1;
-        if (!isLeft && !isMiddle) return;
+    const positionOverlayBox = (el, clientX, clientY, { offsetX = 16, offsetY = 16 } = {}) => {
         try {
-            const t = e.target;
-            if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
-        } catch {}
-
-        // Only start panning inside the viewer content area (avoid header/footer buttons).
-        try {
-            if (!content.contains(e.target)) return;
-        } catch {
-            return;
-        }
-
-        pan.active = true;
-        pan.pointerId = e.pointerId;
-        try {
-            state._lastPointerX = e.clientX;
-            state._lastPointerY = e.clientY;
-        } catch {}
-        pan.startX = e.clientX;
-        pan.startY = e.clientY;
-        pan.startPanX = Number(state.panX) || 0;
-        pan.startPanY = Number(state.panY) || 0;
-        try {
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation?.();
-        } catch {}
-        try {
-            content.setPointerCapture?.(e.pointerId);
-        } catch {}
-        try {
-            content.style.cursor = "grabbing";
+            const v = getViewportRect();
+            if (!v) return;
+            const vp = content.getBoundingClientRect();
+            const x0 = (Number(clientX) || 0) - vp.left;
+            const y0 = (Number(clientY) || 0) - vp.top;
+            const w = Number(el.offsetWidth) || 0;
+            const h = Number(el.offsetHeight) || 0;
+            let x = x0 + offsetX;
+            let y = y0 + offsetY;
+            const pad = 10;
+            x = Math.max(pad, Math.min(x, v.width - w - pad));
+            y = Math.max(pad, Math.min(y, v.height - h - pad));
+            el.style.left = `${Math.round(x)}px`;
+            el.style.top = `${Math.round(y)}px`;
         } catch {}
     };
 
-    const onPanPointerMove = (e) => {
-        if (!pan.active) return;
-        try {
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation?.();
-        } catch {}
-        const dx = (Number(e.clientX) || 0) - pan.startX;
-        const dy = (Number(e.clientY) || 0) - pan.startY;
-        const zoom = Math.max(0.1, Math.min(16, Number(state.zoom) || 1));
-        const panMultiplier = Math.max(1, zoom);
-        state.panX = pan.startPanX + dx * panMultiplier;
-        state.panY = pan.startPanY + dy * panMultiplier;
-        try {
-            state._lastPointerX = e.clientX;
-            state._lastPointerY = e.clientY;
-        } catch {}
-        // Apply transform directly (no animation)
-        applyTransform();
-        updatePanCursor();
-    };
+    const loupe = createViewerLoupe({
+        state,
+        loupeCanvas,
+        loupeWrap,
+        getMediaNaturalSize,
+        positionOverlayBox,
+    });
 
-    const onPanPointerUp = (e) => {
-        if (!pan.active) return;
-        pan.active = false;
-        pan.pointerId = null;
-        try {
-            content.releasePointerCapture?.(e.pointerId);
-        } catch {}
-        updatePanCursor();
-    };
+    const probe = installViewerProbe({
+        overlay,
+        content,
+        state,
+        VIEWER_MODES,
+        getPrimaryMedia,
+        getMediaNaturalSize,
+        getViewportRect,
+        positionOverlayBox,
+        probeTooltip,
+        loupeWrap,
+        onLoupeRedraw: loupe.redraw,
+        lifecycle,
+    });
 
+    // Resize observer so grid canvas stays crisp and overlays remain aligned.
     try {
-        if (!content._mjrPanBound) {
-            content.addEventListener("pointerdown", onPanPointerDown, { passive: false, capture: true });
-            content.addEventListener("pointermove", onPanPointerMove, { passive: false, capture: true });
-            content.addEventListener("pointerup", onPanPointerUp, { passive: true, capture: true });
-            content.addEventListener("pointercancel", onPanPointerUp, { passive: true, capture: true });
-            content._mjrPanBound = true;
-        }
-    } catch {}
-
-    // Double-click anywhere in the viewer content resets zoom + pan.
-    try {
-        if (!content._mjrDblClickResetBound) {
-            content.addEventListener(
-                "dblclick",
-                (e) => {
-                    if (overlay.style.display === "none") return;
-                    try {
-                        if (!content.contains(e.target)) return;
-                    } catch {}
-                    try {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        e.stopImmediatePropagation?.();
-                    } catch {}
-                    // Toggle between fit and max zoom on double-click
-                    const isNearFit = Math.abs(state.targetZoom - 1) < 0.01;
-                    if (isNearFit) {
-                        // If near fit, go to max zoom (8x)
-                        setZoom(Math.min(8, state.targetZoom * 4), { clientX: e.clientX, clientY: e.clientY });
-                    } else {
-                        // If zoomed in, return to fit
-                        setZoom(1, { clientX: e.clientX, clientY: e.clientY });
-                    }
-                    showZoomHUD(); // Show zoom HUD when toggling
-                },
-                { passive: false, capture: true }
-            );
-            content._mjrDblClickResetBound = true;
+        if (!content._mjrOverlayResizeBound && "ResizeObserver" in window) {
+            try {
+                overlay._mjrResizeObserver?.disconnect?.();
+            } catch {}
+            const ro = new ResizeObserver(() => {
+                try {
+                    state._viewportCache = null;
+                } catch {}
+                scheduleOverlayRedraw();
+            });
+            try {
+                ro.observe(content);
+            } catch {}
+            overlay._mjrResizeObserver = ro;
+            lifecycleUnsubs.push(() => {
+                try {
+                    ro.disconnect();
+                } catch {}
+            });
+            content._mjrOverlayResizeBound = true;
         }
     } catch {}
 
     // Keyboard shortcuts (installed on capture phase to avoid ComfyUI/global handlers eating events).
-    function handleKeyboard(e) {
-        // Check if hotkeys are suspended (e.g. when dialogs/popovers are open)
-        if (window._mjrHotkeysState?.suspended) return;
-
-        if (overlay.style.display === 'none') return;
-
-        // If an input-like element is focused inside the viewer, avoid hijacking typing.
-        try {
-            const t = e.target;
-            if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
-                if (e.key === "Escape") {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    e.stopImmediatePropagation?.();
-                    closeViewer();
-                }
-                return;
-            }
-        } catch {}
-
-        const isSingle = state.mode === VIEWER_MODES.SINGLE;
-        const current = state.assets[state.currentIndex];
-
-        const setRatingFromKey = async (key) => {
-            if (!isSingle) return false;
-            if (!current?.id) return false;
-            if (key !== "0" && key !== "1" && key !== "2" && key !== "3" && key !== "4" && key !== "5") return false;
-            const rating = key === "0" ? 0 : Number(key);
-            if (!Number.isFinite(rating)) return false;
-
+    const keyboard = installViewerKeyboard({
+        overlay,
+        content,
+        singleView,
+        state,
+        VIEWER_MODES,
+        computeOneToOneZoom,
+        setZoom,
+        scheduleOverlayRedraw,
+        scheduleApplyGrade,
+        syncToolsUIFromState,
+        navigateViewerAssets,
+        closeViewer,
+        renderBadges,
+        updateAssetRating,
+        safeDispatchCustomEvent,
+        ASSET_RATING_CHANGED_EVENT,
+        probeTooltip,
+        loupeWrap,
+        getVideoControls: () => {
             try {
-                const result = await updateAssetRating(current.id, rating);
-                if (!result?.ok) {
-                    console.warn("[Viewer] Rating update failed:", result?.error || result);
-                    return true;
-                }
-                current.rating = rating;
-                safeDispatchCustomEvent(
-                    ASSET_RATING_CHANGED_EVENT,
-                    { assetId: String(current.id), rating },
-                    { warnPrefix: "[Viewer]" }
-                );
-                return true;
-            } catch (e) {
-                console.error("[Viewer] Rating update exception:", e);
-                return true;
-            }
-        };
-
-        const stepFrame = async (direction) => {
-            if (!isSingle) return false;
-            if (current?.kind !== "video") return false;
-            const video = singleView.querySelector("video");
-            if (!video) return false;
-
-            try {
-                // Pause so arrows behave deterministically.
-                video.pause?.();
-            } catch {}
-
-            const fpsGuess = 30;
-            const step = 1 / fpsGuess;
-            const delta = direction * step;
-
-            try {
-                const duration = Number(video.duration);
-                const next = Math.max(0, Math.min(Number.isFinite(duration) ? duration : Infinity, (video.currentTime || 0) + delta));
-                video.currentTime = next;
-                try {
-                    video.dispatchEvent?.(new CustomEvent("mjr:frameStep", { detail: { direction, time: next } }));
-                } catch {}
-                return true;
+                return state?._videoControlsMounted || null;
             } catch {
-                return true;
+                return null;
             }
-        };
+        },
+        lifecycle,
+    });
 
-        // Rating shortcuts (viewer single only)
-        if (isSingle && (e.key === "0" || e.key === "1" || e.key === "2" || e.key === "3" || e.key === "4" || e.key === "5")) {
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation?.();
-            void setRatingFromKey(e.key);
-            return;
-        }
-
-        // Frame-by-frame (viewer single + video only)
-        // Shift+Arrow keys for frame stepping when viewing a single video
-        if (isSingle && e.shiftKey && (e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "ArrowLeft" || e.key === "ArrowRight")) {
-            const videoEl = overlay.querySelector('video');
-            if (videoEl) {
-                // Video exists - use Shift+arrows for frame stepping
-                e.preventDefault();
-                e.stopPropagation();
-                e.stopImmediatePropagation?.();
-                const direction = (e.key === "ArrowUp" || e.key === "ArrowLeft") ? -1 : 1;
-                void stepFrame(direction);
-                return;
-            }
-        }
-
-        switch (e.key) {
-            case " ":
-            case "Spacebar": {
-                // Toggle video play/pause (viewer single + video only)
-                if (isSingle && current?.kind === "video") {
-                    const videoEl = singleView.querySelector("video");
-                    if (videoEl) {
-                        try {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            e.stopImmediatePropagation?.();
-                        } catch {}
-                        try {
-                            if (videoEl.paused) {
-                                const p = videoEl.play?.();
-                                if (p && typeof p.catch === "function") p.catch(() => {});
-                            } else {
-                                videoEl.pause?.();
-                            }
-                        } catch {}
-                        break;
-                    }
-                }
-                break;
-            }
-            case 'Tab':
-                // FIX: Focus trap - prevent tabbing to elements outside the viewer
-                e.preventDefault();
-                e.stopPropagation();
-                e.stopImmediatePropagation?.();
-                // Keep focus within the viewer overlay
-                if (!overlay.contains(document.activeElement)) {
-                    overlay.focus();
-                }
-                break;
-            case 'Escape':
-                closeViewer();
-                break;
-            case 'ArrowLeft':
-                // Plain arrows navigate between assets
-                navigateViewerAssets(-1);
-                break;
-            case 'ArrowRight':
-                // Plain arrows navigate between assets
-                navigateViewerAssets(1);
-                break;
-            case '+':
-            case '=':
-                setZoom((Number(state.zoom) || 1) + 0.25, { clientX: state._lastPointerX, clientY: state._lastPointerY });
-                showZoomHUD(); // Show zoom HUD when zooming with keyboard
-                break;
-            case '-':
-            case '_':
-                setZoom((Number(state.zoom) || 1) - 0.25, { clientX: state._lastPointerX, clientY: state._lastPointerY });
-                showZoomHUD(); // Show zoom HUD when zooming with keyboard
-                break;
-        }
-    }
-
-    // Bind once per overlay instance.
-    try {
-        if (!overlay._mjrKeyboardBound) {
-            window.addEventListener("keydown", handleKeyboard, true);
-            overlay._mjrKeyboardBound = true;
-        }
-    } catch {
+    // Bind/unbind global listeners only while the viewer is visible.
+    // Prevents hotkeys/scroll from leaking to ComfyUI/browser when the viewer is closed.
+    let _openUnsubs = [];
+    const disposeOpenListeners = () => {
         try {
-            document.addEventListener("keydown", handleKeyboard, true);
+            for (const u of _openUnsubs) safeCall(u);
         } catch {}
-    }
+        _openUnsubs = [];
+        try {
+            keyboard?.unbind?.();
+        } catch {}
+    };
+    const bindOpenListeners = () => {
+        disposeOpenListeners();
+        try {
+            _openUnsubs.push(
+                safeAddListener(overlay, "click", (e) => {
+                    try {
+                        if (e.target !== overlay) return;
+                    } catch {}
+                    closeViewer();
+                })
+            );
+        } catch {}
+        try {
+            _openUnsubs.push(safeAddListener(content, "wheel", onWheelZoom, { passive: false, capture: true }));
+        } catch {}
+        try {
+            _openUnsubs.push(
+                safeAddListener(
+                    content,
+                    "mousemove",
+                    (e) => {
+                        try {
+                            state._lastPointerX = e.clientX;
+                            state._lastPointerY = e.clientY;
+                        } catch {}
+                    },
+                    { passive: true, capture: true }
+                )
+            );
+        } catch {}
+        try {
+            keyboard?.bind?.();
+        } catch {}
+    };
 
     // Keep viewer badges in sync when tags/ratings change elsewhere (sidebar, panel hotkeys, etc.).
     try {
         if (!overlay._mjrBadgeSyncBound) {
-            window.addEventListener(
-                ASSET_RATING_CHANGED_EVENT,
-                (e) => {
+            const onRatingSync = (e) => {
+                try {
                     const id = e?.detail?.assetId;
                     const rating = e?.detail?.rating;
                     if (id == null) return;
@@ -1636,15 +2029,13 @@ export function createViewer() {
                         }
                     }
                     try {
-                        _metaCache.delete(String(id));
+                        metadataHydrator?.deleteCached?.(id);
                     } catch {}
                     renderBadges();
-                },
-                { passive: true }
-            );
-            window.addEventListener(
-                ASSET_TAGS_CHANGED_EVENT,
-                (e) => {
+                } catch {}
+            };
+            const onTagsSync = (e) => {
+                try {
                     const id = e?.detail?.assetId;
                     const tags = e?.detail?.tags;
                     if (id == null) return;
@@ -1654,17 +2045,28 @@ export function createViewer() {
                         }
                     }
                     try {
-                        _metaCache.delete(String(id));
+                        metadataHydrator?.deleteCached?.(id);
                     } catch {}
                     renderBadges();
-                },
-                { passive: true }
-            );
+                } catch {}
+            };
+            lifecycleUnsubs.push(safeAddListener(window, ASSET_RATING_CHANGED_EVENT, onRatingSync, { passive: true }));
+            lifecycleUnsubs.push(safeAddListener(window, ASSET_TAGS_CHANGED_EVENT, onTagsSync, { passive: true }));
             overlay._mjrBadgeSyncBound = true;
         }
     } catch {}
 
     function closeViewer() {
+        try {
+            metadataHydrator?.abort?.();
+        } catch {}
+        try {
+            destroyPlayerBar();
+        } catch {}
+        try {
+            state._scopesVideoAbort?.abort?.();
+        } catch {}
+        state._scopesVideoAbort = null;
         // Ensure media playback is fully stopped when closing the overlay.
         // Hiding the overlay alone does not stop HTMLMediaElement audio in all browsers.
         try {
@@ -1704,16 +2106,31 @@ export function createViewer() {
 
         // Free DOM resources (and ensure playback stops even if `pause()` was ignored).
         try {
+            destroyMediaProcessorsIn(singleView);
             singleView.innerHTML = "";
         } catch {}
         try {
+            destroyMediaProcessorsIn(abView);
             abView.innerHTML = "";
         } catch {}
         try {
+            destroyMediaProcessorsIn(sideView);
             sideView.innerHTML = "";
         } catch {}
 
+        try {
+            state.genInfoOpen = false;
+        } catch {}
+        try {
+            stopGenInfoFetch();
+        } catch {}
+        try {
+            genInfoOverlay.style.display = "none";
+            genInfoBody.innerHTML = "";
+        } catch {}
+
         overlay.style.display = 'none';
+        disposeOpenListeners();
         try {
             document.body.style.overflow = state._prevBodyOverflow ?? '';
         } catch {
@@ -1737,17 +2154,34 @@ export function createViewer() {
     // Public API
     const api = {
         open(assets, startIndex = 0, compareAsset = null) {
+            bindOpenListeners();
             state.assets = Array.isArray(assets) ? assets : [assets];
             state.currentIndex = Math.max(0, Math.min(startIndex, state.assets.length - 1));
             state.zoom = 1;
             state.panX = 0;
             state.panY = 0;
             state.targetZoom = 1;
+            state._userInteracted = false;
+            state._panHintAt = 0;
+            try {
+                if (state._panHintTimer) clearTimeout(state._panHintTimer);
+            } catch {}
+            state._panHintTimer = null;
             state._lastPointerX = null;
             state._lastPointerY = null;
             state._mediaW = 0;
             state._mediaH = 0;
             state.compareAsset = compareAsset;
+            state.gridMode = 0;
+            state.genInfoOpen = true;
+            stopGenInfoFetch();
+            state._probe = null;
+            try {
+                probeTooltip.style.display = "none";
+            } catch {}
+            try {
+                loupeWrap.style.display = "none";
+            } catch {}
 
             overlay.style.display = 'flex';
 
@@ -1773,6 +2207,13 @@ export function createViewer() {
             window._mjrHotkeysState.scope = "viewer";
 
             updateUI();
+            try {
+                syncToolsUIFromState();
+            } catch {}
+            try {
+                scheduleApplyGrade();
+            } catch {}
+            scheduleOverlayRedraw();
             // No animation loop needed - transforms are applied directly
         },
 
@@ -1794,12 +2235,53 @@ export function createViewer() {
         },
 
         dispose() {
+            // Best-effort: never throw to UI.
             try {
-                window.removeEventListener("keydown", handleKeyboard, true);
-                overlay._mjrKeyboardBound = false;
+                closeViewer();
+            } catch {}
+
+            try {
+                destroyMediaProcessorsIn(singleView);
             } catch {}
             try {
-                document.removeEventListener("keydown", handleKeyboard, true);
+                destroyMediaProcessorsIn(abView);
+            } catch {}
+            try {
+                destroyMediaProcessorsIn(sideView);
+            } catch {}
+
+            try {
+                if (_overlayRAF != null) cancelAnimationFrame(_overlayRAF);
+            } catch {}
+            try {
+                if (_gradeRAF != null) cancelAnimationFrame(_gradeRAF);
+            } catch {}
+            try {
+                probe?.dispose?.();
+            } catch {}
+            try {
+                keyboard?.dispose?.();
+            } catch {}
+
+            try {
+                overlay._mjrResizeObserver?.disconnect?.();
+            } catch {}
+            try {
+                overlay._mjrResizeObserver = null;
+            } catch {}
+            try {
+                metadataHydrator?.dispose?.();
+            } catch {}
+
+            try {
+                for (const u of overlay._mjrViewerUnsubs || []) safeCall(u);
+            } catch {}
+            try {
+                overlay._mjrViewerUnsubs = [];
+            } catch {}
+
+            try {
+                overlay.remove?.();
             } catch {}
         }
     };
@@ -1824,38 +2306,15 @@ export function createViewer() {
 }
 
 /**
- * Helper to create mode button
- */
-function createModeButton(label, mode) {
-    const btn = document.createElement("button");
-    btn.textContent = label;
-    btn.dataset.mode = mode;
-    btn.style.cssText = `
-        padding: 4px 12px;
-        background: rgba(255, 255, 255, 0.1);
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        color: white;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 12px;
-        transition: all 0.2s;
-    `;
-    btn.addEventListener('mouseenter', () => {
-        btn.style.background = 'rgba(255, 255, 255, 0.2)';
-    });
-    btn.addEventListener('mouseleave', () => {
-        btn.style.background = 'rgba(255, 255, 255, 0.1)';
-    });
-    return btn;
-}
-
-/**
  * Helper to create icon button
  */
 function createIconButton(label, title) {
     const btn = document.createElement("button");
     btn.textContent = label;
     btn.title = title;
+    try {
+        btn.setAttribute("aria-label", title || label || "Button");
+    } catch {}
     btn.style.cssText = `
         padding: 6px 12px;
         background: transparent;
@@ -1879,9 +2338,22 @@ function createIconButton(label, title) {
  * Get or create global viewer instance
  */
 export function getViewerInstance() {
-    const existing = document.querySelector('.mjr-viewer-overlay');
-    if (existing && existing._mjrViewerAPI) {
-        return existing._mjrViewerAPI;
+    const all = Array.from(document.querySelectorAll?.(".mjr-viewer-overlay") || []);
+    if (all.length) {
+        const keep = all[all.length - 1];
+        for (const el of all) {
+            if (el === keep) continue;
+            try {
+                el?._mjrViewerAPI?.dispose?.();
+            } catch {}
+            try {
+                el.remove?.();
+            } catch {}
+        }
+        if (keep && keep._mjrViewerAPI) return keep._mjrViewerAPI;
+        try {
+            keep?.remove?.();
+        } catch {}
     }
 
     const viewer = createViewer();

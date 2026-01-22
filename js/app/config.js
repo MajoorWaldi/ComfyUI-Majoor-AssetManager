@@ -27,7 +27,16 @@ export async function getOutputDirectory() {
 }
 
 // App constants
-export const APP_CONFIG = {
+export const APP_DEFAULTS = Object.freeze({
+    // Debug / diagnostics (opt-in)
+    DEBUG_SAFE_CALL: false,
+    DEBUG_SAFE_LISTENERS: false,
+
+    // Viewer
+    VIEWER_ALLOW_PAN_AT_ZOOM_1: false,
+    VIEWER_VIDEO_GRADE_THROTTLE_FPS: 15,
+    VIEWER_SCOPES_FPS: 10,
+
     // Grid
     GRID_MIN_SIZE: 120,
     GRID_GAP: 10,
@@ -52,6 +61,7 @@ export const APP_CONFIG = {
 
     // Rating/tags hydration (grid)
     RT_HYDRATE_CONCURRENCY: 2,
+    RT_HYDRATE_QUEUE_MAX: 100,
     RT_HYDRATE_SEEN_MAX: 20000,
     RT_HYDRATE_PRUNE_BUDGET: 250,
     RT_HYDRATE_SEEN_TTL_MS: 10 * 60 * 1000,
@@ -59,4 +69,9 @@ export const APP_CONFIG = {
     // Viewer metadata cache
     VIEWER_META_TTL_MS: 30_000,
     VIEWER_META_MAX_ENTRIES: 500
+});
+
+// Runtime config (some values are user-tunable via settings).
+export const APP_CONFIG = {
+    ...APP_DEFAULTS,
 };

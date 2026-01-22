@@ -2,26 +2,26 @@
  * Majoor settings integration with ComfyUI settings panel.
  */
 
-import { APP_CONFIG } from "./config.js";
+import { APP_CONFIG, APP_DEFAULTS } from "./config.js";
 import { invalidateObsCache, setProbeBackendMode } from "../api/client.js";
 import { safeDispatchCustomEvent } from "../utils/events.js";
 
-const SETTINGS_KEY = "mjrSettings";
+import { SETTINGS_KEY } from "./settingsStore.js";
 const SETTINGS_PREFIX = "Majoor";
 
 const DEFAULT_SETTINGS = {
     grid: {
-        pageSize: APP_CONFIG.DEFAULT_PAGE_SIZE
+        pageSize: APP_DEFAULTS.DEFAULT_PAGE_SIZE
     },
     siblings: {
         hidePngSiblings: true
     },
     autoScan: {
-        enabled: APP_CONFIG.AUTO_SCAN_ENABLED,
-        onStartup: APP_CONFIG.AUTO_SCAN_ON_STARTUP
+        enabled: APP_DEFAULTS.AUTO_SCAN_ENABLED,
+        onStartup: APP_DEFAULTS.AUTO_SCAN_ON_STARTUP
     },
     status: {
-        pollInterval: APP_CONFIG.STATUS_POLL_INTERVAL
+        pollInterval: APP_DEFAULTS.STATUS_POLL_INTERVAL
     },
     observability: {
         enabled: false
@@ -31,6 +31,21 @@ const DEFAULT_SETTINGS = {
     },
     probeBackend: {
         mode: "auto"
+    },
+    ratingTagsSync: {
+        enabled: false
+    },
+    cache: {
+        // TTL for `getAvailableTags()` caching in `js/api/client.js`
+        tagsTTLms: 30_000
+    },
+    workflowMinimap: {
+        nodeColors: true,
+        showLinks: true,
+        showGroups: true,
+        renderBypassState: true,
+        renderErrorState: true,
+        showViewport: true,
     }
 };
 
@@ -58,7 +73,26 @@ export const loadMajoorSettings = () => {
         const raw = localStorage.getItem(SETTINGS_KEY);
         if (!raw) return { ...DEFAULT_SETTINGS };
         const parsed = JSON.parse(raw);
-        return deepMerge(DEFAULT_SETTINGS, parsed);
+        // Whitelist top-level keys (avoid carrying unknown keys from localStorage).
+        const allowed = new Set([
+            "grid",
+            "siblings",
+            "autoScan",
+            "status",
+            "observability",
+            "sidebar",
+            "probeBackend",
+            "ratingTagsSync",
+            "cache",
+            "workflowMinimap",
+        ]);
+        const sanitized = {};
+        if (parsed && typeof parsed === "object") {
+            for (const [k, v] of Object.entries(parsed)) {
+                if (allowed.has(k)) sanitized[k] = v;
+            }
+        }
+        return deepMerge(DEFAULT_SETTINGS, sanitized);
     } catch (error) {
         console.warn("[Majoor] settings load failed, using defaults", error);
         return { ...DEFAULT_SETTINGS };
@@ -71,16 +105,30 @@ export const saveMajoorSettings = (settings) => {
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
     } catch (error) {
         console.warn("[Majoor] settings save failed", error);
+        // Best-effort user notification (throttled).
+        try {
+            const now = Date.now();
+            const last = Number(window?._mjrSettingsSaveFailAt || 0) || 0;
+            if (now - last > 30_000) {
+                window._mjrSettingsSaveFailAt = now;
+                import("./dialogs.js")
+                    .then(({ comfyAlert }) => comfyAlert("Majoor: Failed to save settings (browser storage full or blocked)."))
+                    .catch(() => {});
+            }
+        } catch {}
+        try {
+            safeDispatchCustomEvent("mjr-settings-save-failed", { error: String(error?.message || error || "") }, { warnPrefix: "[Majoor]" });
+        } catch {}
     }
 };
 
 const applySettingsToConfig = (settings) => {
-    const maxPage = Number(APP_CONFIG.MAX_PAGE_SIZE) || 2000;
-    const pageSize = Math.max(50, Math.min(maxPage, Number(settings.grid?.pageSize) || APP_CONFIG.DEFAULT_PAGE_SIZE));
+    const maxPage = Number(APP_DEFAULTS.MAX_PAGE_SIZE) || 2000;
+    const pageSize = Math.max(50, Math.min(maxPage, Number(settings.grid?.pageSize) || APP_DEFAULTS.DEFAULT_PAGE_SIZE));
     APP_CONFIG.DEFAULT_PAGE_SIZE = pageSize;
     APP_CONFIG.AUTO_SCAN_ENABLED = !!settings.autoScan?.enabled;
     APP_CONFIG.AUTO_SCAN_ON_STARTUP = !!settings.autoScan?.onStartup;
-    APP_CONFIG.STATUS_POLL_INTERVAL = Math.max(1000, Number(settings.status?.pollInterval) || APP_CONFIG.STATUS_POLL_INTERVAL);
+    APP_CONFIG.STATUS_POLL_INTERVAL = Math.max(1000, Number(settings.status?.pollInterval) || APP_DEFAULTS.STATUS_POLL_INTERVAL);
 };
 
 export const registerMajoorSettings = (app, onApplied) => {
@@ -160,7 +208,7 @@ export const registerMajoorSettings = (app, onApplied) => {
     app.ui.settings.addSetting({
         id: `${SETTINGS_PREFIX}.Observability.Enabled`,
         name: "Majoor: Observability (request logging)",
-        tooltip: "Enables backend request logs for debugging. When disabled, Majoor will send X-MJR-OBS: off to suppress request logs.",
+        tooltip: "Controls Majoor backend request logs (via X-MJR-OBS header). When disabled, Majoor suppresses its own request logs.",
         type: "boolean",
         defaultValue: !!settings.observability?.enabled,
         onChange: (val) => {
@@ -198,6 +246,22 @@ export const registerMajoorSettings = (app, onApplied) => {
             settings.ratingTagsSync.enabled = !!val;
             saveMajoorSettings(settings);
             notifyApplied("ratingTagsSync.enabled");
+        }
+    });
+
+    app.ui.settings.addSetting({
+        id: `${SETTINGS_PREFIX}.Cache.TagsTTLms`,
+        name: "Majoor: Tags cache TTL (ms)",
+        tooltip: "How long to cache the available tags list in the browser (lower = fresher, higher = fewer requests).",
+        type: "number",
+        defaultValue: Number(settings.cache?.tagsTTLms) || DEFAULT_SETTINGS.cache.tagsTTLms,
+        attrs: { min: 1000, max: 10 * 60_000, step: 1000 },
+        onChange: (val) => {
+            const n = Math.floor(Number(val) || DEFAULT_SETTINGS.cache.tagsTTLms);
+            settings.cache = settings.cache || {};
+            settings.cache.tagsTTLms = Math.max(1000, Math.min(10 * 60_000, n));
+            saveMajoorSettings(settings);
+            notifyApplied("cache.tagsTTLms");
         }
     });
 

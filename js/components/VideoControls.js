@@ -58,6 +58,21 @@ function createBtn(className, text, title) {
     return b;
 }
 
+function createIconBtn(className, iconClass, title, ariaLabel) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = `mjr-video-btn ${className || ""}`.trim();
+    if (title) b.title = title;
+    if (ariaLabel) b.setAttribute("aria-label", ariaLabel);
+
+    const icon = document.createElement("span");
+    icon.className = `pi ${iconClass || ""}`.trim();
+    icon.setAttribute("aria-hidden", "true");
+    b.appendChild(icon);
+
+    return { btn: b, icon };
+}
+
 function createNumberInput(className, { min, max, step, value, title, ariaLabel, widthPx } = {}) {
     const i = document.createElement("input");
     i.type = "number";
@@ -79,15 +94,125 @@ function createNumberInput(className, { min, max, step, value, title, ariaLabel,
  * Viewer variant adds Nuke-style range + frame controls (in/out, step, loop/once).
  *
  * @param {HTMLVideoElement} video
- * @param {{variant?: 'viewer'|'preview', hostEl?: HTMLElement, fullscreenEl?: HTMLElement}} opts
- * @returns {{controlsEl: HTMLElement|null, destroy: () => void}}
+ * @param {{variant?: 'viewer'|'preview', hostEl?: HTMLElement, fullscreenEl?: HTMLElement, initialFps?: number, initialFrameCount?: number}} opts
+ * @returns {{controlsEl: HTMLElement|null, destroy: () => void, setMediaInfo?: (info: {fps?: number, frameCount?: number}) => void}}
  */
 export function mountVideoControls(video, opts = {}) {
     try {
-        const variant = opts?.variant === "preview" ? "preview" : "viewer";
-        const advanced = variant === "viewer";
+        const variant = opts?.variant === "preview" ? "preview" : opts?.variant === "viewerbar" ? "viewerbar" : "viewer";
+        const advanced = variant !== "preview";
+        const initialFps = (() => {
+            try {
+                const v = Number(opts?.initialFps);
+                return Number.isFinite(v) && v > 0 ? v : null;
+            } catch {
+                return null;
+            }
+        })();
         const hostEl = opts?.hostEl || video?.parentElement;
         if (!video || !hostEl) return { controlsEl: null, destroy: noop };
+
+        // ---------------------------------------------------------------------
+        // Preview variant: minimal play/pause overlay + continuous looping
+        // ---------------------------------------------------------------------
+        if (variant === "preview") {
+            const unsubs = [];
+            try {
+                // Preview thumbnails should loop continuously (muted).
+                video.controls = false;
+                video.loop = true;
+                video.muted = true;
+                video.playsInline = true;
+                video.autoplay = true;
+            } catch {}
+
+            const controls = document.createElement("div");
+            controls.className = "mjr-video-controls mjr-video-controls--preview";
+            try {
+                controls.setAttribute("role", "group");
+                controls.setAttribute("aria-label", "Video preview controls");
+            } catch {}
+
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "mjr-video-preview-btn";
+            btn.title = "Play/Pause";
+            try {
+                btn.setAttribute("aria-label", "Play/Pause");
+            } catch {}
+
+            const icon = document.createElement("span");
+            icon.className = "pi pi-play";
+            try {
+                icon.setAttribute("aria-hidden", "true");
+            } catch {}
+            btn.appendChild(icon);
+            controls.appendChild(btn);
+
+            const setIcon = () => {
+                try {
+                    const paused = Boolean(video?.paused);
+                    icon.className = `pi ${paused ? "pi-play" : "pi-pause"}`;
+                } catch {}
+            };
+
+            const tryPlay = () => {
+                try {
+                    const p = video.play?.();
+                    if (p && typeof p.catch === "function") p.catch(() => {});
+                } catch {}
+            };
+
+            const toggle = (e) => {
+                try {
+                    e?.stopPropagation?.();
+                } catch {}
+                try {
+                    if (video.paused) {
+                        tryPlay();
+                    } else {
+                        video.pause?.();
+                    }
+                } catch {}
+                setIcon();
+            };
+
+            try {
+                hostEl.appendChild(controls);
+            } catch {}
+
+            // Best-effort autoplay.
+            try {
+                tryPlay();
+            } catch {}
+            unsubs.push(safeAddListener(video, "loadedmetadata", () => tryPlay(), { passive: true }));
+            unsubs.push(safeAddListener(video, "canplay", () => tryPlay(), { passive: true }));
+
+            unsubs.push(safeAddListener(btn, "click", toggle));
+            unsubs.push(safeAddListener(video, "play", setIcon, { passive: true }));
+            unsubs.push(safeAddListener(video, "pause", setIcon, { passive: true }));
+            unsubs.push(safeAddListener(video, "ended", () => tryPlay(), { passive: true }));
+            try {
+                setIcon();
+            } catch {}
+
+            return {
+                controlsEl: controls,
+                destroy: () => {
+                    try {
+                        for (const u of unsubs) safeCall(() => u?.());
+                    } catch {}
+                    try {
+                        controls.remove?.();
+                    } catch {}
+                },
+            };
+        }
+
+        // We manage looping ourselves (Loop/Once + in/out range); disable native looping to avoid conflicts.
+        try {
+            video.loop = false;
+        } catch {}
 
         safeCall(() => hostEl.classList?.add("mjr-video-host"));
         safeCall(() => video.classList?.add("mjr-video-el"));
@@ -109,6 +234,9 @@ export function mountVideoControls(video, opts = {}) {
         controls.appendChild(rowTop);
         controls.appendChild(rowBottom);
 
+        const seekWrap = document.createElement("div");
+        seekWrap.className = "mjr-video-seek-wrap";
+
         const seek = document.createElement("input");
         seek.className = "mjr-video-range mjr-video-range--seek";
         seek.type = "range";
@@ -118,9 +246,85 @@ export function mountVideoControls(video, opts = {}) {
         seek.value = "0";
         seek.setAttribute("aria-label", "Seek");
 
+        const seekOverlay = document.createElement("div");
+        seekOverlay.className = "mjr-video-seek-overlay";
+
+        // Seekbar range zones (more reliable than styling <input type="range"> across browsers).
+        // Only used in advanced mode (viewer/viewerbar).
+        let seekZones = null;
+        let leftTrimZone = null;
+        let selectedZone = null;
+        let rightTrimZone = null;
+        if (advanced) {
+            seekZones = document.createElement("div");
+            seekZones.className = "mjr-video-seek-zones";
+
+            leftTrimZone = document.createElement("div");
+            leftTrimZone.className = "mjr-video-seek-zone mjr-video-seek-zone--leftTrim";
+
+            selectedZone = document.createElement("div");
+            selectedZone.className = "mjr-video-seek-zone mjr-video-seek-zone--selected";
+
+            rightTrimZone = document.createElement("div");
+            rightTrimZone.className = "mjr-video-seek-zone mjr-video-seek-zone--rightTrim";
+
+            seekZones.appendChild(leftTrimZone);
+            seekZones.appendChild(selectedZone);
+            seekZones.appendChild(rightTrimZone);
+        }
+
+        const tickBar = document.createElement("div");
+        tickBar.className = "mjr-video-seek-ticks";
+        const labelsBar = document.createElement("div");
+        labelsBar.className = "mjr-video-seek-labels";
+        const inMark = document.createElement("div");
+        inMark.className = "mjr-video-seek-mark mjr-video-seek-mark--in";
+        const outMark = document.createElement("div");
+        outMark.className = "mjr-video-seek-mark mjr-video-seek-mark--out";
+        const playhead = document.createElement("div");
+        playhead.className = "mjr-video-seek-playhead";
+        const playheadLabel = document.createElement("div");
+        playheadLabel.className = "mjr-video-seek-playhead-label";
+        seekOverlay.appendChild(tickBar);
+        seekOverlay.appendChild(labelsBar);
+        seekOverlay.appendChild(playhead);
+        seekOverlay.appendChild(playheadLabel);
+
+        // Draggable I/O handles (bigger hit area than the thin markers).
+        const inHandle = document.createElement("div");
+        inHandle.className = "mjr-video-seek-handle mjr-video-seek-handle--in";
+        inHandle.title = "Drag to set In";
+        inHandle.setAttribute("aria-label", "Drag to set In");
+
+        const outHandle = document.createElement("div");
+        outHandle.className = "mjr-video-seek-handle mjr-video-seek-handle--out";
+        outHandle.title = "Drag to set Out";
+        outHandle.setAttribute("aria-label", "Drag to set Out");
+
+        seekWrap.appendChild(seek);
+        if (seekZones) seekWrap.appendChild(seekZones);
+        seekWrap.appendChild(seekOverlay);
+        // Marks are separate from the non-interactive overlay so they can be dragged directly.
+        seekWrap.appendChild(inMark);
+        seekWrap.appendChild(outMark);
+        seekWrap.appendChild(inHandle);
+        seekWrap.appendChild(outHandle);
+
         const timeLabel = document.createElement("span");
         timeLabel.className = "mjr-video-time";
         timeLabel.textContent = "0:00 / 0:00";
+
+        const rangeCountLabel = document.createElement("span");
+        rangeCountLabel.className = "mjr-video-range-count";
+        rangeCountLabel.textContent = "";
+        try {
+            rangeCountLabel.style.display = "none";
+        } catch {}
+
+        const timeGroup = document.createElement("div");
+        timeGroup.className = "mjr-video-timegroup";
+        timeGroup.appendChild(timeLabel);
+        if (advanced) timeGroup.appendChild(rangeCountLabel);
 
         const frameLabel = document.createElement("span");
         frameLabel.className = "mjr-video-frame";
@@ -129,13 +333,15 @@ export function mountVideoControls(video, opts = {}) {
         const playBtn = createBtn("mjr-video-btn--play", "Play", "Play/Pause (Space)");
         const prevFrameBtn = createBtn("mjr-video-btn--step", "<", "Step back");
         const nextFrameBtn = createBtn("mjr-video-btn--step", ">", "Step forward");
-        const toInBtn = createBtn("mjr-video-btn--jump", "|<", "Go to In");
-        const toOutBtn = createBtn("mjr-video-btn--jump", ">|", "Go to Out");
+        const toInBtn = createBtn("mjr-video-btn--jump mjr-video-btn--in", "|<", "Go to In");
+        const toOutBtn = createBtn("mjr-video-btn--jump mjr-video-btn--out", ">|", "Go to Out");
 
-        const setInBtn = createBtn("mjr-video-btn--mark", "I", "Set In from current frame");
-        const setOutBtn = createBtn("mjr-video-btn--mark", "O", "Set Out from current frame");
-        const loopBtn = createBtn("mjr-video-btn--toggle", "Loop", "Loop playback in range");
-        const onceBtn = createBtn("mjr-video-btn--toggle", "Once", "Play once (stop at Out)");
+        const setInBtn = createBtn("mjr-video-btn--mark mjr-video-btn--in", "I", "Set In from current frame");
+        const setOutBtn = createBtn("mjr-video-btn--mark mjr-video-btn--out", "O", "Set Out from current frame");
+        const loopIcon = createIconBtn("mjr-video-btn--toggle", "pi-refresh", "Loop playback in range", "Loop");
+        const loopBtn = loopIcon.btn;
+        const onceIcon = createIconBtn("mjr-video-btn--toggle", "pi-stop", "Play once (stop at Out)", "Once");
+        const onceBtn = onceIcon.btn;
 
         const inInput = createNumberInput("mjr-video-num--in", { min: 0, step: 1, value: 0, title: "In frame", ariaLabel: "In frame", widthPx: 72 });
         const outInput = createNumberInput("mjr-video-num--out", { min: 0, step: 1, value: 0, title: "Out frame", ariaLabel: "Out frame", widthPx: 72 });
@@ -150,13 +356,14 @@ export function mountVideoControls(video, opts = {}) {
         const fpsInput = createNumberInput("mjr-video-num--fps", {
             min: 1,
             step: 1,
-            value: 30,
+            value: Math.max(1, Math.floor(initialFps || 30)),
             title: "FPS (used for frame stepping)",
             ariaLabel: "FPS",
             widthPx: 56
         });
 
-        const muteBtn = createBtn("mjr-video-btn--mute", "Mute", "Mute");
+        const muteIcon = createIconBtn("mjr-video-btn--mute", "pi-volume-up", "Mute", "Mute");
+        const muteBtn = muteIcon.btn;
         const volume = document.createElement("input");
         volume.className = "mjr-video-range mjr-video-range--volume";
         volume.type = "range";
@@ -165,8 +372,6 @@ export function mountVideoControls(video, opts = {}) {
         volume.step = "0.02";
         volume.value = String(clamp01(Number(video.volume) || 0));
         volume.setAttribute("aria-label", "Volume");
-
-        const fsBtn = createBtn("mjr-video-btn--fs", "FS", "Fullscreen");
 
         const inGroup = document.createElement("div");
         inGroup.className = "mjr-video-group mjr-video-group--in";
@@ -182,25 +387,30 @@ export function mountVideoControls(video, opts = {}) {
             outGroup.appendChild(outInput);
         }
 
-        const nukeGroup = document.createElement("div");
-        nukeGroup.className = "mjr-video-group mjr-video-group--nuke";
+        const leftAdjustGroup = document.createElement("div");
+        leftAdjustGroup.className = "mjr-video-group mjr-video-group--adjust-left";
         if (advanced) {
-            nukeGroup.appendChild(setInBtn);
-            nukeGroup.appendChild(setOutBtn);
-            nukeGroup.appendChild(document.createTextNode("Step"));
-            nukeGroup.appendChild(stepInput);
-            nukeGroup.appendChild(document.createTextNode("FPS"));
-            nukeGroup.appendChild(fpsInput);
-            nukeGroup.appendChild(loopBtn);
-            nukeGroup.appendChild(onceBtn);
+            // Requested: keep "I" (set in), FPS and Step on the left side of the player.
+            leftAdjustGroup.appendChild(setInBtn);
+            leftAdjustGroup.appendChild(document.createTextNode("Step"));
+            leftAdjustGroup.appendChild(stepInput);
+            leftAdjustGroup.appendChild(document.createTextNode("FPS"));
+            leftAdjustGroup.appendChild(fpsInput);
+        }
+
+        const rightAdjustGroup = document.createElement("div");
+        rightAdjustGroup.className = "mjr-video-group mjr-video-group--adjust-right";
+        if (advanced) {
+            rightAdjustGroup.appendChild(loopBtn);
+            rightAdjustGroup.appendChild(onceBtn);
         }
 
         // Top row: In (left) — seek — Out (right) — time — frame
-        if (advanced) rowTop.appendChild(inGroup);
-        rowTop.appendChild(seek);
-        if (advanced) rowTop.appendChild(outGroup);
-        rowTop.appendChild(timeLabel);
         if (advanced) rowTop.appendChild(frameLabel);
+        if (advanced) rowTop.appendChild(inGroup);
+        rowTop.appendChild(seekWrap);
+        if (advanced) rowTop.appendChild(outGroup);
+        rowTop.appendChild(timeGroup);
 
         // Bottom row: center transport, right-side extra controls
         const bottomLeft = document.createElement("div");
@@ -216,10 +426,11 @@ export function mountVideoControls(video, opts = {}) {
         transport.appendChild(nextFrameBtn);
         transport.appendChild(toOutBtn);
 
-        if (advanced) bottomRight.appendChild(nukeGroup);
+        if (advanced) bottomLeft.appendChild(leftAdjustGroup);
+        if (advanced) bottomRight.appendChild(rightAdjustGroup);
         bottomRight.appendChild(muteBtn);
+        if (advanced) bottomRight.appendChild(setOutBtn);
         bottomRight.appendChild(volume);
-        bottomRight.appendChild(fsBtn);
 
         rowBottom.appendChild(bottomLeft);
         rowBottom.appendChild(transport);
@@ -229,7 +440,6 @@ export function mountVideoControls(video, opts = {}) {
         const stop = (e) => {
             try {
                 e.stopPropagation?.();
-                e.stopImmediatePropagation?.();
             } catch {}
         };
         const preventStop = (e) => {
@@ -240,35 +450,35 @@ export function mountVideoControls(video, opts = {}) {
         };
 
         const unsubs = [];
-        unsubs.push(safeAddListener(controls, "pointerdown", stop, { capture: true }));
+        // Must NOT run in capture phase, otherwise it blocks pointerdown on child controls
+        // like the draggable In/Out handles. We stop bubbling instead, and rely on the
+        // window-capture guards below to prevent viewer pan/zoom handlers.
+        unsubs.push(safeAddListener(controls, "pointerdown", stop));
         unsubs.push(safeAddListener(controls, "dblclick", preventStop, { capture: true }));
         unsubs.push(safeAddListener(controls, "wheel", preventStop, { capture: true, passive: false }));
 
-        // Stop events early (window capture) so viewer pan/zoom capture handlers don't run.
-        // This is important because the viewer binds on the content container with `{ capture: true }`.
-        const stopIfInControls = (e, { prevent = false } = {}) => {
+        // We intentionally do NOT stop pointer events at the window capture phase, because that would
+        // prevent child controls (like draggable In/Out handles) from receiving pointerdown.
+        // Pan/zoom suppression is handled in `viewer/panzoom.js` by ignoring events originating inside
+        // `.mjr-video-controls`.
+        unsubs.push(safeAddListener(window, "dblclick", (e) => {
             try {
-                if (!controls?.isConnected) return;
-                if (!controls.contains?.(e?.target)) return;
-                if (prevent) {
-                    try {
-                        e.preventDefault?.();
-                    } catch {}
-                }
-                stop(e);
+                if (controls.contains?.(e?.target)) preventStop(e);
             } catch {}
-        };
-        unsubs.push(safeAddListener(window, "pointerdown", (e) => stopIfInControls(e, { prevent: false }), { capture: true }));
-        unsubs.push(safeAddListener(window, "pointermove", (e) => stopIfInControls(e, { prevent: false }), { capture: true }));
-        unsubs.push(safeAddListener(window, "dblclick", (e) => stopIfInControls(e, { prevent: true }), { capture: true }));
-        unsubs.push(safeAddListener(window, "wheel", (e) => stopIfInControls(e, { prevent: true }), { capture: true, passive: false }));
+        }, { capture: true }));
+        unsubs.push(safeAddListener(window, "wheel", (e) => {
+            try {
+                if (controls.contains?.(e?.target)) preventStop(e);
+            } catch {}
+        }, { capture: true, passive: false }));
 
         const state = {
-            fps: 30,
+            fps: Math.max(1, Math.floor(initialFps || 30)),
             step: 1,
             inFrame: null,
             outFrame: null,
-            loop: false,
+            frameCount: null,
+            loop: advanced,
             once: false,
             _seeking: false
         };
@@ -299,11 +509,20 @@ export function mountVideoControls(video, opts = {}) {
             try {
                 setToggleBtn(loopBtn, Boolean(state.loop));
                 setToggleBtn(onceBtn, Boolean(state.once));
+                // Keep loop as default; when switching to "single" (once), update icon for clarity.
+                try {
+                    loopIcon?.icon && (loopIcon.icon.className = `pi pi-refresh`);
+                } catch {}
+                try {
+                    if (onceIcon?.icon) onceIcon.icon.className = `pi ${state.once ? "pi-arrow-right" : "pi-stop"}`;
+                } catch {}
             } catch {}
         };
 
         const durationFrames = () => {
             try {
+                const override = Number(state.frameCount);
+                if (Number.isFinite(override) && override > 0) return Math.max(1, Math.floor(override));
                 const d = Number(video?.duration);
                 const fps = Math.max(1, Math.floor(Number(state.fps) || 30));
                 if (!Number.isFinite(d) || d <= 0) return 0;
@@ -366,7 +585,11 @@ export function mountVideoControls(video, opts = {}) {
         const setMuteLabel = () => {
             try {
                 const muted = Boolean(video?.muted) || (Number(video?.volume) || 0) <= 0.001;
-                muteBtn.textContent = muted ? "Muted" : "Mute";
+                try {
+                    muteIcon.icon.className = `pi ${muted ? "pi-volume-off" : "pi-volume-up"}`;
+                } catch {}
+                muteBtn.title = muted ? "Unmute" : "Mute";
+                muteBtn.setAttribute("aria-label", muted ? "Unmute" : "Mute");
             } catch {}
         };
 
@@ -383,15 +606,47 @@ export function mountVideoControls(video, opts = {}) {
                     const p = clamp01((t || 0) / d);
                     const v = Math.round(p * 1000);
                     if (!Number.isNaN(v) && !seek.matches?.(":active")) seek.value = String(v);
+                    try {
+                        playhead.style.left = `${p * 100}%`;
+                    } catch {}
                 } else {
                     seek.value = "0";
+                    try {
+                        playhead.style.left = "0%";
+                    } catch {}
                 }
 
                 if (advanced) {
-                    frameLabel.textContent = `F: ${currentFrame()}`;
                     const maxF = durationFrames();
+                    const cf = currentFrame();
+                    frameLabel.textContent = `F: ${cf} / ${maxF}`;
+                    try {
+                        // Show current frame value on the ruler, anchored to the playhead.
+                        const durOk = Number.isFinite(d) && d > 0;
+                        if (durOk) {
+                            const p = clamp01((t || 0) / d);
+                            playheadLabel.style.left = `${p * 100}%`;
+                            playheadLabel.textContent = String(cf);
+                            playheadLabel.style.display = "";
+                        } else {
+                            playheadLabel.style.display = "none";
+                        }
+                    } catch {}
                     if (!inInput.matches?.(":focus")) inInput.value = String(state.inFrame ?? 0);
                     if (!outInput.matches?.(":focus")) outInput.value = String(state.outFrame ?? maxF);
+
+                    // Show selected playback range frame count near timecode (only when trimmed).
+                    try {
+                        const { inF, outF, maxF: mx } = getEffectiveInOut();
+                        const fullRange = inF <= 0 && outF >= mx;
+                        const count = Math.max(0, Math.floor(outF) - Math.floor(inF) + 1);
+                        if (!fullRange && mx > 0) {
+                            rangeCountLabel.textContent = `R: ${count}f`;
+                            rangeCountLabel.style.display = "";
+                        } else {
+                            rangeCountLabel.style.display = "none";
+                        }
+                    } catch {}
                 }
             } catch {}
         };
@@ -403,9 +658,111 @@ export function mountVideoControls(video, opts = {}) {
                 if (!Number.isFinite(maxF) || maxF <= 0) return;
                 const inPct = clamp01(inF / maxF) * 100;
                 const outPct = clamp01(outF / maxF) * 100;
-                const a = "rgba(255,255,255,0.14)"; // outside selection
-                const b = "rgba(64,160,255,0.45)"; // selected range
-                seek.style.background = `linear-gradient(to right, ${a} 0%, ${a} ${inPct}%, ${b} ${inPct}%, ${b} ${outPct}%, ${a} ${outPct}%, ${a} 100%)`;
+                const fullRange = inF <= 0 && outF >= maxF;
+
+                // Prefer overlay zones over range background for cross-browser reliability.
+                try {
+                    seek.style.background = "";
+                } catch {}
+
+                try {
+                    const inP = clamp01(inPct / 100) * 100;
+                    const outP = clamp01(outPct / 100) * 100;
+                    const selLeft = Math.min(inP, outP);
+                    const selRight = Math.max(inP, outP);
+                    if (seekZones && leftTrimZone && selectedZone && rightTrimZone) {
+                        // 0..In (leftTrim) is intentionally kept visually neutral (see CSS).
+                        leftTrimZone.style.left = "0%";
+                        leftTrimZone.style.width = `${selLeft}%`;
+
+                        selectedZone.style.left = `${selLeft}%`;
+                        selectedZone.style.width = `${Math.max(0, selRight - selLeft)}%`;
+
+                        rightTrimZone.style.left = `${selRight}%`;
+                        rightTrimZone.style.width = `${Math.max(0, 100 - selRight)}%`;
+
+                        try {
+                            seekZones.classList.toggle("is-trimmed", !fullRange);
+                            seekZones.classList.toggle("is-fullrange", fullRange);
+                        } catch {}
+                    }
+                } catch {}
+                try {
+                    inMark.style.left = `${inPct}%`;
+                    outMark.style.left = `${outPct}%`;
+                } catch {}
+                try {
+                    inHandle.style.left = `${inPct}%`;
+                    outHandle.style.left = `${outPct}%`;
+                } catch {}
+
+                // Nuke-like tick ruler. Clamp tick density so we don't create thousands of ticks for long clips.
+                try {
+                    const targetTicks = 400; // max minor ticks
+                    const minFramesPerTick = Math.max(1, Math.floor(maxF / targetTicks));
+                    const framesPerTick = Math.max(minFramesPerTick, Math.floor(Number(state.step) || 1));
+                    const minorPct = (framesPerTick / maxF) * 100;
+                    const majorPct = minorPct * 10;
+                    if (Number.isFinite(minorPct) && minorPct > 0.02) {
+                        const minor = `repeating-linear-gradient(to right, rgba(255,255,255,0.16) 0, rgba(255,255,255,0.16) 1px, transparent 1px, transparent ${minorPct}%)`;
+                        const major = `repeating-linear-gradient(to right, rgba(255,255,255,0.28) 0, rgba(255,255,255,0.28) 1px, transparent 1px, transparent ${majorPct}%)`;
+                        tickBar.style.backgroundImage = `${major}, ${minor}`;
+                    } else {
+                        tickBar.style.backgroundImage = "";
+                    }
+
+                    // Frame number labels (major ticks). Keep count small to avoid overlap.
+                    const rebuildLabels = () => {
+                        try {
+                            labelsBar.innerHTML = "";
+                        } catch {}
+                        const MAX_LABELS = 22;
+                        let majorFrames = Math.max(1, framesPerTick * 10);
+                        try {
+                            while (majorFrames > 0 && Math.ceil(maxF / majorFrames) > MAX_LABELS) majorFrames *= 2;
+                        } catch {}
+
+                        const makeLabel = (frame) => {
+                            const s = document.createElement("span");
+                            s.className = "mjr-video-seek-label";
+                            const pct = clamp01(frame / maxF) * 100;
+                            s.style.left = `${pct}%`;
+                            s.textContent = String(Math.floor(frame));
+                            return s;
+                        };
+
+                        try {
+                            labelsBar.appendChild(makeLabel(0));
+                        } catch {}
+                        for (let f = majorFrames; f < maxF; f += majorFrames) {
+                            try {
+                                labelsBar.appendChild(makeLabel(f));
+                            } catch {}
+                        }
+                        try {
+                            labelsBar.appendChild(makeLabel(maxF));
+                        } catch {}
+                    };
+                    rebuildLabels();
+                } catch {}
+            } catch {}
+        };
+
+        const applyRangeChange = ({ prefer = null } = {}) => {
+            if (!advanced) return;
+            try {
+                normalizeRange();
+                const { inF, outF } = getEffectiveInOut();
+                const cf = currentFrame();
+                if (prefer === "in") {
+                    goToFrame(inF);
+                } else if (prefer === "out") {
+                    if (cf > outF) goToFrame(outF);
+                } else {
+                    // If outside the range, clamp into it (Nuke-like).
+                    if (cf < inF) goToFrame(inF);
+                    else if (cf > outF) goToFrame(outF);
+                }
             } catch {}
         };
 
@@ -547,6 +904,7 @@ export function mountVideoControls(video, opts = {}) {
                     normalizeRange();
                     updateTimeUI();
                     updateSeekRangeStyle();
+                    applyRangeChange({ prefer: "in" });
                 })
             );
             unsubs.push(
@@ -556,6 +914,7 @@ export function mountVideoControls(video, opts = {}) {
                     normalizeRange();
                     updateTimeUI();
                     updateSeekRangeStyle();
+                    applyRangeChange({ prefer: "out" });
                 })
             );
             unsubs.push(
@@ -568,6 +927,7 @@ export function mountVideoControls(video, opts = {}) {
                     } catch {}
                     updateTimeUI();
                     updateSeekRangeStyle();
+                    applyRangeChange({ prefer: "in" });
                 })
             );
             unsubs.push(
@@ -580,6 +940,7 @@ export function mountVideoControls(video, opts = {}) {
                     } catch {}
                     updateTimeUI();
                     updateSeekRangeStyle();
+                    applyRangeChange({ prefer: "out" });
                 })
             );
             unsubs.push(
@@ -641,30 +1002,18 @@ export function mountVideoControls(video, opts = {}) {
                 updateVolumeUI();
             })
         );
-        unsubs.push(
-            safeAddListener(fsBtn, "click", (e) => {
-                stop(e);
-                try {
-                    const el = opts?.fullscreenEl || hostEl;
-                    const doc = document;
-                    if (doc.fullscreenElement) {
-                        doc.exitFullscreen?.().catch?.(() => {});
-                        return;
-                    }
-                    el.requestFullscreen?.().catch?.(() => {});
-                } catch {}
-            })
-        );
-
         const enforceRange = () => {
             if (!advanced) return;
             try {
-                if (!state.loop && !state.once) return;
                 if (state._seeking) return;
                 if (video?.paused) return;
 
                 const { inF, outF, maxF } = getEffectiveInOut();
                 if (maxF <= 0) return;
+                // Only enforce when the user has a non-full range selected.
+                const fullRange = inF <= 0 && outF >= maxF;
+                if (fullRange && !state.loop && !state.once) return;
+
                 const cf = currentFrame();
                 const eps = Math.max(1, Math.floor(Number(state.step) || 1));
 
@@ -676,6 +1025,12 @@ export function mountVideoControls(video, opts = {}) {
                             if (p && typeof p.catch === "function") p.catch(() => {});
                         } catch {}
                     } else if (state.once) {
+                        try {
+                            video.pause?.();
+                        } catch {}
+                        goToFrame(outF);
+                    } else {
+                        // Default behavior when a range is set: stop at Out (Nuke-like playback range).
                         try {
                             video.pause?.();
                         } catch {}
@@ -695,6 +1050,28 @@ export function mountVideoControls(video, opts = {}) {
             unsubs.push(safeAddListener(video, ev, () => safeCall(updateTimeUI)));
         }
         unsubs.push(safeAddListener(video, "timeupdate", enforceRange));
+        // `timeupdate` can be too coarse to reliably catch the last frames of short clips.
+        // Ensure looping works even when the video reaches its natural end.
+        unsubs.push(
+            safeAddListener(
+                video,
+                "ended",
+                () => {
+                    if (!advanced) return;
+                    try {
+                        const { inF, outF, maxF } = getEffectiveInOut();
+                        const fullRange = inF <= 0 && outF >= maxF;
+                        if (!state.loop && !fullRange) return;
+                        goToFrame(inF);
+                        try {
+                            const p = video.play?.();
+                            if (p && typeof p.catch === "function") p.catch(() => {});
+                        } catch {}
+                    } catch {}
+                },
+                { passive: true }
+            )
+        );
         if (advanced) {
             unsubs.push(
                 safeAddListener(video, "mjr:frameStep", () => {
@@ -734,10 +1111,162 @@ export function mountVideoControls(video, opts = {}) {
         safeCall(updateSeekRangeStyle);
         safeCall(updateVolumeUI);
 
+        const setMediaInfo = (info = {}) => {
+            try {
+                const fps = Number(info?.fps);
+                if (Number.isFinite(fps) && fps > 0) {
+                    state.fps = Math.max(1, Math.floor(fps));
+                    try {
+                        if (!fpsInput?.matches?.(":focus")) fpsInput.value = String(state.fps);
+                    } catch {}
+                }
+            } catch {}
+            try {
+                const fc = Number(info?.frameCount);
+                state.frameCount = Number.isFinite(fc) && fc > 0 ? Math.floor(fc) : null;
+            } catch {
+                state.frameCount = null;
+            }
+            try {
+                normalizeRange();
+                applyLoopOnceUI();
+                updateTimeUI();
+                updateSeekRangeStyle();
+            } catch {}
+        };
+
+        // Best-effort: initialize from caller-provided media info (metadata/fps hints).
+        try {
+            if (advanced) {
+                const initFps = Number(opts?.initialFps);
+                const initFrames = Number(opts?.initialFrameCount);
+                if (Number.isFinite(initFps) || Number.isFinite(initFrames)) {
+                    setMediaInfo({ fps: initFps, frameCount: initFrames });
+                }
+            }
+        } catch {}
+
+        // Drag In/Out handles on the seek bar.
+        if (advanced) {
+            const drag = { active: false, which: null, pointerId: null, ac: null, captureEl: null };
+
+            const frameFromClientX = (clientX) => {
+                try {
+                    const rect = seekWrap.getBoundingClientRect();
+                    const x = clamp((Number(clientX) || 0) - rect.left, 0, rect.width || 1);
+                    const pct = rect.width > 0 ? x / rect.width : 0;
+                    const { maxF } = getEffectiveInOut();
+                    return clamp(Math.round(pct * maxF), 0, maxF);
+                } catch {
+                    return 0;
+                }
+            };
+
+            const startDrag = (e, which) => {
+                preventStop(e);
+                try {
+                    drag.ac?.abort?.();
+                } catch {}
+                drag.ac = null;
+                drag.active = true;
+                drag.which = which;
+                drag.pointerId = e.pointerId;
+
+                // Capture on the actual handle so move/up events still fire even if the pointer leaves the seek bar.
+                // Some browsers are picky about capturing on non-target elements.
+                try {
+                    drag.captureEl = e.currentTarget || null;
+                } catch {
+                    drag.captureEl = null;
+                }
+                try {
+                    drag.captureEl?.setPointerCapture?.(e.pointerId);
+                } catch {}
+                try {
+                    seekWrap.setPointerCapture?.(e.pointerId);
+                } catch {}
+
+                try {
+                    const ac = new AbortController();
+                    drag.ac = ac;
+                    // Use document-level listeners during active drag for robustness.
+                    window.addEventListener("pointermove", moveDrag, { passive: false, capture: true, signal: ac.signal });
+                    window.addEventListener("pointerup", endDrag, { passive: false, capture: true, signal: ac.signal });
+                    window.addEventListener("pointercancel", endDrag, { passive: false, capture: true, signal: ac.signal });
+                } catch {}
+
+                const f = frameFromClientX(e.clientX);
+                if (which === "in") state.inFrame = f;
+                else state.outFrame = f;
+                normalizeRange();
+                updateTimeUI();
+                updateSeekRangeStyle();
+                applyRangeChange({ prefer: which });
+            };
+
+            const moveDrag = (e) => {
+                if (!drag.active) return;
+                preventStop(e);
+                const f = frameFromClientX(e.clientX);
+                if (drag.which === "in") state.inFrame = f;
+                else state.outFrame = f;
+                normalizeRange();
+                updateTimeUI();
+                updateSeekRangeStyle();
+            };
+
+            const endDrag = (e) => {
+                if (!drag.active) return;
+                preventStop(e);
+                drag.active = false;
+                try {
+                    seekWrap.releasePointerCapture?.(drag.pointerId);
+                } catch {}
+                try {
+                    drag.captureEl?.releasePointerCapture?.(drag.pointerId);
+                } catch {}
+                drag.captureEl = null;
+                drag.pointerId = null;
+                try {
+                    applyRangeChange({ prefer: drag.which });
+                } catch {}
+                try {
+                    drag.ac?.abort?.();
+                } catch {}
+                drag.ac = null;
+            };
+
+            unsubs.push(safeAddListener(inHandle, "pointerdown", (e) => startDrag(e, "in"), { passive: false }));
+            unsubs.push(safeAddListener(outHandle, "pointerdown", (e) => startDrag(e, "out"), { passive: false }));
+            // Allow dragging the thin In/Out markers too (Nuke-like).
+            unsubs.push(safeAddListener(inMark, "pointerdown", (e) => startDrag(e, "in"), { passive: false }));
+            unsubs.push(safeAddListener(outMark, "pointerdown", (e) => startDrag(e, "out"), { passive: false }));
+            unsubs.push(safeAddListener(seekWrap, "pointermove", moveDrag, { passive: false }));
+            unsubs.push(safeAddListener(seekWrap, "pointerup", endDrag, { passive: false }));
+            unsubs.push(safeAddListener(seekWrap, "pointercancel", endDrag, { passive: false }));
+        }
+
         safeCall(() => hostEl.appendChild(controls));
 
         return {
             controlsEl: controls,
+            setMediaInfo,
+            togglePlay: () => {
+                try {
+                    togglePlay();
+                    return true;
+                } catch {
+                    return false;
+                }
+            },
+            stepFrames: (direction) => {
+                try {
+                    stepFrames(direction);
+                    return true;
+                } catch {
+                    return false;
+                }
+            },
             destroy: () => {
                 for (const u of unsubs) safeCall(u);
                 safeCall(() => controls.remove());

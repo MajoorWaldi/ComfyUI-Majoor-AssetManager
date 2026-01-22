@@ -18,9 +18,15 @@ _BACKGROUND_SCAN_LAST: Dict[str, float] = {}
 _BACKGROUND_SCAN_FAILURES: list[dict] = []
 _MAX_FAILURE_HISTORY = 50
 
+_SCAN_PENDING_LOCK = threading.Lock()
+_SCAN_PENDING: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+_SCAN_WORKER: Optional[threading.Thread] = None
+_SCAN_PENDING_MAX = 64
+
 _FS_LIST_CACHE_LOCK = threading.Lock()
 _FS_LIST_CACHE: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _FS_LIST_CACHE_MAX = 32
+_FS_LIST_CACHE_TTL_SECONDS = 1.5
 
 
 def _kickoff_background_scan(
@@ -50,43 +56,84 @@ def _kickoff_background_scan(
     except Exception:
         return
 
-    def _run():
-        try:
-            from ..core import _require_services
-            svc, error_result = _require_services()
-            if error_result:
-                try:
-                    _record_scan_failure(str(directory), str(source), "SERVICE_UNAVAILABLE", str(error_result.error or ""))
-                except Exception:
-                    pass
-                return
-            try:
-                # Prefer a fast scan to populate the grid quickly, then enrich in background.
-                # Keep backward compatibility if older IndexService doesn't support these args.
-                try:
-                    svc["index"].scan_directory(
-                        str(directory),
-                        recursive,
-                        incremental,
-                        source=source,
-                        root_id=root_id,
-                        fast=bool(fast),
-                        background_metadata=bool(background_metadata),
-                    )
-                except TypeError:
-                    svc["index"].scan_directory(str(directory), recursive, incremental, source=source, root_id=root_id)
-            except Exception as exc:
-                _record_scan_failure(str(directory), str(source), "SCAN_FAILED", str(exc))
-                logger.warning("Background scan failed: %s", exc)
-        except Exception:
-            try:
-                _record_scan_failure(str(directory), str(source), "EXCEPTION", "Unhandled exception")
-            except Exception:
-                pass
+    job = {
+        "directory": str(directory),
+        "source": str(source),
+        "root_id": str(root_id) if root_id is not None else None,
+        "recursive": bool(recursive),
+        "incremental": bool(incremental),
+        "fast": bool(fast),
+        "background_metadata": bool(background_metadata),
+    }
+
+    def _ensure_worker():
+        global _SCAN_WORKER
+        if _SCAN_WORKER and _SCAN_WORKER.is_alive():
             return
 
+        def _worker_loop():
+            while True:
+                task = None
+                with _SCAN_PENDING_LOCK:
+                    if _SCAN_PENDING:
+                        _, task = _SCAN_PENDING.popitem(last=False)
+                    else:
+                        task = None
+                if not task:
+                    try:
+                        time.sleep(0.25)
+                    except Exception:
+                        pass
+                    continue
+
+                try:
+                    from ..core import _require_services
+                    svc, error_result = _require_services()
+                    if error_result:
+                        _record_scan_failure(str(task.get("directory")), str(task.get("source")), "SERVICE_UNAVAILABLE", str(error_result.error or ""))
+                        continue
+
+                    try:
+                        try:
+                            svc["index"].scan_directory(
+                                str(task.get("directory")),
+                                bool(task.get("recursive")),
+                                bool(task.get("incremental")),
+                                source=str(task.get("source") or "output"),
+                                root_id=task.get("root_id"),
+                                fast=bool(task.get("fast")),
+                                background_metadata=bool(task.get("background_metadata")),
+                            )
+                        except TypeError:
+                            svc["index"].scan_directory(
+                                str(task.get("directory")),
+                                bool(task.get("recursive")),
+                                bool(task.get("incremental")),
+                                source=str(task.get("source") or "output"),
+                                root_id=task.get("root_id"),
+                            )
+                    except Exception as exc:
+                        _record_scan_failure(str(task.get("directory")), str(task.get("source")), "SCAN_FAILED", str(exc))
+                        logger.warning("Background scan failed: %s", exc)
+                except Exception:
+                    try:
+                        _record_scan_failure(str(task.get("directory")), str(task.get("source")), "EXCEPTION", "Unhandled exception")
+                    except Exception:
+                        pass
+
+        try:
+            _SCAN_WORKER = threading.Thread(target=_worker_loop, name="mjr-bg-scan-worker", daemon=True)
+            _SCAN_WORKER.start()
+        except Exception:
+            _SCAN_WORKER = None
+
     try:
-        threading.Thread(target=_run, daemon=True).start()
+        _ensure_worker()
+        with _SCAN_PENDING_LOCK:
+            _SCAN_PENDING[key] = job
+            _SCAN_PENDING.move_to_end(key)
+            while len(_SCAN_PENDING) > _SCAN_PENDING_MAX:
+                _SCAN_PENDING.popitem(last=False)
     except Exception:
         return
 
@@ -123,8 +170,17 @@ def _fs_cache_get_or_build(
     with _FS_LIST_CACHE_LOCK:
         cached = _FS_LIST_CACHE.get(cache_key)
         if cached and cached.get("dir_mtime_ns") == dir_mtime_ns and isinstance(cached.get("entries"), list):
+            try:
+                now = time.time()
+                cached_at = float(cached.get("cached_at") or 0.0)
+                if cached_at and (now - cached_at) <= float(_FS_LIST_CACHE_TTL_SECONDS):
+                    _FS_LIST_CACHE.move_to_end(cache_key)
+                    return Result.Ok({"entries": cached["entries"], "dir_mtime_ns": dir_mtime_ns})
+            except Exception:
+                pass
             _FS_LIST_CACHE.move_to_end(cache_key)
-            return Result.Ok({"entries": cached["entries"], "dir_mtime_ns": dir_mtime_ns})
+            # If TTL expired, rebuild even if directory mtime did not change. Some filesystems
+            # do not bump dir mtime when file contents change, which would otherwise cause stale listings.
 
     entries = []
     try:
@@ -169,7 +225,7 @@ def _fs_cache_get_or_build(
         return Result.Err("LIST_FAILED", f"Failed to list directory: {exc}")
 
     with _FS_LIST_CACHE_LOCK:
-        _FS_LIST_CACHE[cache_key] = {"dir_mtime_ns": dir_mtime_ns, "entries": entries}
+        _FS_LIST_CACHE[cache_key] = {"dir_mtime_ns": dir_mtime_ns, "entries": entries, "cached_at": time.time()}
         _FS_LIST_CACHE.move_to_end(cache_key)
         while len(_FS_LIST_CACHE) > _FS_LIST_CACHE_MAX:
             _FS_LIST_CACHE.popitem(last=False)

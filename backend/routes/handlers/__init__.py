@@ -10,6 +10,8 @@ from .assets import register_asset_routes
 from .collections import register_collections_routes
 from .batch_zip import register_batch_zip_routes
 from .calendar import register_calendar_routes
+from .viewer import register_viewer_routes
+from .db_maintenance import register_db_maintenance_routes
 
 __all__ = [
     "register_health_routes",
@@ -21,4 +23,6 @@ __all__ = [
     "register_collections_routes",
     "register_batch_zip_routes",
     "register_calendar_routes",
+    "register_viewer_routes",
+    "register_db_maintenance_routes",
 ]

@@ -10,6 +10,34 @@ export function createCustomRootsController({
     ENDPOINTS,
     reloadGrid
 }) {
+    const isSensitivePath = (input) => {
+        try {
+            const raw = String(input || "").trim();
+            if (!raw) return false;
+            const p = raw.replaceAll("\\", "/").toLowerCase();
+
+            // Very broad roots (drive root / filesystem root).
+            if (p === "/" || /^[a-z]:\/?$/.test(p)) return true;
+
+            // Common sensitive/system folders (best-effort heuristics).
+            const needles = [
+                "/windows",
+                "/program files",
+                "/program files (x86)",
+                "/users",
+                "/appdata",
+                "/system32",
+                "/etc",
+                "/usr",
+                "/bin",
+                "/var",
+            ];
+            return needles.some((n) => p === n || p.startsWith(n + "/") || p.includes(n + "/"));
+        } catch {
+            return false;
+        }
+    };
+
     const refreshCustomRoots = async (preferId = null) => {
         try {
             const json = await get(ENDPOINTS.CUSTOM_ROOTS);
@@ -56,6 +84,15 @@ export function createCustomRootsController({
                 "Majoor: Custom Folders"
             );
             if (!path) return;
+            try {
+                if (isSensitivePath(path)) {
+                    const ok = await comfyConfirm(
+                        "This looks like a system or very broad directory.\n\nAdding it can expose sensitive files via the viewer/custom roots feature.\n\nContinue?",
+                        "Majoor: Security Warning"
+                    );
+                    if (!ok) return;
+                }
+            } catch {}
             try {
                 const json = await post(ENDPOINTS.CUSTOM_ROOTS, { path });
                 if (!json?.ok) {

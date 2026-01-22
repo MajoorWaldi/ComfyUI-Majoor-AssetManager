@@ -1,7 +1,7 @@
 import { createFieldRow, createSection } from "../utils/dom.js";
 import { drawWorkflowMinimap, synthesizeWorkflowFromPromptGraph } from "../utils/minimap.js";
-
-const MINIMAP_SETTINGS_KEY = "mjrMinimapSettings";
+import { loadMajoorSettings, saveMajoorSettings } from "../../../app/settings.js";
+import { MINIMAP_LEGACY_SETTINGS_KEY } from "../../../app/settingsStore.js";
 
 const coerceMetadataRawObject = (asset) => {
     const raw = asset?.metadata_raw ?? null;
@@ -22,18 +22,34 @@ const coerceMetadataRawObject = (asset) => {
 
 const loadSettings = () => {
     try {
-        const raw = localStorage?.getItem?.(MINIMAP_SETTINGS_KEY);
+        const main = loadMajoorSettings?.();
+        const w = main?.workflowMinimap;
+        if (w && typeof w === "object") return w;
+    } catch {}
+
+    // Legacy migration (one-time best effort).
+    try {
+        const raw = localStorage?.getItem?.(MINIMAP_LEGACY_SETTINGS_KEY);
         if (!raw) return null;
         const parsed = JSON.parse(raw);
-        return parsed && typeof parsed === "object" ? parsed : null;
+        if (!parsed || typeof parsed !== "object") return null;
+        try {
+            const next = loadMajoorSettings();
+            next.workflowMinimap = { ...(next.workflowMinimap || {}), ...parsed };
+            saveMajoorSettings(next);
+            localStorage?.removeItem?.(MINIMAP_LEGACY_SETTINGS_KEY);
+        } catch {}
+        return parsed;
     } catch {
         return null;
     }
 };
 
-const saveSettings = (settings) => {
+const saveSettings = (workflowMinimap) => {
     try {
-        localStorage?.setItem?.(MINIMAP_SETTINGS_KEY, JSON.stringify(settings));
+        const next = loadMajoorSettings();
+        next.workflowMinimap = { ...(next.workflowMinimap || {}), ...(workflowMinimap || {}) };
+        saveMajoorSettings(next);
     } catch {}
 };
 

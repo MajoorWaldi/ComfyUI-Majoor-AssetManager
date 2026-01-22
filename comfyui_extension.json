@@ -1,6 +1,6 @@
 {
   "name": "ComfyUI-Majoor-AssetsManager",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "author": "MajoorWaldi",
   "description": "Advanced asset browser for ComfyUI with ratings, tags, and metadata management",
   "license": "MIT",

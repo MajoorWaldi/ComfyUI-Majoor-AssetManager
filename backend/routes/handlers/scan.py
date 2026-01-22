@@ -29,6 +29,7 @@ from ..core import (
     _csrf_error,
     _check_rate_limit,
     _read_json,
+    safe_error_message,
     _normalize_path,
     _is_path_allowed,
     _is_path_allowed_custom,
@@ -145,7 +146,7 @@ async def _write_multipart_file_atomic(dest_dir: Path, filename: str, field) -> 
                 Path(str(tmp_path)).unlink(missing_ok=True)
         except Exception:
             pass
-        return Result.Err("UPLOAD_FAILED", str(exc))
+        return Result.Err("UPLOAD_FAILED", safe_error_message(exc, "Upload failed"))
 
 
 def _schedule_index_task(fn) -> None:

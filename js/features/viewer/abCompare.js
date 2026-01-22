@@ -1,0 +1,608 @@
+export function renderABCompareView({
+    abView,
+    state,
+    currentAsset,
+    viewUrl,
+    buildAssetViewURL,
+    createCompareMediaElement,
+    destroyMediaProcessorsIn,
+} = {}) {
+    try {
+        destroyMediaProcessorsIn?.(abView);
+    } catch {}
+    try {
+        if (abView) abView.innerHTML = "";
+    } catch {}
+    try {
+        abView?._mjrSyncAbort?.abort?.();
+    } catch {}
+    try {
+        abView?._mjrDiffAbort?.abort?.();
+    } catch {}
+    try {
+        abView._mjrDiffRequest = null;
+    } catch {}
+
+    if (!abView || !state || !currentAsset) return;
+
+    const other =
+        state.compareAsset ||
+        (Array.isArray(state.assets) && state.assets.length === 2 ? state.assets[1 - (state.currentIndex || 0)] : null) ||
+        currentAsset;
+    const compareUrl = (() => {
+        try {
+            return buildAssetViewURL?.(other);
+        } catch {
+            return "";
+        }
+    })();
+
+    // Base layer (B)
+    const baseLayer = document.createElement("div");
+    baseLayer.style.cssText = `
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    `;
+    const baseMedia = createCompareMediaElement?.(other, compareUrl);
+    if (baseMedia) baseLayer.appendChild(baseMedia);
+    try {
+        const baseVideo = baseMedia?.querySelector?.(".mjr-viewer-video-src") || baseMedia?.querySelector?.("video");
+        if (baseVideo?.dataset) baseVideo.dataset.mjrCompareRole = "B";
+    } catch {}
+    try {
+        const baseCanvas = baseMedia?.querySelector?.("canvas.mjr-viewer-media") || (baseMedia instanceof HTMLCanvasElement ? baseMedia : null);
+        if (baseCanvas?.dataset) baseCanvas.dataset.mjrCompareRole = "B";
+    } catch {}
+
+    // Top layer (A) with slider
+    const topLayer = document.createElement("div");
+    topLayer.style.cssText = `
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    `;
+
+    // IMPORTANT: keep A aligned to B by keeping the top layer full-size and clipping it,
+    // instead of shrinking the layer width (which would re-center A differently).
+    const supportsClipPath = (() => {
+        try {
+            return !!window.CSS?.supports?.("clip-path: inset(0 50% 0 0)");
+        } catch {
+            return false;
+        }
+    })();
+    const setClipPercent = (percent) => {
+        try {
+            const clamped = Math.max(0, Math.min(100, Number(percent) || 0));
+            if (supportsClipPath) {
+                const value =
+                    wipeAxis === "y" ? `inset(0 0 ${100 - clamped}% 0)` : `inset(0 ${100 - clamped}% 0 0)`;
+                topLayer.style.clipPath = value;
+                topLayer.style.webkitClipPath = value;
+                return;
+            }
+            const rect = abView.getBoundingClientRect();
+            const w = rect.width || 1;
+            const h = rect.height || 1;
+            if (wipeAxis === "y") {
+                const py = Math.round((h * clamped) / 100);
+                topLayer.style.clip = `rect(0px, ${w}px, ${py}px, 0px)`;
+            } else {
+                const px = Math.round((w * clamped) / 100);
+                topLayer.style.clip = `rect(0px, ${px}px, ${h}px, 0px)`;
+            }
+        } catch {}
+    };
+
+    setClipPercent(50);
+    try {
+        state._abWipePercent = 50;
+    } catch {}
+    const topMedia = createCompareMediaElement?.(currentAsset, viewUrl);
+    if (topMedia) topLayer.appendChild(topMedia);
+    try {
+        const topVideo = topMedia?.querySelector?.(".mjr-viewer-video-src") || topMedia?.querySelector?.("video");
+        if (topVideo?.dataset) topVideo.dataset.mjrCompareRole = "A";
+    } catch {}
+    try {
+        const topCanvas = topMedia?.querySelector?.("canvas.mjr-viewer-media") || (topMedia instanceof HTMLCanvasElement ? topMedia : null);
+        if (topCanvas?.dataset) topCanvas.dataset.mjrCompareRole = "A";
+    } catch {}
+
+    // Slider handle
+    const slider = document.createElement("div");
+    slider.style.cssText = `
+        position: absolute;
+        top: 0;
+        left: 50%;
+        width: 3px;
+        height: 100%;
+        background: white;
+        cursor: ew-resize;
+        z-index: 10;
+    `;
+
+    const handle = document.createElement("div");
+    handle.style.cssText = `
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 40px;
+        height: 40px;
+        background: white;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        color: black;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+    `;
+    handle.textContent = "\u2194";
+    slider.appendChild(handle);
+
+    // Synchronize A/B videos when both are videos.
+    try {
+        const aVideo = topMedia?.querySelector?.(".mjr-viewer-video-src") || topMedia?.querySelector?.("video");
+        const bVideo = baseMedia?.querySelector?.(".mjr-viewer-video-src") || baseMedia?.querySelector?.("video");
+        if (aVideo && bVideo) {
+            let syncing = false;
+            try {
+                abView._mjrSyncAbort?.abort?.();
+            } catch {}
+            const syncAC = new AbortController();
+            abView._mjrSyncAbort = syncAC;
+
+            const bindSync = (leader, follower) => {
+                const threshold = 0.15;
+                leader.addEventListener(
+                    "play",
+                    () => {
+                        if (syncing) return;
+                        try {
+                            const p = follower.play?.();
+                            if (p && typeof p.catch === "function") p.catch(() => {});
+                        } catch {}
+                    },
+                    { signal: syncAC.signal, passive: true }
+                );
+                leader.addEventListener(
+                    "pause",
+                    () => {
+                        if (syncing) return;
+                        try {
+                            follower.pause?.();
+                        } catch {}
+                    },
+                    { signal: syncAC.signal, passive: true }
+                );
+                leader.addEventListener(
+                    "timeupdate",
+                    () => {
+                        if (syncing) return;
+                        try {
+                            if (Math.abs(leader.currentTime - follower.currentTime) > threshold) {
+                                syncing = true;
+                                follower.currentTime = leader.currentTime;
+                                syncing = false;
+                            }
+                        } catch {
+                            syncing = false;
+                        }
+                    },
+                    { signal: syncAC.signal, passive: true }
+                );
+                leader.addEventListener(
+                    "seeking",
+                    () => {
+                        if (syncing) return;
+                        try {
+                            syncing = true;
+                            follower.currentTime = leader.currentTime;
+                        } catch {} finally {
+                            syncing = false;
+                        }
+                    },
+                    { signal: syncAC.signal, passive: true }
+                );
+            };
+
+            bindSync(aVideo, bVideo);
+            bindSync(bVideo, aVideo);
+
+            try {
+                aVideo.muted = true;
+            } catch {}
+            try {
+                bVideo.muted = true;
+            } catch {}
+        }
+    } catch {}
+
+    const mode = (() => {
+        try {
+            const m = String(state.abCompareMode || "wipe");
+            return m === "wipeH" ? "wipe" : m;
+        } catch {
+            return "wipe";
+        }
+    })();
+
+    const isWipe = mode === "wipe" || mode === "wipeV";
+    const wipeAxis = mode === "wipeV" ? "y" : "x"; // x = left/right, y = top/bottom
+
+    const isCompositeMode = (m) => m === "multiply" || m === "screen" || m === "add";
+    const isMathMode = (m) => m === "difference" || m === "absdiff" || m === "subtract";
+
+    // Compare display mode
+    try {
+        if (!isWipe) {
+            // Use a real math difference (canvas composite) instead of CSS mix-blend-mode,
+            // which can be inconsistent depending on browser/compositing.
+            setClipPercent(100);
+            slider.style.display = "none";
+
+            try {
+                topLayer.style.opacity = "0";
+                baseLayer.style.opacity = "0";
+                topLayer.style.pointerEvents = "none";
+                baseLayer.style.pointerEvents = "none";
+            } catch {}
+
+            const diffLayer = document.createElement("div");
+            diffLayer.style.cssText = `
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                overflow: hidden;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            `;
+
+            const diffCanvas = document.createElement("canvas");
+            diffCanvas.className = "mjr-viewer-media";
+            try {
+                diffCanvas.dataset.mjrCompareRole = "D";
+            } catch {}
+            diffCanvas.style.cssText = `
+                max-width: 100%;
+                max-height: 100%;
+                display: block;
+            `;
+            diffLayer.appendChild(diffCanvas);
+
+            const getSrcCanvas = (media) => {
+                try {
+                    if (!media) return null;
+                    if (media instanceof HTMLCanvasElement) return media;
+                    return media.querySelector?.("canvas.mjr-viewer-media") || media.querySelector?.("canvas") || null;
+                } catch {
+                    return null;
+                }
+            };
+
+            const aCanvas = getSrcCanvas(topMedia);
+            const bCanvas = getSrcCanvas(baseMedia);
+
+            const ctx = (() => {
+                try {
+                    return diffCanvas.getContext("2d", { willReadFrequently: true });
+                } catch {
+                    return null;
+                }
+            })();
+
+            const syncSize = () => {
+                try {
+                    const aw = aCanvas?.width || 0;
+                    const ah = aCanvas?.height || 0;
+                    const bw = bCanvas?.width || 0;
+                    const bh = bCanvas?.height || 0;
+                    const w = Math.max(1, Math.min(aw || bw, bw || aw));
+                    const h = Math.max(1, Math.min(ah || bh, bh || ah));
+                    if (diffCanvas.width !== w) diffCanvas.width = w;
+                    if (diffCanvas.height !== h) diffCanvas.height = h;
+                    return { w, h };
+                } catch {
+                    return { w: 0, h: 0 };
+                }
+            };
+
+            const drawDiffOnce = () => {
+                if (!ctx) return false;
+                const { w, h } = syncSize();
+                if (!(w > 1 && h > 1)) return false;
+                try {
+                    ctx.save();
+                } catch {}
+                try {
+                    ctx.clearRect(0, 0, w, h);
+                } catch {}
+
+                const px = w * h;
+                const isVideo = !!(topMedia?.querySelector?.("video") || baseMedia?.querySelector?.("video"));
+
+                const doComposite = (op) => {
+                    try {
+                        ctx.globalCompositeOperation = "copy";
+                        ctx.drawImage(bCanvas, 0, 0, w, h);
+                        ctx.globalCompositeOperation = op;
+                        ctx.drawImage(aCanvas, 0, 0, w, h);
+                        ctx.globalCompositeOperation = "source-over";
+                        return true;
+                    } catch {
+                        return false;
+                    }
+                };
+
+                const doSubtract = () => {
+                    // Subtract is not supported by Canvas2D composite ops; do CPU math for small images.
+                    // For video or very large frames, degrade to difference for stability/perf.
+                    if (isVideo) return doComposite("difference");
+                    if (!(px > 0 && px <= 750_000)) return doComposite("difference");
+                    try {
+                        const aImg = ctx.getImageData(0, 0, w, h);
+                        ctx.clearRect(0, 0, w, h);
+                        ctx.globalCompositeOperation = "copy";
+                        ctx.drawImage(bCanvas, 0, 0, w, h);
+                        const bImg = ctx.getImageData(0, 0, w, h);
+                        const da = aImg.data;
+                        const db = bImg.data;
+                        for (let i = 0; i < db.length; i += 4) {
+                            db[i] = Math.max(0, (db[i] || 0) - (da[i] || 0));
+                            db[i + 1] = Math.max(0, (db[i + 1] || 0) - (da[i + 1] || 0));
+                            db[i + 2] = Math.max(0, (db[i + 2] || 0) - (da[i + 2] || 0));
+                            db[i + 3] = 255;
+                        }
+                        ctx.putImageData(bImg, 0, 0);
+                        ctx.globalCompositeOperation = "source-over";
+                        return true;
+                    } catch {
+                        return doComposite("difference");
+                    }
+                };
+
+                if (isCompositeMode(mode)) {
+                    if (mode === "add") return doComposite("lighter");
+                    return doComposite(mode);
+                }
+
+                if (mode === "subtract") {
+                    return doSubtract();
+                }
+
+                // Default math modes: difference / absdiff
+                const ok = doComposite("difference");
+                if (!ok) return false;
+
+                // Boost visibility for subtle changes (bounded; skip when too large).
+                if (mode === "difference") {
+                    try {
+                        if (px > 0 && px <= 1_000_000) {
+                            const img = ctx.getImageData(0, 0, w, h);
+                            const d = img.data;
+                            const gain = 4;
+                            for (let i = 0; i < d.length; i += 4) {
+                                d[i] = Math.min(255, (d[i] || 0) * gain);
+                                d[i + 1] = Math.min(255, (d[i + 1] || 0) * gain);
+                                d[i + 2] = Math.min(255, (d[i + 2] || 0) * gain);
+                                d[i + 3] = 255;
+                            }
+                            ctx.putImageData(img, 0, 0);
+                        }
+                    } catch {}
+                }
+                try {
+                    ctx.restore();
+                } catch {}
+                return true;
+            };
+
+            try {
+                abView.appendChild(diffLayer);
+            } catch {}
+
+            // Keep updating for video (or while canvases are still initializing).
+            try {
+                const ac = new AbortController();
+                abView._mjrDiffAbort = ac;
+
+                const request = () => {
+                    if (ac.signal.aborted) return;
+                    try {
+                        requestAnimationFrame(() => {
+                            if (ac.signal.aborted) return;
+                            try {
+                                if (aCanvas && bCanvas) drawDiffOnce();
+                            } catch {}
+                        });
+                    } catch {}
+                };
+                abView._mjrDiffRequest = request;
+
+                const isVideo = !!(topMedia?.querySelector?.("video") || baseMedia?.querySelector?.("video"));
+                if (isVideo) {
+                    let raf = null;
+                    const tick = () => {
+                        if (ac.signal.aborted) return;
+                        try {
+                            if (aCanvas && bCanvas) drawDiffOnce();
+                        } catch {}
+                        raf = requestAnimationFrame(tick);
+                    };
+                    raf = requestAnimationFrame(tick);
+                    ac.signal.addEventListener(
+                        "abort",
+                        () => {
+                            try {
+                                if (raf != null) cancelAnimationFrame(raf);
+                            } catch {}
+                        },
+                        { once: true }
+                    );
+                } else {
+                    // Images: draw once now; future redraws are triggered by `_mjrDiffRequest()`.
+                    request();
+                }
+            } catch {}
+        } else {
+            slider.style.display = "";
+            try {
+                const blendTarget = topMedia?.querySelector?.(".mjr-viewer-media") || topMedia;
+                if (blendTarget) blendTarget.style.mixBlendMode = "";
+            } catch {}
+        }
+    } catch {}
+
+    // Drag functionality (pointer-capture; avoids leaking document-level listeners on re-render)
+    let isDragging = false;
+    const onPointerMove = (e) => {
+        if (!isDragging) return;
+        try {
+            const rect = abView.getBoundingClientRect();
+            const pos = wipeAxis === "y" ? (Number(e.clientY) || 0) - rect.top : (Number(e.clientX) || 0) - rect.left;
+            const denom = wipeAxis === "y" ? rect.height : rect.width;
+            const percent = (pos / denom) * 100;
+            const clamped = Math.max(0, Math.min(100, percent));
+            setClipPercent(clamped);
+            try {
+                state._abWipePercent = clamped;
+            } catch {}
+            if (wipeAxis === "y") slider.style.top = `${clamped}%`;
+            else slider.style.left = `${clamped}%`;
+        } catch {}
+    };
+    const stopDrag = () => {
+        isDragging = false;
+    };
+    slider.addEventListener("pointerdown", (e) => {
+        isDragging = true;
+        try {
+            slider.setPointerCapture(e.pointerId);
+        } catch {}
+        onPointerMove(e);
+    });
+    slider.addEventListener("pointermove", onPointerMove);
+    slider.addEventListener("pointerup", stopDrag);
+    slider.addEventListener("pointercancel", stopDrag);
+
+    // Slider styling per wipe mode (horizontal/vertical)
+    try {
+        if (wipeAxis === "y") {
+            slider.style.left = "0";
+            slider.style.top = "50%";
+            slider.style.width = "100%";
+            slider.style.height = "3px";
+            slider.style.cursor = "ns-resize";
+            handle.textContent = "\u2195";
+        } else {
+            slider.style.top = "0";
+            slider.style.left = "50%";
+            slider.style.width = "3px";
+            slider.style.height = "100%";
+            slider.style.cursor = "ew-resize";
+            handle.textContent = "\u2194";
+        }
+    } catch {}
+
+    try {
+        abView.appendChild(baseLayer);
+        abView.appendChild(topLayer);
+        abView.appendChild(slider);
+    } catch {}
+
+    // Synchronize videos in A/B comparison mode (if both layers are videos).
+    try {
+        const baseVideo = baseMedia?.querySelector?.("video");
+        const topVideo = topMedia?.querySelector?.("video");
+        if (baseVideo && topVideo) {
+            let syncing = false;
+            try {
+                abView._mjrSyncAbort?.abort?.();
+            } catch {}
+            const syncAC = new AbortController();
+            abView._mjrSyncAbort = syncAC;
+
+            const bindSync = (leader, follower) => {
+                const threshold = 0.15;
+                leader.addEventListener(
+                    "play",
+                    () => {
+                        if (syncing) return;
+                        try {
+                            const p = follower.play?.();
+                            if (p && typeof p.catch === "function") p.catch(() => {});
+                        } catch {}
+                    },
+                    { signal: syncAC.signal, passive: true }
+                );
+                leader.addEventListener(
+                    "pause",
+                    () => {
+                        if (syncing) return;
+                        try {
+                            follower.pause?.();
+                        } catch {}
+                    },
+                    { signal: syncAC.signal, passive: true }
+                );
+                leader.addEventListener(
+                    "timeupdate",
+                    () => {
+                        if (syncing) return;
+                        try {
+                            if (Math.abs(leader.currentTime - follower.currentTime) > threshold) {
+                                syncing = true;
+                                follower.currentTime = leader.currentTime;
+                                syncing = false;
+                            }
+                        } catch {
+                            syncing = false;
+                        }
+                    },
+                    { signal: syncAC.signal, passive: true }
+                );
+                leader.addEventListener(
+                    "seeking",
+                    () => {
+                        if (syncing) return;
+                        try {
+                            syncing = true;
+                            follower.currentTime = leader.currentTime;
+                        } catch {} finally {
+                            syncing = false;
+                        }
+                    },
+                    { signal: syncAC.signal, passive: true }
+                );
+            };
+
+            bindSync(baseVideo, topVideo);
+            bindSync(topVideo, baseVideo);
+
+            try {
+                topVideo.muted = true;
+            } catch {}
+            try {
+                baseVideo.muted = true;
+            } catch {}
+        }
+    } catch {}
+}

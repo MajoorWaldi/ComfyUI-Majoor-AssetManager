@@ -23,8 +23,23 @@ export function createGenerationSection(asset) {
     }
 
     const normalized = normalizeGenerationMetadata(metadata);
-    if (!normalized || (typeof normalized === "object" && Object.keys(normalized).length === 0)) {
-        const status = asset?.metadata_raw?.geninfo_status;
+    const hasDisplayableFields = (obj) => {
+        try {
+            if (!obj || typeof obj !== "object") return false;
+            if (typeof obj.prompt === "string" && obj.prompt.trim()) return true;
+            if (typeof (obj.negative_prompt || obj.negativePrompt) === "string" && (obj.negative_prompt || obj.negativePrompt).trim())
+                return true;
+            if (obj.models || obj.model || obj.checkpoint || obj.loras) return true;
+            if (obj.sampler || obj.sampler_name || obj.steps || obj.cfg || obj.cfg_scale || obj.scheduler) return true;
+            if (obj.seed || obj.width || obj.height || obj.denoise || obj.denoising || obj.clip_skip) return true;
+            return false;
+        } catch {
+            return false;
+        }
+    };
+
+    if (!normalized || (typeof normalized === "object" && Object.keys(normalized).length === 0) || !hasDisplayableFields(normalized)) {
+        const status = asset?.metadata_raw?.geninfo_status || asset?.geninfo_status;
         if (status && typeof status === "object" && status.kind === "media_pipeline") {
             const container = document.createElement("div");
             container.appendChild(

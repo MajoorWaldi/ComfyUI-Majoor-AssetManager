@@ -10,7 +10,7 @@ from backend.custom_roots import (
     resolve_custom_root,
 )
 from backend.shared import Result, get_logger
-from ..core import _json_response, _csrf_error, _safe_rel_path, _is_within_root, _read_json
+from ..core import _json_response, _csrf_error, _safe_rel_path, _is_within_root, _read_json, _guess_content_type_for_file, _is_allowed_view_media_file
 from .filesystem import _kickoff_background_scan
 
 logger = get_logger(__name__)
@@ -107,7 +107,20 @@ def register_custom_roots_routes(routes: web.RouteTableDef) -> None:
                 return _json_response(Result.Err("FORBIDDEN", "Path escapes root"))
             if not resolved_path.is_file():
                 return _json_response(Result.Err("NOT_FOUND", "File not found or not a regular file"))
-            return web.FileResponse(path=str(resolved_path))
+
+            # Viewer hardening: only serve image/video media files from custom roots.
+            if not _is_allowed_view_media_file(resolved_path):
+                return _json_response(Result.Err("UNSUPPORTED", "Unsupported file type for viewer"))
+
+            content_type = _guess_content_type_for_file(resolved_path)
+            resp = web.FileResponse(path=str(resolved_path))
+            try:
+                resp.headers["Content-Type"] = content_type
+                resp.headers["Cache-Control"] = "no-cache"
+                resp.headers["X-Content-Type-Options"] = "nosniff"
+            except Exception:
+                pass
+            return resp
         except FileNotFoundError:
             return _json_response(Result.Err("NOT_FOUND", "File not found"))
         except (OSError, RuntimeError, ValueError) as exc:

@@ -17,6 +17,7 @@ import { loadMajoorSettings } from "../../app/settings.js";
 const GRID_STATE = new WeakMap();
 
 const RT_HYDRATE_CONCURRENCY = APP_CONFIG.RT_HYDRATE_CONCURRENCY ?? 2;
+const RT_HYDRATE_QUEUE_MAX = APP_CONFIG.RT_HYDRATE_QUEUE_MAX ?? 100;
 const RT_HYDRATE_SEEN = new Set();
 const RT_HYDRATE_SEEN_MAX = APP_CONFIG.RT_HYDRATE_SEEN_MAX ?? 20000;
 const RT_HYDRATE_SEEN_TTL_MS = APP_CONFIG.RT_HYDRATE_SEEN_TTL_MS ?? (10 * 60 * 1000);
@@ -150,6 +151,14 @@ function enqueueRatingTagsHydration(card, asset) {
         return;
     }
 
+    // Keep queue bounded to avoid unbounded memory growth on large libraries.
+    try {
+        while (RT_HYDRATE_QUEUE.length >= RT_HYDRATE_QUEUE_MAX) {
+            const dropped = RT_HYDRATE_QUEUE.shift();
+            if (dropped?.id) RT_HYDRATE_SEEN.delete(String(dropped.id));
+        }
+    } catch {}
+
     RT_HYDRATE_SEEN.add(id);
     pruneRatingTagsHydrateSeen();
     RT_HYDRATE_QUEUE.push({ id, card, asset });
@@ -266,7 +275,9 @@ function getOrCreateState(gridContainer) {
             scrollHandler: null,
             ignoreNextScroll: false,
             userScrolled: false,
-            allowUntilFilled: true
+            allowUntilFilled: true,
+            requestId: 0,
+            abortController: null
         };
         GRID_STATE.set(gridContainer, state);
     }
@@ -565,7 +576,7 @@ function maybeKeepPinnedToBottom(state, before) {
     }
 }
 
-async function fetchPage(gridContainer, query, limit, offset) {
+async function fetchPage(gridContainer, query, limit, offset, { requestId = 0, signal = null } = {}) {
     const scope = gridContainer?.dataset?.mjrScope || "output";
     const customRootId = gridContainer?.dataset?.mjrCustomRootId || "";
     const subfolder = gridContainer?.dataset?.mjrSubfolder || "";
@@ -595,7 +606,15 @@ async function fetchPage(gridContainer, query, limit, offset) {
                 dateExact: dateExact || null,
                 includeTotal
             });
-        const result = await get(url);
+        const result = await get(url, signal ? { signal } : undefined);
+
+        // Ignore stale responses (e.g. user changed scope/filters while request was in flight).
+        try {
+            const state = GRID_STATE.get(gridContainer);
+            if (state && Number(state.requestId) !== Number(requestId)) {
+                return { ok: false, stale: true, error: "Stale response" };
+            }
+        } catch {}
 
         if (result.ok) {
             let assets = (result.data?.assets) || [];
@@ -616,9 +635,15 @@ async function fetchPage(gridContainer, query, limit, offset) {
             }
             return { ok: true, assets, total, count: assets.length, sortKey, safeQuery };
         } else {
+            try {
+                if (String(result?.code || "") === "ABORTED") return { ok: false, aborted: true, error: "Aborted" };
+            } catch {}
             return { ok: false, error: result.error };
         }
     } catch (error) {
+        try {
+            if (String(error?.name || "") === "AbortError") return { ok: false, aborted: true, error: "Aborted" };
+        } catch {}
         return { ok: false, error: error.message };
     }
 }
@@ -640,10 +665,14 @@ async function loadNextPage(gridContainer, state) {
     state.loading = true;
     const before = captureScrollMetrics(state);
     try {
-        const page = await fetchPage(gridContainer, state.query, limit, state.offset);
+        const page = await fetchPage(gridContainer, state.query, limit, state.offset, {
+            requestId: Number(state.requestId) || 0,
+            signal: state.abortController?.signal || null
+        });
         const dateExact = String(gridContainer?.dataset?.mjrFilterDateExact || "").trim();
         emitAgendaStatus(dateExact, page.ok && Array.isArray(page.assets) && page.assets.length > 0);
         if (!page.ok) {
+            if (page.aborted || page.stale) return;
             state.done = true;
             stopObserver(state);
             const p = document.createElement("p");
@@ -745,6 +774,20 @@ export async function loadAssets(gridContainer, query = "*", options = {}) {
     state.query = sanitizeQuery(requestedQuery) || requestedQuery;
 
     if (reset) {
+        try {
+            state.abortController?.abort?.();
+        } catch {}
+        try {
+            state.abortController = typeof AbortController !== "undefined" ? new AbortController() : null;
+        } catch {
+            state.abortController = null;
+        }
+        try {
+            state.requestId = (Number(state.requestId) || 0) + 1;
+        } catch {
+            state.requestId = 1;
+        }
+
         stopObserver(state);
         state.offset = 0;
         state.total = null;
@@ -780,6 +823,11 @@ export async function loadAssets(gridContainer, query = "*", options = {}) {
         }
         return { ok: true, count: state.offset, total: state.total || 0 };
     } catch (err) {
+        try {
+            if (String(err?.name || "") === "AbortError") {
+                return { ok: false, aborted: true, error: "Aborted" };
+            }
+        } catch {}
         stopObserver(state);
         if (reset) hideLoadingOverlay(gridContainer);
         gridContainer.innerHTML = "";

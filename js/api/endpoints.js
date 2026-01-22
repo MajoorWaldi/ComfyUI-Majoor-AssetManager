@@ -30,6 +30,9 @@ export const ENDPOINTS = {
     // Custom roots view (Majoor)
     CUSTOM_VIEW: "/mjr/am/custom-view",
 
+    // Viewer helpers (Majoor)
+    VIEWER_INFO: "/mjr/am/viewer/info",
+
     // File upload
     UPLOAD_INPUT: "/mjr/am/upload_input",
 

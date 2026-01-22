@@ -56,3 +56,13 @@ backend/features/index/test_date_histogram.py
 backend/routes/handlers/test_list_output_fs_fallback.py
 backend/features/index/test_metadata_quality_monotonic.py
 AUDIT.md
+VIEWER_AUDIT.md
+SETTINGS_AUDIT.md
+CONTEXT_MENU_AUDIT.md
+SECURITY_FIXES_PLAN.md
+docs/AUDIT_VIEWER_BUGS_MajoorAssetsManager_260121_v2.md
+docs/AUDIT_GLOBAL_MajoorAssetsManager_260121_v2.md
+docs/AUDIT_VIEWER_IDEAS_MajoorAssetsManager_260121_v2.md
+docs/AUDIT_VIEWER_GENINFO_FIXES.md
+AUDIT_COMPLETE_CODEBASE.md
+AUDIT_VIEWER_GENINFO.md

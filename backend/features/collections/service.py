@@ -7,6 +7,7 @@ Collections are stored as JSON files under `config.COLLECTIONS_DIR`.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -21,6 +22,12 @@ from ...shared import Result, ErrorCode, get_logger, classify_file
 logger = get_logger(__name__)
 
 _ID_RE = re.compile(r"^[a-zA-Z0-9_-]{6,80}$")
+_DEFAULT_MAX_ITEMS = 50_000
+try:
+    _MAX_COLLECTION_ITEMS = int(os.environ.get("MJR_COLLECTION_MAX_ITEMS", str(_DEFAULT_MAX_ITEMS)))
+except Exception:
+    _MAX_COLLECTION_ITEMS = _DEFAULT_MAX_ITEMS
+_MAX_COLLECTION_ITEMS = max(100, min(500_000, int(_MAX_COLLECTION_ITEMS or _DEFAULT_MAX_ITEMS)))
 
 
 def _now_iso() -> str:
@@ -32,8 +39,17 @@ def _now_iso() -> str:
 
 def _normalize_fp(fp: str) -> str:
     try:
+        p = Path(fp)
+        # Prefer strict resolution when the path exists (resolves symlinks/junctions).
+        try:
+            if p.exists():
+                p = p.resolve(strict=True)
+            else:
+                p = p.resolve(strict=False)
+        except Exception:
+            p = p.resolve(strict=False)
         # Windows: case-insensitive path matching
-        return str(Path(fp).resolve(strict=False)).lower()
+        return str(p).lower()
     except Exception:
         return str(fp or "").strip().lower()
 
@@ -135,7 +151,7 @@ class CollectionsService:
         with self._lock:
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
             except Exception as exc:
                 return Result.Err(ErrorCode.DB_ERROR, f"Failed to create collection: {exc}")
 
@@ -248,7 +264,11 @@ class CollectionsService:
             added = 0
             skipped_existing = 0
             skipped_duplicate = 0
+            skipped_limit = 0
             for it in cleaned:
+                if len(existing) >= _MAX_COLLECTION_ITEMS:
+                    skipped_limit += 1
+                    continue
                 key = _normalize_fp(it["filepath"])
                 if key in seen:
                     # Already in collection (or duplicated in the same request); report as skipped.
@@ -265,7 +285,7 @@ class CollectionsService:
             data["updated_at"] = _now_iso()
 
             try:
-                path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
             except Exception as exc:
                 return Result.Err(ErrorCode.DB_ERROR, f"Failed to update collection: {exc}")
 
@@ -275,6 +295,8 @@ class CollectionsService:
                 "added": int(added),
                 "skipped_existing": int(skipped_existing),
                 "skipped_duplicate": int(skipped_duplicate),
+                "skipped_limit": int(skipped_limit),
+                "max_items": int(_MAX_COLLECTION_ITEMS),
                 "count": len(existing),
             }
         )
@@ -306,7 +328,7 @@ class CollectionsService:
             data["updated_at"] = _now_iso()
 
             try:
-                path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
             except Exception as exc:
                 return Result.Err(ErrorCode.DB_ERROR, f"Failed to update collection: {exc}")
 

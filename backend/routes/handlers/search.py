@@ -20,7 +20,7 @@ from backend.config import OUTPUT_ROOT
 from backend.custom_roots import resolve_custom_root
 from backend.shared import Result
 from backend.features.index.metadata_helpers import MetadataHelpers
-from ..core import _json_response, _require_services, _read_json
+from ..core import _json_response, _require_services, _read_json, safe_error_message
 from .filesystem import _list_filesystem_assets, _kickoff_background_scan
 
 
@@ -667,7 +667,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
 
         except Exception as e:
             logger.error(f"workflow-quick lookup failed: {e}")
-            return _json_response(Result.Err("QUERY_ERROR", str(e)))
+            return _json_response(Result.Err("QUERY_ERROR", safe_error_message(e, "Query failed")))
 
     @routes.get("/mjr/am/asset/{asset_id}")
     async def get_asset(request):

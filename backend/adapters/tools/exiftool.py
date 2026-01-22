@@ -162,6 +162,7 @@ class ExifTool:
                 encoding="utf-8",
                 errors="replace",
                 input=stdin_input,
+                shell=False,
             )
 
         try:
@@ -328,6 +329,7 @@ class ExifTool:
                 timeout=self.timeout * len(cmd_paths),  # Scale timeout with file count
                 encoding="utf-8",
                 errors="replace",
+                shell=False,
             )
 
             stdout = process.stdout or ""
@@ -487,6 +489,7 @@ class ExifTool:
                 encoding="utf-8",
                 errors="replace",
                 input=stdin_input,
+                shell=False,
             )
 
             stdout = process.stdout or ""

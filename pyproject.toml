@@ -1,7 +1,7 @@
 [project]
 name = "majoor-assetsmanager"
 description = "Advanced asset browser for ComfyUI outputs (images/videos) with ratings & tags, full-text search, workflow fingerprinting, and advanced metadata management."
-version = "2.0.0"
+version = "2.1.0"
 license = {file = "LICENSE"} 
 # classifiers = [
 #     # For OS-independent nodes (works on all operating systems)

@@ -13,6 +13,7 @@ import { buildAssetViewURL } from "../api/endpoints.js";
 import { comfyAlert } from "../app/dialogs.js";
 import { openInFolder } from "../api/client.js";
 import { showAddToCollectionMenu } from "../features/collections/contextmenu/addToCollectionMenu.js";
+import { MENU_Z_INDEX } from "./contextmenu/MenuCore.js";
 
 // NOTE: Keep this menu isolated from the newer grid context menu
 // (`.mjr-grid-context-menu`) to avoid selector collisions.
@@ -31,7 +32,7 @@ export function createContextMenu() {
         border-radius: 6px;
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
         min-width: 200px;
-        z-index: 9999;
+        z-index: ${Number(MENU_Z_INDEX?.MAIN) || 10001};
         display: none;
         padding: 4px 0;
     `;
@@ -110,8 +111,28 @@ function createMenuItem(label, iconClass, shortcut, onClick) {
     item.addEventListener("click", (e) => {
         e.stopPropagation();
         try {
-            onClick?.();
+            if (item.dataset?.executing === "1") return;
+            item.dataset.executing = "1";
         } catch {}
+        try {
+            const res = onClick?.();
+            if (res && typeof res.then === "function") {
+                res.finally?.(() => {
+                    try {
+                        item.dataset.executing = "0";
+                    } catch {}
+                });
+                return;
+            }
+            try {
+                item.dataset.executing = "0";
+            } catch {}
+        } catch (err) {
+            console.error("[LegacyContextMenu] Action failed:", err);
+            try {
+                item.dataset.executing = "0";
+            } catch {}
+        }
     });
 
     return item;
@@ -263,10 +284,12 @@ export function bindContextMenu(gridContainer, assets) {
         if (gridContainer?._mjrGridContextMenuBound) return;
     } catch {}
 
-    if (gridContainer._mjrContextMenuBound) return;
+    if (gridContainer._mjrContextMenuBound && typeof gridContainer._mjrContextMenuUnbind === "function") {
+        return gridContainer._mjrContextMenuUnbind;
+    }
     gridContainer._mjrContextMenuBound = true;
 
-    gridContainer.addEventListener("contextmenu", (e) => {
+    const handler = (e) => {
         const card = e.target.closest(".mjr-asset-card");
         if (!card) return;
 
@@ -315,5 +338,25 @@ export function bindContextMenu(gridContainer, assets) {
         showContextMenu(e.clientX, e.clientY, currentAsset, list, idx, selected, {
             onDetails: typeof gridContainer._mjrOpenDetails === "function" ? gridContainer._mjrOpenDetails : null,
         });
-    });
+    };
+
+    try {
+        gridContainer.addEventListener("contextmenu", handler);
+    } catch (err) {
+        console.error("[LegacyContextMenu] Failed to bind:", err);
+    }
+
+    const unbind = () => {
+        try {
+            gridContainer.removeEventListener("contextmenu", handler);
+        } catch {}
+        try {
+            gridContainer._mjrContextMenuBound = false;
+        } catch {}
+        try {
+            gridContainer._mjrContextMenuUnbind = null;
+        } catch {}
+    };
+    gridContainer._mjrContextMenuUnbind = unbind;
+    return unbind;
 }

@@ -92,6 +92,42 @@ _KNOWN_COLUMNS = {
 }
 _KNOWN_COLUMNS_LOWER = {c.lower(): c for c in _KNOWN_COLUMNS}
 
+_IN_QUERY_FORBIDDEN = re.compile(
+    r"(--|/\*|\*/|;|\bpragma\b|\battach\b|\bdetach\b|\bvacuum\b|\balter\b|\bdrop\b|\binsert\b|\bupdate\b|\bdelete\b)",
+    re.IGNORECASE,
+)
+
+
+def _validate_in_base_query(base_query: str) -> Tuple[bool, str]:
+    """
+    Validate the `base_query` template used by `query_in`.
+
+    Threat model: even though `base_query` is expected to be a constant defined in code,
+    enforcing a conservative allowlist prevents accidental misuse that could reintroduce
+    SQL injection.
+    """
+    try:
+        q = str(base_query or "").strip()
+    except Exception:
+        return False, "base_query must be a string"
+
+    if not q:
+        return False, "base_query is empty"
+
+    if q.count("{IN_CLAUSE}") != 1:
+        return False, "base_query must contain exactly one {IN_CLAUSE}"
+
+    # Only allow SELECT (optionally with WITH) templates.
+    q_lower = q.lower().lstrip()
+    if not (q_lower.startswith("select ") or q_lower.startswith("with ")):
+        return False, "base_query must be a SELECT query"
+
+    # Reject obvious multi-statement or dangerous SQL constructs.
+    if _IN_QUERY_FORBIDDEN.search(q):
+        return False, "base_query contains forbidden SQL tokens"
+
+    return True, ""
+
 
 def _try_repair_column_name(column: str) -> Optional[str]:
     if not column or not isinstance(column, str):
@@ -486,8 +522,9 @@ class Sqlite:
         if not ok_col or not safe_col:
             return Result.Err(ErrorCode.INVALID_INPUT, f"Invalid column name: {column}")
 
-        if "{IN_CLAUSE}" not in str(base_query or ""):
-            return Result.Err(ErrorCode.INVALID_INPUT, "base_query must contain {IN_CLAUSE}")
+        ok_tpl, why = _validate_in_base_query(base_query)
+        if not ok_tpl:
+            return Result.Err(ErrorCode.INVALID_INPUT, why or "Invalid base_query template")
 
         placeholders = ",".join(["?"] * len(values))
         in_clause = f"{safe_col} IN ({placeholders})"
@@ -513,8 +550,9 @@ class Sqlite:
         ok_col, safe_col = _validate_and_repair_column_name(column)
         if not ok_col or not safe_col:
             return Result.Err(ErrorCode.INVALID_INPUT, f"Invalid column name: {column}")
-        if "{IN_CLAUSE}" not in str(base_query or ""):
-            return Result.Err(ErrorCode.INVALID_INPUT, "base_query must contain {IN_CLAUSE}")
+        ok_tpl, why = _validate_in_base_query(base_query)
+        if not ok_tpl:
+            return Result.Err(ErrorCode.INVALID_INPUT, why or "Invalid base_query template")
 
         placeholders = ",".join(["?"] * len(values))
         in_clause = f"{safe_col} IN ({placeholders})"

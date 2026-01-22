@@ -4,6 +4,7 @@ FFprobe adapter for video metadata extraction.
 import subprocess
 import json
 import shutil
+import os
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
@@ -29,11 +30,53 @@ class FFProbe:
         """
         self.bin = bin_name
         self.timeout = float(timeout) if timeout is not None else float(FFPROBE_TIMEOUT)
+        self._resolved_bin: Optional[str] = None
         self._available = self._check_available()
+
+    def _resolve_executable(self, bin_name: str) -> Optional[str]:
+        """
+        Resolve and validate the ffprobe executable.
+
+        Defends against untrusted configuration values and ensures we're invoking an
+        actual ffprobe binary (not an arbitrary command string).
+        """
+        raw = (bin_name or "").strip()
+        if not raw:
+            return None
+        if "\x00" in raw or "\n" in raw or "\r" in raw:
+            return None
+        if any(ch in raw for ch in ("&", "|", ";", ">", "<")):
+            return None
+
+        resolved = shutil.which(raw)
+        if not resolved:
+            try:
+                candidate = Path(raw)
+                if candidate.is_file():
+                    resolved = str(candidate.resolve(strict=True))
+            except (OSError, RuntimeError, ValueError):
+                return None
+
+        if not resolved:
+            return None
+
+        try:
+            name = Path(resolved).name.lower()
+        except Exception:
+            name = str(resolved).lower()
+
+        if not name.startswith("ffprobe"):
+            return None
+
+        return resolved
 
     def _check_available(self) -> bool:
         """Check if ffprobe is available in PATH."""
-        return shutil.which(self.bin) is not None
+        resolved = self._resolve_executable(self.bin)
+        if not resolved:
+            return False
+        self._resolved_bin = resolved
+        return True
 
     def is_available(self) -> bool:
         """Check if ffprobe is available."""
@@ -59,7 +102,7 @@ class FFProbe:
         try:
             # Build command
             cmd = [
-                self.bin,
+                self._resolved_bin or self.bin,
                 "-v", "error",              # Hide verbose output
                 "-print_format", "json",     # JSON output
                 "-show_format",              # Show container format
@@ -73,7 +116,9 @@ class FFProbe:
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=self.timeout
+                timeout=self.timeout,
+                shell=False,
+                close_fds=os.name != "nt",
             )
 
             if process.returncode != 0:

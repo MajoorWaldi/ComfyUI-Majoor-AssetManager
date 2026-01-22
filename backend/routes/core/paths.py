@@ -5,6 +5,7 @@ import os
 import threading
 from pathlib import Path
 from typing import Optional
+import mimetypes
 
 try:
     import folder_paths  # type: ignore
@@ -79,19 +80,29 @@ def _is_path_allowed(candidate: Optional[Path]) -> bool:
     if not candidate:
         return False
 
+    # Prefer strict resolution when possible (prevents symlink/junction escapes).
+    cand_norm = candidate
+    try:
+        if cand_norm.exists():
+            cand_norm = cand_norm.resolve(strict=True)
+        else:
+            cand_norm = cand_norm.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
     for root in _get_allowed_directories():
         try:
-            root_resolved = root.resolve(strict=False)
+            root_resolved = root.resolve(strict=True) if root.exists() else root.resolve(strict=False)
         except OSError:
             continue
 
         try:
-            if candidate == root_resolved or candidate.is_relative_to(root_resolved):
+            if cand_norm == root_resolved or cand_norm.is_relative_to(root_resolved):
                 return True
         except AttributeError:
             # Fallback when is_relative_to is unavailable
             try:
-                if os.path.commonpath([str(candidate), str(root_resolved)]) == str(root_resolved):
+                if os.path.commonpath([str(cand_norm), str(root_resolved)]) == str(root_resolved):
                     return True
             except ValueError:
                 continue
@@ -158,3 +169,56 @@ def _is_within_root(candidate: Path, root: Path) -> bool:
             return os.path.commonpath([str(cand_resolved), str(root_resolved)]) == str(root_resolved)
         except ValueError:
             return False
+
+
+# -----------------------------------------------------------------------------
+# Media validation helpers (viewer hardening)
+# -----------------------------------------------------------------------------
+
+_ALLOWED_VIEW_EXTS = {
+    # Images
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+    ".bmp",
+    ".tif",
+    ".tiff",
+    ".avif",
+    # Videos
+    ".mp4",
+    ".webm",
+    ".mov",
+    ".mkv",
+    ".avi",
+    ".m4v",
+}
+
+
+def _guess_content_type_for_file(path: Path) -> str:
+    try:
+        ct, _ = mimetypes.guess_type(str(path))
+        if ct:
+            return ct
+    except Exception:
+        pass
+    return "application/octet-stream"
+
+
+def _is_allowed_view_media_file(path: Path) -> bool:
+    """
+    Restrict what the viewer-serving endpoints can return.
+
+    This reduces the blast radius of custom roots by preventing the UI from
+    fetching arbitrary file types through /mjr/am/custom-view.
+    """
+    try:
+        ext = str(path.suffix or "").lower()
+        if ext in _ALLOWED_VIEW_EXTS:
+            return True
+        # Fallback: allow if mimetype is clearly media.
+        ct = _guess_content_type_for_file(path)
+        return ct.startswith("image/") or ct.startswith("video/")
+    except Exception:
+        return False

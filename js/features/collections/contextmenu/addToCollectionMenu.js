@@ -7,6 +7,7 @@ import {
     showMenuAt,
     clearMenu,
     hideMenu,
+    MENU_Z_INDEX,
 } from "../../../components/contextmenu/MenuCore.js";
 
 const MENU_SELECTOR = ".mjr-collections-context-menu";
@@ -16,7 +17,7 @@ function getOrCreateCollectionsMenu() {
         selector: MENU_SELECTOR,
         className: "mjr-collections-context-menu",
         minWidth: 240,
-        zIndex: 10005,
+        zIndex: MENU_Z_INDEX.COLLECTIONS,
         onHide: null,
     });
 }

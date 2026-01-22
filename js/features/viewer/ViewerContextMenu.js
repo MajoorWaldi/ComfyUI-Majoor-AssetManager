@@ -4,7 +4,14 @@ import { openInFolder, updateAssetRating, deleteAsset, renameAsset } from "../..
 import { ASSET_RATING_CHANGED_EVENT, ASSET_TAGS_CHANGED_EVENT } from "../../app/events.js";
 import { createTagsEditor } from "../../components/TagsEditor.js";
 import { safeDispatchCustomEvent } from "../../utils/events.js";
-import { getOrCreateMenu, createMenuItem, createMenuSeparator, showMenuAt } from "../../components/contextmenu/MenuCore.js";
+import {
+    getOrCreateMenu,
+    createMenuItem,
+    createMenuSeparator,
+    showMenuAt,
+    MENU_Z_INDEX,
+    setMenuSessionCleanup,
+} from "../../components/contextmenu/MenuCore.js";
 import { hideMenu, clearMenu } from "../../components/contextmenu/MenuCore.js";
 import { showAddToCollectionMenu } from "../collections/contextmenu/addToCollectionMenu.js";
 
@@ -16,7 +23,7 @@ function createMenu() {
         selector: MENU_SELECTOR,
         className: "mjr-viewer-context-menu",
         minWidth: 220,
-        zIndex: 10001,
+        zIndex: MENU_Z_INDEX.MAIN,
         onHide: null,
     });
 }
@@ -30,7 +37,7 @@ function getOrCreateRatingSubmenu() {
         selector: ".mjr-viewer-rating-submenu",
         className: "mjr-viewer-rating-submenu",
         minWidth: 200,
-        zIndex: 10002,
+        zIndex: MENU_Z_INDEX.SUBMENU,
         onHide: null,
     });
 }
@@ -56,7 +63,7 @@ function showTagsPopover(x, y, asset, onChanged) {
     pop.className = "mjr-viewer-popover";
     pop.style.cssText = `
         position: fixed;
-        z-index: 10002;
+        z-index: ${MENU_Z_INDEX.POPOVER};
         left: ${x}px;
         top: ${y}px;
     `;
@@ -118,19 +125,42 @@ function showTagsPopover(x, y, asset, onChanged) {
     pop.style.top = `${Math.max(8, fy)}px`;
 }
 
-async function setRating(asset, rating, onChanged) {
+const _ratingDebounceTimers = new Map();
+function setRating(asset, rating, onChanged) {
     const assetId = asset?.id;
     if (!assetId) return;
+    const id = String(assetId);
     try {
-        const result = await updateAssetRating(assetId, rating);
-        if (!result?.ok) return;
+        const prev = _ratingDebounceTimers.get(id);
+        if (prev) clearTimeout(prev);
+    } catch {}
+
+    // Optimistic UI: update local state immediately, then debounce the API call.
+    try {
         asset.rating = rating;
-        safeDispatchCustomEvent(
-            ASSET_RATING_CHANGED_EVENT,
-            { assetId: String(assetId), rating },
-            { warnPrefix: "[ViewerContextMenu]" }
-        );
+    } catch {}
+    try {
         onChanged?.();
+    } catch {}
+
+    const t = setTimeout(async () => {
+        try {
+            _ratingDebounceTimers.delete(id);
+        } catch {}
+        try {
+            const result = await updateAssetRating(assetId, rating);
+            if (!result?.ok) return;
+            safeDispatchCustomEvent(
+                ASSET_RATING_CHANGED_EVENT,
+                { assetId: String(assetId), rating },
+                { warnPrefix: "[ViewerContextMenu]" }
+            );
+        } catch (err) {
+            console.error("[ViewerContextMenu] Rating update failed:", err);
+        }
+    }, 300);
+    try {
+        _ratingDebounceTimers.set(id, t);
     } catch {}
 }
 
@@ -141,12 +171,13 @@ export function bindViewerContextMenu({
     onAssetChanged,
 } = {}) {
     if (!overlayEl || typeof getCurrentAsset !== "function") return;
-    if (overlayEl._mjrViewerContextMenuBound) return;
-    overlayEl._mjrViewerContextMenuBound = true;
+    if (overlayEl._mjrViewerContextMenuBound && typeof overlayEl._mjrViewerContextMenuUnbind === "function") {
+        return overlayEl._mjrViewerContextMenuUnbind;
+    }
 
     const menu = createMenu();
 
-    overlayEl.addEventListener("contextmenu", async (e) => {
+    const handler = async (e) => {
         if (!overlayEl.contains(e.target)) return;
         e.preventDefault();
         e.stopPropagation();
@@ -173,7 +204,9 @@ export function bindViewerContextMenu({
                 }
                 try {
                     await navigator.clipboard.writeText(p);
-                } catch {}
+                } catch (err) {
+                    console.error("[ViewerContextMenu] Copy failed:", err);
+                }
             })
         );
 
@@ -204,7 +237,7 @@ export function bindViewerContextMenu({
 
         menu.appendChild(separator());
 
-        menu.appendChild(createItem("Edit Tags…", "pi pi-tags", null, () => {
+        menu.appendChild(createItem("Edit Tags...", "pi pi-tags", null, () => {
             try {
                 hideMenu(menu);
             } catch {}
@@ -235,7 +268,7 @@ export function bindViewerContextMenu({
 
         const scheduleClose = () => {
             if (hideTimer) clearTimeout(hideTimer);
-            hideTimer = setTimeout(closeRatingSubmenu, 180);
+            hideTimer = setTimeout(closeRatingSubmenu, 350);
         };
 
         const cancelClose = () => {
@@ -243,13 +276,29 @@ export function bindViewerContextMenu({
             hideTimer = null;
         };
 
+        // Clear timers + submenu listeners when the main menu closes.
+        try {
+            setMenuSessionCleanup(menu, () => {
+                try {
+                    if (hideTimer) clearTimeout(hideTimer);
+                } catch {}
+                hideTimer = null;
+                try {
+                    ratingSubmenu?._mjrAbortController?.abort?.();
+                } catch {}
+                try {
+                    closeRatingSubmenu();
+                } catch {}
+            });
+        } catch {}
+
         const renderRatingSubmenu = () => {
             clearMenu(ratingSubmenu);
             const stars = (n) => "★".repeat(n) + "☆".repeat(Math.max(0, 5 - n));
             for (const n of [5, 4, 3, 2, 1]) {
                 ratingSubmenu.appendChild(
                     createItem(stars(n), "pi pi-star", null, async () => {
-                        await setRating(asset, n, onAssetChanged);
+                        setRating(asset, n, onAssetChanged);
                         closeRatingSubmenu();
                         try {
                             hideMenu(menu);
@@ -260,7 +309,7 @@ export function bindViewerContextMenu({
             ratingSubmenu.appendChild(separator());
             ratingSubmenu.appendChild(
                 createItem("Reset rating", "pi pi-star", "0", async () => {
-                    await setRating(asset, 0, onAssetChanged);
+                    setRating(asset, 0, onAssetChanged);
                     closeRatingSubmenu();
                     try {
                         hideMenu(menu);
@@ -293,7 +342,7 @@ export function bindViewerContextMenu({
 
         // Rename option
         menu.appendChild(
-            createItem("Rename…", "pi pi-pencil", null, async () => {
+            createItem("Rename...", "pi pi-pencil", null, async () => {
                 if (!asset?.id) return;
 
                 const currentName = asset.filename || "";
@@ -320,7 +369,7 @@ export function bindViewerContextMenu({
 
         // Delete option
         menu.appendChild(
-            createItem("Delete…", "pi pi-trash", null, async () => {
+            createItem("Delete...", "pi pi-trash", null, async () => {
                 if (!asset?.id) return;
 
                 const confirmed = await comfyConfirm("Delete this file? This cannot be undone.");
@@ -342,5 +391,26 @@ export function bindViewerContextMenu({
         );
 
         showAt(menu, e.clientX, e.clientY);
-    });
+    };
+
+    try {
+        overlayEl.addEventListener("contextmenu", handler);
+    } catch (err) {
+        console.error("[ViewerContextMenu] Failed to bind:", err);
+    }
+
+    overlayEl._mjrViewerContextMenuBound = true;
+    const unbind = () => {
+        try {
+            overlayEl.removeEventListener("contextmenu", handler);
+        } catch {}
+        try {
+            overlayEl._mjrViewerContextMenuBound = false;
+        } catch {}
+        try {
+            overlayEl._mjrViewerContextMenuUnbind = null;
+        } catch {}
+    };
+    overlayEl._mjrViewerContextMenuUnbind = unbind;
+    return unbind;
 }

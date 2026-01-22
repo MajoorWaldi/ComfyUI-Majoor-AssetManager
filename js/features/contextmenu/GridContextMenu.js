@@ -10,7 +10,15 @@ import { createTagsEditor } from "../../components/TagsEditor.js";
 import { getViewerInstance } from "../../components/Viewer.js";
 import { safeDispatchCustomEvent } from "../../utils/events.js";
 import { showAddToCollectionMenu } from "../collections/contextmenu/addToCollectionMenu.js";
-import { getOrCreateMenu, createMenuItem, createMenuSeparator, showMenuAt } from "../../components/contextmenu/MenuCore.js";
+import {
+    getOrCreateMenu,
+    createMenuItem,
+    createMenuSeparator,
+    showMenuAt,
+    MENU_Z_INDEX,
+    safeEscapeSelector,
+    setMenuSessionCleanup,
+} from "../../components/contextmenu/MenuCore.js";
 import { hideMenu, clearMenu } from "../../components/contextmenu/MenuCore.js";
 // Bulk operations removed - using local helpers
 const getSelectedAssetIds = (gridContainer) => {
@@ -89,7 +97,7 @@ function createMenu() {
         selector: MENU_SELECTOR,
         className: "mjr-grid-context-menu",
         minWidth: 220,
-        zIndex: 10001,
+        zIndex: MENU_Z_INDEX.MAIN,
         onHide: null,
     });
 }
@@ -103,7 +111,7 @@ function getOrCreateRatingSubmenu() {
         selector: ".mjr-grid-rating-submenu",
         className: "mjr-grid-rating-submenu",
         minWidth: 200,
-        zIndex: 10002,
+        zIndex: MENU_Z_INDEX.SUBMENU,
         onHide: null,
     });
 }
@@ -119,6 +127,9 @@ function showSubmenuNextTo(anchorEl, menuEl) {
 function showTagsPopover(x, y, asset, onChanged) {
     try {
         const existing = document.querySelector(POPOVER_SELECTOR);
+        try {
+            existing?._mjrAbortController?.abort?.();
+        } catch {}
         existing?.remove?.();
     } catch {}
 
@@ -126,7 +137,7 @@ function showTagsPopover(x, y, asset, onChanged) {
     pop.className = "mjr-grid-popover";
     pop.style.cssText = `
         position: fixed;
-        z-index: 10002;
+        z-index: ${MENU_Z_INDEX.POPOVER};
         left: ${x}px;
         top: ${y}px;
     `;
@@ -188,19 +199,42 @@ function showTagsPopover(x, y, asset, onChanged) {
     pop.style.top = `${Math.max(8, fy)}px`;
 }
 
-async function setRating(asset, rating, onChanged) {
+const _ratingDebounceTimers = new Map();
+function setRating(asset, rating, onChanged) {
     const assetId = asset?.id;
     if (!assetId) return;
+    const id = String(assetId);
     try {
-        const result = await updateAssetRating(assetId, rating);
-        if (!result?.ok) return;
+        const prev = _ratingDebounceTimers.get(id);
+        if (prev) clearTimeout(prev);
+    } catch {}
+
+    // Optimistic UI
+    try {
         asset.rating = rating;
-        safeDispatchCustomEvent(
-            ASSET_RATING_CHANGED_EVENT,
-            { assetId: String(assetId), rating },
-            { warnPrefix: "[GridContextMenu]" }
-        );
+    } catch {}
+    try {
         onChanged?.();
+    } catch {}
+
+    const t = setTimeout(async () => {
+        try {
+            _ratingDebounceTimers.delete(id);
+        } catch {}
+        try {
+            const result = await updateAssetRating(assetId, rating);
+            if (!result?.ok) return;
+            safeDispatchCustomEvent(
+                ASSET_RATING_CHANGED_EVENT,
+                { assetId: String(assetId), rating },
+                { warnPrefix: "[GridContextMenu]" }
+            );
+        } catch (err) {
+            console.error("[GridContextMenu] Rating update failed:", err);
+        }
+    }, 350);
+    try {
+        _ratingDebounceTimers.set(id, t);
     } catch {}
 }
 
@@ -210,12 +244,13 @@ export function bindGridContextMenu({
     onRequestOpenViewer = () => {},
 } = {}) {
     if (!gridContainer) return;
-    if (gridContainer._mjrGridContextMenuBound) return;
-    gridContainer._mjrGridContextMenuBound = true;
+    if (gridContainer._mjrGridContextMenuBound && typeof gridContainer._mjrGridContextMenuUnbind === "function") {
+        return gridContainer._mjrGridContextMenuUnbind;
+    }
 
     const menu = createMenu();
 
-    gridContainer.addEventListener("contextmenu", async (e) => {
+    const handler = async (e) => {
         // Check if the contextmenu event is on an asset card
         const card = e.target.closest(".mjr-asset-card");
         if (!card) return;
@@ -276,7 +311,7 @@ export function bindGridContextMenu({
         }
         if (selectedCount >= 2 && selectedCount <= 4) {
             menu.appendChild(
-                createItem(`Side-by-side (2×2) (${selectedCount} selected)`, "pi pi-table", null, () => {
+                createItem(`Side-by-side (2x2) (${selectedCount} selected)`, "pi pi-table", null, () => {
                     try {
                         const viewer = getViewerInstance();
                         viewer.open(selectedAssets, 0);
@@ -313,14 +348,14 @@ export function bindGridContextMenu({
 
         // Add to collection (single or multi)
         menu.appendChild(
-            createItem("Add to collection...", "pi pi-bookmark", null, async () => {
-                try {
-                    menu.style.display = "none";
-                } catch {}
-                const selectedAssets = getSelectedAssets(gridContainer);
-                const list = selectedAssets.length ? selectedAssets : [asset];
-                await showAddToCollectionMenu({ x: e.clientX, y: e.clientY, assets: list });
-            })
+                createItem("Add to collection...", "pi pi-bookmark", null, async () => {
+                    try {
+                        hideMenu(menu);
+                    } catch {}
+                    const selectedAssets = getSelectedAssets(gridContainer);
+                    const list = selectedAssets.length ? selectedAssets : [asset];
+                    await showAddToCollectionMenu({ x: e.clientX, y: e.clientY, assets: list });
+                })
         );
 
         // Remove from current collection (only when in collection view)
@@ -340,7 +375,7 @@ export function bindGridContextMenu({
             menu.appendChild(
                 createItem(label, "pi pi-bookmark", null, async () => {
                     try {
-                        menu.style.display = "none";
+                        hideMenu(menu);
                     } catch {}
                     if (!filepaths.length) {
                         await comfyAlert("No file path available for this asset.");
@@ -366,13 +401,13 @@ export function bindGridContextMenu({
         menu.appendChild(separator());
 
         // Edit Tags
-        menu.appendChild(createItem("Edit Tags…", "pi pi-tags", null, () => {
+        menu.appendChild(createItem("Edit Tags...", "pi pi-tags", null, () => {
             try {
                 hideMenu(menu);
             } catch {}
             showTagsPopover(e.clientX + 6, e.clientY + 6, asset, () => {
                 // Update card UI after tags change
-                const card = document.querySelector(`[data-mjr-asset-id="${CSS.escape ? CSS.escape(String(asset.id)) : String(asset.id)}"]`);
+                const card = document.querySelector(`[data-mjr-asset-id="${safeEscapeSelector(asset.id)}"]`);
                 if (card && card._mjrAsset) {
                     card._mjrAsset.tags = [...asset.tags];
                 }
@@ -403,7 +438,7 @@ export function bindGridContextMenu({
 
         const scheduleClose = () => {
             if (hideTimer) clearTimeout(hideTimer);
-            hideTimer = setTimeout(closeRatingSubmenu, 180);
+            hideTimer = setTimeout(closeRatingSubmenu, 350);
         };
 
         const cancelClose = () => {
@@ -411,15 +446,31 @@ export function bindGridContextMenu({
             hideTimer = null;
         };
 
+        // Clear timers + submenu listeners when the main menu closes.
+        try {
+            setMenuSessionCleanup(menu, () => {
+                try {
+                    if (hideTimer) clearTimeout(hideTimer);
+                } catch {}
+                hideTimer = null;
+                try {
+                    ratingSubmenu?._mjrAbortController?.abort?.();
+                } catch {}
+                try {
+                    closeRatingSubmenu();
+                } catch {}
+            });
+        } catch {}
+
         const renderRatingSubmenu = () => {
             clearMenu(ratingSubmenu);
             const stars = (n) => "★".repeat(n) + "☆".repeat(Math.max(0, 5 - n));
             for (const n of [5, 4, 3, 2, 1]) {
                 ratingSubmenu.appendChild(
                     createItem(stars(n), "pi pi-star", null, async () => {
-                        await setRating(asset, n, () => {
+                        setRating(asset, n, () => {
                             const card = document.querySelector(
-                                `[data-mjr-asset-id="${CSS.escape ? CSS.escape(String(asset.id)) : String(asset.id)}"]`
+                                `[data-mjr-asset-id="${safeEscapeSelector(asset.id)}"]`
                             );
                             if (card && card._mjrAsset) card._mjrAsset.rating = n;
                         });
@@ -433,9 +484,9 @@ export function bindGridContextMenu({
             ratingSubmenu.appendChild(separator());
             ratingSubmenu.appendChild(
                 createItem("Reset rating", "pi pi-star", "0", async () => {
-                    await setRating(asset, 0, () => {
+                    setRating(asset, 0, () => {
                         const card = document.querySelector(
-                            `[data-mjr-asset-id="${CSS.escape ? CSS.escape(String(asset.id)) : String(asset.id)}"]`
+                            `[data-mjr-asset-id="${safeEscapeSelector(asset.id)}"]`
                         );
                         if (card && card._mjrAsset) card._mjrAsset.rating = 0;
                     });
@@ -486,7 +537,7 @@ export function bindGridContextMenu({
                         asset.filepath = asset.filepath.replace(/[^\\/]+$/, newName);
                         
                         // Update card UI
-                        const card = document.querySelector(`[data-mjr-asset-id="${CSS.escape ? CSS.escape(String(asset.id)) : String(asset.id)}"]`);
+                        const card = document.querySelector(`[data-mjr-asset-id="${safeEscapeSelector(asset.id)}"]`);
                         if (card) {
                             // Update card display
                             const filenameEl = card.querySelector('.mjr-filename');
@@ -508,7 +559,7 @@ export function bindGridContextMenu({
         // Delete (single or multi)
         if (isMultiSelected) {
             menu.appendChild(
-                createItem(`Delete ${selectedIds.size} files…`, "pi pi-trash", null, async () => {
+                createItem(`Delete ${selectedIds.size} files...`, "pi pi-trash", null, async () => {
                     const confirmed = await comfyConfirm(`Delete ${selectedIds.size} files? This cannot be undone.`);
                     if (!confirmed) return;
 
@@ -522,7 +573,7 @@ export function bindGridContextMenu({
                             if (result?.ok) {
                                 successCount++;
                                 // Remove card from DOM
-                                const card = document.querySelector(`[data-mjr-asset-id="${CSS.escape ? CSS.escape(String(assetId)) : String(assetId)}"]`);
+                                const card = document.querySelector(`[data-mjr-asset-id="${safeEscapeSelector(assetId)}"]`);
                                 if (card) card.remove();
                             } else {
                                 errorCount++;
@@ -544,7 +595,7 @@ export function bindGridContextMenu({
             );
         } else {
             menu.appendChild(
-                createItem("Delete…", "pi pi-trash", null, async () => {
+                createItem("Delete...", "pi pi-trash", null, async () => {
                     const confirmed = await comfyConfirm("Delete this file? This cannot be undone.");
                     if (!confirmed) return;
                     
@@ -552,7 +603,10 @@ export function bindGridContextMenu({
                         const result = await deleteAsset(asset.id);
                         if (result?.ok) {
                             // Remove the card from DOM
-                            card.remove();
+                            try {
+                                const cardToRemove = document.querySelector(`[data-mjr-asset-id="${safeEscapeSelector(asset.id)}"]`);
+                                cardToRemove?.remove?.();
+                            } catch {}
                             await comfyAlert("File deleted successfully!");
                         } else {
                             await comfyAlert(result?.error || "Failed to delete file.");
@@ -567,5 +621,26 @@ export function bindGridContextMenu({
         // Bulk operations menu removed
 
         showAt(menu, e.clientX, e.clientY);
-    });
+    };
+
+    try {
+        gridContainer.addEventListener("contextmenu", handler);
+    } catch (err) {
+        console.error("[GridContextMenu] Failed to bind:", err);
+    }
+
+    gridContainer._mjrGridContextMenuBound = true;
+    const unbind = () => {
+        try {
+            gridContainer.removeEventListener("contextmenu", handler);
+        } catch {}
+        try {
+            gridContainer._mjrGridContextMenuBound = false;
+        } catch {}
+        try {
+            gridContainer._mjrGridContextMenuUnbind = null;
+        } catch {}
+    };
+    gridContainer._mjrGridContextMenuUnbind = unbind;
+    return unbind;
 }
