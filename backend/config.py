@@ -101,13 +101,25 @@ FFPROBE_TIMEOUT = _env_int("MAJOOR_FFPROBE_TIMEOUT", 10)
 DB_TIMEOUT = _env_float("MAJOOR_DB_TIMEOUT", 30.0)
 DB_MAX_CONNECTIONS = _env_int("MAJOOR_DB_MAX_CONNECTIONS", 8)
 DB_QUERY_TIMEOUT = _env_float("MAJOOR_DB_QUERY_TIMEOUT", 30.0)
+TO_THREAD_TIMEOUT_S = _env_float("MAJOOR_TO_THREAD_TIMEOUT", 30.0)
+MAX_METADATA_JSON_BYTES = _env_int("MAJOOR_MAX_METADATA_JSON_BYTES", 2 * 1024 * 1024)  # 2MB
+
+# Background scan / filesystem listing tuning
+BG_SCAN_FAILURE_HISTORY_MAX = _env_int("MAJOOR_BG_SCAN_FAILURE_HISTORY_MAX", 50)
+SCAN_PENDING_MAX = _env_int("MAJOOR_SCAN_PENDING_MAX", 64)
+
+# Filesystem listing cache (used by filesystem fallback search/list)
+FS_LIST_CACHE_MAX = _env_int("MAJOOR_FS_LIST_CACHE_MAX", 32)
+FS_LIST_CACHE_TTL_SECONDS = _env_float("MAJOOR_FS_LIST_CACHE_TTL_SECONDS", 1.5)
+FS_LIST_CACHE_WATCHDOG = _env_bool("MAJOOR_FS_LIST_CACHE_WATCHDOG", True)
 
 # Scanner batching (bounded transactions)
 # Tweak only if you know your workload; larger batches reduce transaction overhead but increase lock time.
 SCAN_BATCH_SMALL_THRESHOLD = _env_int("MAJOOR_SCAN_BATCH_SMALL_THRESHOLD", 100)
 SCAN_BATCH_MED_THRESHOLD = _env_int("MAJOOR_SCAN_BATCH_MED_THRESHOLD", 1000)
 SCAN_BATCH_LARGE_THRESHOLD = _env_int("MAJOOR_SCAN_BATCH_LARGE_THRESHOLD", 10000)
-SCAN_BATCH_SMALL = _env_int("MAJOOR_SCAN_BATCH_SMALL", 10)
+# Default to fewer DB transactions for typical directories (~100-500 files).
+SCAN_BATCH_SMALL = _env_int("MAJOOR_SCAN_BATCH_SMALL", 50)
 SCAN_BATCH_MED = _env_int("MAJOOR_SCAN_BATCH_MED", 50)
 SCAN_BATCH_LARGE = _env_int("MAJOOR_SCAN_BATCH_LARGE", 100)
 SCAN_BATCH_XL = _env_int("MAJOOR_SCAN_BATCH_XL", 200)

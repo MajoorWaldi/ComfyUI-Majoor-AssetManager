@@ -9,6 +9,7 @@ import {
     hideMenu,
     MENU_Z_INDEX,
 } from "../../../components/contextmenu/MenuCore.js";
+import { pickRootId } from "../../../utils/ids.js";
 
 const MENU_SELECTOR = ".mjr-collections-context-menu";
 
@@ -38,7 +39,7 @@ function simplifyAsset(a) {
         filename: a.filename || "",
         subfolder: a.subfolder || "",
         type: (a.type || "output").toLowerCase(),
-        root_id: a.root_id || a.rootId || a.custom_root_id || "",
+        root_id: pickRootId(a),
         kind: a.kind || "",
     };
 }

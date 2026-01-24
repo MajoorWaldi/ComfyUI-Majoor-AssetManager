@@ -6,6 +6,7 @@ import { updateAssetTags, getAvailableTags } from "../api/client.js";
 import { ASSET_TAGS_CHANGED_EVENT } from "../app/events.js";
 import { getPopoverManagerForElement } from "../features/panel/views/popoverManager.js";
 import { safeDispatchCustomEvent } from "../utils/events.js";
+import { MENU_Z_INDEX } from "./contextmenu/MenuCore.js";
 
 /**
  * Create interactive tags editor
@@ -39,6 +40,10 @@ export function createTagsEditor(asset, onUpdate) {
         gap: 6px;
         min-height: 32px;
     `;
+    try {
+        tagsDisplay.setAttribute("role", "list");
+        tagsDisplay.setAttribute("aria-label", "Tags");
+    } catch {}
 
     const renderTags = () => {
         tagsDisplay.innerHTML = "";
@@ -73,6 +78,12 @@ export function createTagsEditor(asset, onUpdate) {
     input.type = "text";
     input.placeholder = "Add tag...";
     input.className = "mjr-tag-input";
+    try {
+        input.setAttribute("aria-label", "Add tag");
+        input.setAttribute("aria-autocomplete", "list");
+        input.setAttribute("aria-expanded", "false");
+        input.setAttribute("aria-haspopup", "listbox");
+    } catch {}
     input.style.cssText = `
         width: 100%;
         padding: 6px 8px;
@@ -87,6 +98,10 @@ export function createTagsEditor(asset, onUpdate) {
     // Autocomplete dropdown
     const dropdown = document.createElement("div");
     dropdown.className = "mjr-tags-dropdown";
+    try {
+        dropdown.setAttribute("role", "listbox");
+        dropdown.setAttribute("aria-label", "Tag suggestions");
+    } catch {}
     dropdown.style.cssText = `
         position: absolute;
         top: 100%;
@@ -123,6 +138,9 @@ export function createTagsEditor(asset, onUpdate) {
         const normalizedQuery = query.toLowerCase().trim();
         if (!normalizedQuery) {
             dropdown.style.display = "none";
+            try {
+                input.setAttribute("aria-expanded", "false");
+            } catch {}
             return;
         }
 
@@ -135,6 +153,9 @@ export function createTagsEditor(asset, onUpdate) {
 
         if (suggestions.length === 0) {
             dropdown.style.display = "none";
+            try {
+                input.setAttribute("aria-expanded", "false");
+            } catch {}
             return;
         }
 
@@ -143,6 +164,10 @@ export function createTagsEditor(asset, onUpdate) {
             const item = document.createElement("div");
             item.className = "mjr-tag-suggestion";
             item.textContent = tag;
+            try {
+                item.setAttribute("role", "option");
+                item.setAttribute("aria-selected", index === selectedIndex ? "true" : "false");
+            } catch {}
             item.style.cssText = `
                 padding: 6px 8px;
                 cursor: pointer;
@@ -160,43 +185,88 @@ export function createTagsEditor(asset, onUpdate) {
                 addTag(tag);
                 input.value = "";
                 dropdown.style.display = "none";
+                try {
+                    input.setAttribute("aria-expanded", "false");
+                } catch {}
             });
 
             dropdown.appendChild(item);
         });
 
         dropdown.style.display = "block";
+        try {
+            input.setAttribute("aria-expanded", "true");
+        } catch {}
+    };
+
+    const MAX_TAG_LEN = 64;
+    const MAX_TAGS = 200;
+    const normalizeTag = (raw) => {
+        try {
+            const s = String(raw ?? "").trim();
+            if (!s) return null;
+            if (s.length > MAX_TAG_LEN) return null;
+            // Disallow control chars/newlines (keep tags single-line and UI-safe).
+            if (/[\x00-\x1F\x7F]/.test(s)) return null;
+            // Avoid separators that are used for input parsing.
+            if (/[;,]/.test(s)) return null;
+            return s;
+        } catch {
+            return null;
+        }
     };
 
     // Add tag function
     const addTag = (tag) => {
-        const normalized = tag.trim();
-        if (!normalized || currentTags.includes(normalized)) {
-            return;
-        }
+        const normalized = normalizeTag(tag);
+        if (!normalized) return;
+        if (currentTags.includes(normalized)) return;
+        if (currentTags.length >= MAX_TAGS) return;
         currentTags.push(normalized);
         renderTags();
         saveTags();
     };
 
     // Save tags to backend
+    let saveInFlight = false;
+    let savePending = false;
+    let saveAC = null;
+    let lastSaved = Array.isArray(asset.tags) ? [...asset.tags] : [];
     const saveTags = async () => {
-        const prev = Array.isArray(asset.tags) ? [...asset.tags] : [];
-        let result = null;
-        try {
-            // Supports both `asset_id` and `{filepath,type,root_id}` payloads.
-            result = await updateAssetTags(asset, currentTags);
-        } catch (err) {
-            console.error("Failed to update tags:", err);
-        }
-
-        if (!result?.ok) {
-            // Revert if backend rejected the change.
-            currentTags.splice(0, currentTags.length, ...prev);
-            asset.tags = [...prev];
-            renderTags();
+        if (saveInFlight) {
+            savePending = true;
+            try {
+                saveAC?.abort?.();
+            } catch {}
             return;
         }
+        saveInFlight = true;
+        while (true) {
+            const snapshot = [...currentTags];
+            const ac = typeof AbortController !== "undefined" ? new AbortController() : null;
+            saveAC = ac;
+            let result = null;
+            try {
+                // Supports both `asset_id` and `{filepath,type,root_id}` payloads.
+                result = await updateAssetTags(asset, snapshot, ac ? { signal: ac.signal } : {});
+            } catch (err) {
+                console.error("Failed to update tags:", err);
+            }
+
+            if (!result?.ok) {
+                // If aborted due to a new change, try again with the latest snapshot.
+                if (result?.code === "ABORTED" && savePending) {
+                    savePending = false;
+                    continue;
+                }
+                // Revert if backend rejected the change.
+                currentTags.splice(0, currentTags.length, ...lastSaved);
+                asset.tags = [...lastSaved];
+                renderTags();
+                saveInFlight = false;
+                saveAC = null;
+                return;
+            }
 
         // If we tagged an unindexed file, the backend may have created an asset row.
         try {
@@ -204,14 +274,34 @@ export function createTagsEditor(asset, onUpdate) {
             if (asset.id == null && newId != null) asset.id = newId;
         } catch {}
 
-        asset.tags = [...currentTags];
-        if (onUpdate) onUpdate(currentTags);
+            lastSaved = [...snapshot];
+            asset.tags = [...snapshot];
+            if (onUpdate) onUpdate(snapshot);
         safeDispatchCustomEvent(
             ASSET_TAGS_CHANGED_EVENT,
-            { assetId: String(asset.id), tags: [...currentTags] },
+            { assetId: String(asset.id), tags: [...snapshot] },
             { warnPrefix: "[TagsEditor]" }
         );
+            if (!savePending) break;
+            savePending = false;
+        }
+        saveInFlight = false;
+        saveAC = null;
     };
+
+    // Best-effort cleanup hook for callers that remove the editor abruptly.
+    try {
+        container._mjrDestroy = () => {
+            try {
+                if (blurTimer) clearTimeout(blurTimer);
+            } catch {}
+            blurTimer = null;
+            try {
+                saveAC?.abort?.();
+            } catch {}
+            saveAC = null;
+        };
+    } catch {}
 
     // Input event handlers
     input.addEventListener("input", (e) => {
@@ -242,22 +332,47 @@ export function createTagsEditor(asset, onUpdate) {
                 addTag(input.value);
                 input.value = "";
                 dropdown.style.display = "none";
+                try {
+                    input.setAttribute("aria-expanded", "false");
+                } catch {}
             }
         } else if (e.key === "Escape") {
             dropdown.style.display = "none";
             selectedIndex = -1;
+            try {
+                input.setAttribute("aria-expanded", "false");
+            } catch {}
         } else if (e.key === "," || e.key === ";") {
             e.preventDefault();
             addTag(input.value);
             input.value = "";
             dropdown.style.display = "none";
+            try {
+                input.setAttribute("aria-expanded", "false");
+            } catch {}
         }
     });
 
+    let blurTimer = null;
+    input.addEventListener("focus", () => {
+        try {
+            if (blurTimer) clearTimeout(blurTimer);
+        } catch {}
+        blurTimer = null;
+    });
     input.addEventListener("blur", () => {
         // Delay to allow click on dropdown
-        setTimeout(() => {
-            dropdown.style.display = "none";
+        try {
+            if (blurTimer) clearTimeout(blurTimer);
+        } catch {}
+        blurTimer = setTimeout(() => {
+            try {
+                if (!container.isConnected) return;
+            } catch {}
+            try {
+                dropdown.style.display = "none";
+                input.setAttribute("aria-expanded", "false");
+            } catch {}
         }, 200);
     });
 
@@ -299,9 +414,15 @@ function createTagChip(tag, onRemove) {
 
     const text = document.createElement("span");
     text.textContent = tag;
+    try {
+        chip.setAttribute("role", "listitem");
+    } catch {}
 
     const removeBtn = document.createElement("button");
     removeBtn.type = "button";
+    try {
+        removeBtn.setAttribute("aria-label", `Remove tag ${String(tag || "")}`);
+    } catch {}
     removeBtn.textContent = "×";
     removeBtn.style.cssText = `
         background: none;
@@ -386,10 +507,13 @@ export function showTagsPopover(anchor, asset, onUpdate) {
     popover.style.position = "fixed";
     popover.style.top = `${top}px`;
     popover.style.left = `${left}px`;
-    popover.style.zIndex = "2147483647";
+    popover.style.zIndex = String(MENU_Z_INDEX?.POPOVER ?? 10003);
 
     const closeOnClickOutside = (e) => {
         if (!popover.contains(e.target) && !anchor.contains(e.target)) {
+            try {
+                editor?._mjrDestroy?.();
+            } catch {}
             try {
                 popover.remove();
             } catch {}
@@ -398,27 +522,34 @@ export function showTagsPopover(anchor, asset, onUpdate) {
             } catch {}
             popover._mjrDocClickAC = null;
             try {
-                if (popover._mjrDocClickTimer) clearTimeout(popover._mjrDocClickTimer);
+                if (popover._mjrDocClickRAF != null) cancelAnimationFrame(popover._mjrDocClickRAF);
             } catch {}
-            popover._mjrDocClickTimer = null;
+            try {
+                if (popover._mjrDocClickRAF2 != null) cancelAnimationFrame(popover._mjrDocClickRAF2);
+            } catch {}
+            popover._mjrDocClickRAF = null;
+            popover._mjrDocClickRAF2 = null;
         }
     };
     try {
         const ac = typeof AbortController !== "undefined" ? new AbortController() : null;
         popover._mjrDocClickAC = ac;
-        popover._mjrDocClickTimer = setTimeout(() => {
-            try {
-                popover._mjrDocClickTimer = null;
-            } catch {}
-            try {
-                if (!popover.isConnected) {
-                    ac?.abort?.();
-                    return;
-                }
-                if (ac) document.addEventListener("click", closeOnClickOutside, { signal: ac.signal, capture: true });
-                else document.addEventListener("click", closeOnClickOutside, { capture: true });
-            } catch {}
-        }, 100);
+        popover._mjrDocClickRAF = requestAnimationFrame(() => {
+            popover._mjrDocClickRAF2 = requestAnimationFrame(() => {
+                try {
+                    popover._mjrDocClickRAF = null;
+                    popover._mjrDocClickRAF2 = null;
+                } catch {}
+                try {
+                    if (!popover.isConnected) {
+                        ac?.abort?.();
+                        return;
+                    }
+                    if (ac) document.addEventListener("click", closeOnClickOutside, { signal: ac.signal, capture: true });
+                    else document.addEventListener("click", closeOnClickOutside, { capture: true });
+                } catch {}
+            });
+        });
     } catch {
         try {
             document.addEventListener("click", closeOnClickOutside, { capture: true });

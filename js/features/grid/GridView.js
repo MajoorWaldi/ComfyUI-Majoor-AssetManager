@@ -4,13 +4,14 @@
 
 import { get, hydrateAssetRatingTags } from "../../api/client.js";
 import { buildListURL } from "../../api/endpoints.js";
-import { createAssetCard } from "../../components/Card.js";
+import { createAssetCard, cleanupVideoThumbsIn } from "../../components/Card.js";
 import { createRatingBadge, createTagsBadge, setFileBadgeCollision } from "../../components/Badges.js";
 import { APP_CONFIG } from "../../app/config.js";
 import { getViewerInstance } from "../../components/Viewer.js";
 // Context menus are bound by the panel (GridContextMenu) to avoid duplicate handlers.
 import { ASSET_RATING_CHANGED_EVENT, ASSET_TAGS_CHANGED_EVENT } from "../../app/events.js";
 import { safeDispatchCustomEvent } from "../../utils/events.js";
+import { pickRootId } from "../../utils/ids.js";
 import { bindAssetDragStart } from "../dnd/DragDrop.js";
 import { loadMajoorSettings } from "../../app/settings.js";
 
@@ -23,8 +24,22 @@ const RT_HYDRATE_SEEN_MAX = APP_CONFIG.RT_HYDRATE_SEEN_MAX ?? 20000;
 const RT_HYDRATE_SEEN_TTL_MS = APP_CONFIG.RT_HYDRATE_SEEN_TTL_MS ?? (10 * 60 * 1000);
 let rtHydrateSeenPruneBudget = 0;
 let rtHydrateSeenLastPruneAt = 0;
-const RT_HYDRATE_QUEUE = [];
-let rtHydrateInflight = 0;
+const RT_HYDRATE_STATE = new WeakMap(); // gridContainer -> { queue: [], inflight: 0 }
+const RT_HYDRATE_ACTIVE = new Set(); // ids currently queued/in-flight across grids (best-effort)
+
+function _getRtHydrateState(gridContainer) {
+    try {
+        if (!gridContainer) return null;
+        let s = RT_HYDRATE_STATE.get(gridContainer);
+        if (!s) {
+            s = { queue: [], inflight: 0 };
+            RT_HYDRATE_STATE.set(gridContainer, s);
+        }
+        return s;
+    } catch {
+        return null;
+    }
+}
 
 function pruneRatingTagsHydrateSeen() {
     // Avoid unbounded growth on large libraries; prune occasionally to keep perf predictable.
@@ -46,9 +61,9 @@ function pruneRatingTagsHydrateSeen() {
     try {
         const keep = new Set();
         // Keep items that are still queued/in-flight first.
-        for (const job of RT_HYDRATE_QUEUE) {
-            if (job?.id) keep.add(String(job.id));
-        }
+        try {
+            for (const id of RT_HYDRATE_ACTIVE) keep.add(String(id));
+        } catch {}
         // Keep up to half of the max from the existing set (in insertion order).
         const target = Math.max(1000, Math.floor(RT_HYDRATE_SEEN_MAX / 2));
         if (keep.size < target) {
@@ -64,17 +79,37 @@ function pruneRatingTagsHydrateSeen() {
 
 function _updateCardRatingTagsBadges(card, rating, tags) {
     if (!card) return;
+    try {
+        if (!card.isConnected) return;
+    } catch {}
     const thumb = card.querySelector?.(".mjr-thumb");
     if (!thumb) return;
 
-    const nextRatingBadge = createRatingBadge(rating || 0);
     const oldRatingBadge = thumb.querySelector?.(".mjr-rating-badge");
-    if (oldRatingBadge && nextRatingBadge) {
-        oldRatingBadge.replaceWith(nextRatingBadge);
-    } else if (oldRatingBadge && !nextRatingBadge) {
-        oldRatingBadge.remove();
-    } else if (!oldRatingBadge && nextRatingBadge) {
-        thumb.appendChild(nextRatingBadge);
+    const ratingValue = Math.max(0, Math.min(5, Number(rating) || 0));
+    if (ratingValue <= 0) {
+        try {
+            oldRatingBadge?.remove?.();
+        } catch {}
+    } else if (!oldRatingBadge) {
+        const nextRatingBadge = createRatingBadge(ratingValue);
+        if (nextRatingBadge) thumb.appendChild(nextRatingBadge);
+    } else {
+        // Update in place to avoid full DOM replacement.
+        try {
+            const cur = oldRatingBadge.querySelectorAll?.("span")?.length || 0;
+            if (cur !== ratingValue) {
+                const stars = [];
+                for (let i = 0; i < ratingValue; i++) {
+                    const star = document.createElement("span");
+                    star.textContent = "★";
+                    star.style.color = "#FFD45A";
+                    star.style.marginRight = i < ratingValue - 1 ? "2px" : "0";
+                    stars.push(star);
+                }
+                oldRatingBadge.replaceChildren(...stars);
+            }
+        } catch {}
     }
 
     const oldTagsBadge = thumb.querySelector?.(".mjr-tags-badge");
@@ -92,11 +127,13 @@ function _updateCardRatingTagsBadges(card, rating, tags) {
     }
 }
 
-function _pumpRatingTagsHydration() {
-    while (rtHydrateInflight < RT_HYDRATE_CONCURRENCY && RT_HYDRATE_QUEUE.length) {
-        const job = RT_HYDRATE_QUEUE.shift();
+function _pumpRatingTagsHydration(gridContainer) {
+    const st = _getRtHydrateState(gridContainer);
+    if (!st) return;
+    while (st.inflight < RT_HYDRATE_CONCURRENCY && st.queue.length) {
+        const job = st.queue.shift();
         if (!job) break;
-        rtHydrateInflight += 1;
+        st.inflight += 1;
         (async () => {
             const res = await hydrateAssetRatingTags(job.id);
             if (!res || !res.ok || !res.data) return;
@@ -126,16 +163,21 @@ function _pumpRatingTagsHydration() {
         })()
             .catch(() => null)
             .finally(() => {
-                rtHydrateInflight -= 1;
-                _pumpRatingTagsHydration();
+                try {
+                    RT_HYDRATE_ACTIVE.delete(String(job.id));
+                } catch {}
+                st.inflight -= 1;
+                _pumpRatingTagsHydration(gridContainer);
             });
     }
 }
 
-function enqueueRatingTagsHydration(card, asset) {
+function enqueueRatingTagsHydration(gridContainer, card, asset) {
     const id = asset?.id != null ? String(asset.id) : "";
     if (!id) return;
     if (RT_HYDRATE_SEEN.has(id)) return;
+    const st = _getRtHydrateState(gridContainer);
+    if (!st) return;
 
     const rating = Number(asset?.rating || 0) || 0;
     const tags = asset?.tags;
@@ -153,16 +195,24 @@ function enqueueRatingTagsHydration(card, asset) {
 
     // Keep queue bounded to avoid unbounded memory growth on large libraries.
     try {
-        while (RT_HYDRATE_QUEUE.length >= RT_HYDRATE_QUEUE_MAX) {
-            const dropped = RT_HYDRATE_QUEUE.shift();
-            if (dropped?.id) RT_HYDRATE_SEEN.delete(String(dropped.id));
+        while (st.queue.length >= RT_HYDRATE_QUEUE_MAX) {
+            const dropped = st.queue.shift();
+            try {
+                if (dropped?.id) RT_HYDRATE_ACTIVE.delete(String(dropped.id));
+            } catch {}
+            try {
+                if (dropped?.id) RT_HYDRATE_SEEN.delete(String(dropped.id));
+            } catch {}
         }
     } catch {}
 
     RT_HYDRATE_SEEN.add(id);
     pruneRatingTagsHydrateSeen();
-    RT_HYDRATE_QUEUE.push({ id, card, asset });
-    _pumpRatingTagsHydration();
+    try {
+        RT_HYDRATE_ACTIVE.add(id);
+    } catch {}
+    st.queue.push({ id, card, asset });
+    _pumpRatingTagsHydration(gridContainer);
 }
 
 /**
@@ -289,7 +339,7 @@ function assetKey(asset) {
     if (asset.id != null) return `id:${asset.id}`;
     const fp = asset.filepath || "";
     const t = asset.type || "";
-    const rid = asset.root_id || asset.rootId || asset.custom_root_id || "";
+    const rid = pickRootId(asset);
     return `${t}|${rid}|${fp}|${asset.subfolder || ""}|${asset.filename || ""}`;
 }
 
@@ -498,7 +548,7 @@ function appendAssets(gridContainer, assets, state) {
         } catch {}
         frag.appendChild(card);
         // Best-effort: hydrate existing OS rating/tags (if DB empty) without requiring a full rescan.
-        enqueueRatingTagsHydration(card, asset);
+        enqueueRatingTagsHydration(gridContainer, card, asset);
         added += 1;
     }
     if (added > 0) {
@@ -917,7 +967,25 @@ export function disposeGrid(gridContainer) {
     if (!state) return;
     stopObserver(state);
     try {
+        cleanupVideoThumbsIn?.(gridContainer);
+    } catch {}
+    try {
         state.seenKeys?.clear?.();
+    } catch {}
+    // Best-effort: clear any queued rating/tag hydration jobs for this grid.
+    try {
+        const st = _getRtHydrateState(gridContainer);
+        if (st?.queue?.length) {
+            for (const job of st.queue) {
+                try {
+                    if (job?.id) RT_HYDRATE_ACTIVE.delete(String(job.id));
+                } catch {}
+            }
+            st.queue.length = 0;
+        }
+    } catch {}
+    try {
+        RT_HYDRATE_STATE.delete(gridContainer);
     } catch {}
     GRID_STATE.delete(gridContainer);
 }
@@ -1068,7 +1136,7 @@ export function upsertAsset(gridContainer, asset) {
             bindAssetDragStart(gridContainer);
 
             // Hydrate rating/tags if needed
-            enqueueRatingTagsHydration(card, asset);
+            enqueueRatingTagsHydration(gridContainer, card, asset);
 
             return true;
         }

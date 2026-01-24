@@ -5,8 +5,11 @@ import hashlib
 import json
 from typing import Dict, Any, Tuple, Optional
 
+from ...config import MAX_METADATA_JSON_BYTES
 from ...shared import Result, ErrorCode
 from ...adapters.db.sqlite import Sqlite
+
+MAX_TAG_LENGTH = 100
 
 
 class MetadataHelpers:
@@ -136,6 +139,26 @@ class MetadataHelpers:
         """
         has_workflow, has_generation_data, metadata_quality, metadata_raw_json = MetadataHelpers.prepare_metadata_fields(metadata_result)
 
+        # Guard against pathological/huge JSON payloads; keep DB stable.
+        try:
+            max_bytes = int(MAX_METADATA_JSON_BYTES or 0)
+        except Exception:
+            max_bytes = 0
+        if max_bytes and isinstance(metadata_raw_json, str):
+            try:
+                nbytes = len(metadata_raw_json.encode("utf-8", errors="ignore"))
+            except Exception:
+                nbytes = 0
+            if nbytes > max_bytes:
+                try:
+                    metadata_raw_json = json.dumps(
+                        {"_truncated": True, "original_bytes": int(nbytes)},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                except Exception:
+                    metadata_raw_json = "{}"
+
         extracted_rating = 0
         extracted_tags_json = "[]"
         extracted_tags_text = ""
@@ -156,7 +179,7 @@ class MetadataHelpers:
                         if not isinstance(item, str):
                             continue
                         tag = item.strip()
-                        if not tag or len(tag) > 100 or tag in seen:
+                        if not tag or len(tag) > MAX_TAG_LENGTH or tag in seen:
                             continue
                         seen.add(tag)
                         cleaned.append(tag)
@@ -334,6 +357,17 @@ class MetadataHelpers:
             separators=(",", ":"),
             sort_keys=True
         )
+        try:
+            max_bytes = int(MAX_METADATA_JSON_BYTES or 0)
+        except Exception:
+            max_bytes = 0
+        if max_bytes and isinstance(metadata_raw, str):
+            try:
+                nbytes = len(metadata_raw.encode("utf-8", errors="ignore"))
+            except Exception:
+                nbytes = 0
+            if nbytes > max_bytes:
+                return Result.Err("CACHE_SKIPPED", "Metadata JSON too large to cache")
         metadata_hash = MetadataHelpers.compute_metadata_hash(metadata_raw)
 
         return db.execute(

@@ -7,6 +7,8 @@ from typing import List, Dict, Any
 from ...shared import Result
 from ...adapters.db.sqlite import Sqlite
 
+MAX_TAG_LENGTH = 100
+
 
 class AssetUpdater:
     """
@@ -89,7 +91,7 @@ class AssetUpdater:
             if not isinstance(tag, str):
                 continue
             tag = str(tag).strip()
-            if not tag or len(tag) > 100:
+            if not tag or len(tag) > MAX_TAG_LENGTH:
                 continue
             if tag not in sanitized:  # Deduplicate
                 sanitized.append(tag)

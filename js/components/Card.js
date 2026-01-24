@@ -6,17 +6,64 @@ import { buildAssetViewURL } from "../api/endpoints.js";
 import { createFileBadge, createRatingBadge, createTagsBadge, createWorkflowDot } from "./Badges.js";
 
 const VIDEO_THUMBS_KEY = "__MJR_VIDEO_THUMBS__";
+const VIDEO_THUMB_MAX_AUTOPLAY = 6;
+const VIDEO_THUMB_MAX_PREPARED = 48;
+const VIDEO_THUMB_LOAD_TIMEOUT_MS = 5000;
+const VIDEO_THUMB_FIRST_FRAME_SEEK_S = 0.05;
+
+export function cleanupVideoThumbsIn(rootEl) {
+    try {
+        const mgr = getVideoThumbManager();
+        const vids = rootEl?.querySelectorAll?.("video.mjr-thumb-media") || [];
+        for (const v of vids) {
+            try {
+                mgr?.unobserve?.(v);
+            } catch {}
+        }
+    } catch {}
+}
 
 const getVideoThumbManager = () => {
     try {
         if (window?.[VIDEO_THUMBS_KEY]) return window[VIDEO_THUMBS_KEY];
     } catch {}
 
-    const MAX_AUTOPLAY = 6;
     const playing = new Set();
     const prepared = new Set();
 
-    const waitForLoadedData = (video, timeoutMs = 5000) =>
+    const pruneSets = () => {
+        try {
+            for (const v of Array.from(playing)) {
+                try {
+                    if (!v || !v.isConnected) playing.delete(v);
+                } catch {}
+            }
+        } catch {}
+        try {
+            for (const v of Array.from(prepared)) {
+                try {
+                    if (!v || !v.isConnected) prepared.delete(v);
+                } catch {}
+            }
+        } catch {}
+        try {
+            while (prepared.size > VIDEO_THUMB_MAX_PREPARED) {
+                const oldest = prepared.values().next().value;
+                prepared.delete(oldest);
+                try {
+                    oldest?.pause?.();
+                } catch {}
+                try {
+                    if (oldest?.getAttribute?.("src")) {
+                        oldest.removeAttribute("src");
+                        oldest.load?.();
+                    }
+                } catch {}
+            }
+        } catch {}
+    };
+
+    const waitForLoadedData = (video, timeoutMs = VIDEO_THUMB_LOAD_TIMEOUT_MS) =>
         new Promise((resolve) => {
             if (!video) return resolve(false);
             try {
@@ -58,7 +105,7 @@ const getVideoThumbManager = () => {
         } catch {}
         try {
             // Nudge off 0 to force frame decode on some mp4s.
-            video.currentTime = 0.05;
+            video.currentTime = VIDEO_THUMB_FIRST_FRAME_SEEK_S;
         } catch {}
         try {
             video.pause();
@@ -80,6 +127,9 @@ const getVideoThumbManager = () => {
             }
         } catch {}
         prepared.delete(video);
+        try {
+            playing.delete(video);
+        } catch {}
     };
 
     const ensurePrepared = async (video) => {
@@ -89,6 +139,7 @@ const getVideoThumbManager = () => {
 
         if (!prepared.has(video)) {
             prepared.add(video);
+            pruneSets();
             try {
                 if (!video.getAttribute("src")) {
                     video.src = src;
@@ -110,7 +161,7 @@ const getVideoThumbManager = () => {
 
         if (!playing.has(video)) {
             playing.add(video);
-            while (playing.size > MAX_AUTOPLAY) {
+            while (playing.size > VIDEO_THUMB_MAX_AUTOPLAY) {
                 const oldest = playing.values().next().value;
                 playing.delete(oldest);
                 stopVideo(oldest);

@@ -17,6 +17,8 @@ logger = get_logger(__name__)
 MAX_SEARCH_QUERY_LENGTH = 512
 MAX_SEARCH_TOKENS = 16
 MAX_TOKEN_LENGTH = 64
+MAX_ASSET_BATCH_IDS = 200
+MAX_FILEPATH_LOOKUP = 5000
 
 
 def _build_filter_clauses(filters: Optional[Dict[str, Any]], alias: str = "a") -> Tuple[List[str], List[Any]]:
@@ -637,7 +639,7 @@ class IndexSearcher:
                 continue
             seen.add(n)
             cleaned.append(n)
-            if len(cleaned) >= 200:
+            if len(cleaned) >= MAX_ASSET_BATCH_IDS:
                 break
 
         if not cleaned:
@@ -725,8 +727,8 @@ class IndexSearcher:
         if not cleaned:
             return Result.Ok({})
         # Guard against overly large IN clauses
-        if len(cleaned) > 5000:
-            cleaned = cleaned[:5000]
+        if len(cleaned) > MAX_FILEPATH_LOOKUP:
+            cleaned = cleaned[:MAX_FILEPATH_LOOKUP]
 
         result = await self.db.aquery_in(
             """

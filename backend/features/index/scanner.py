@@ -28,6 +28,11 @@ from .metadata_helpers import MetadataHelpers
 
 logger = get_logger(__name__)
 
+MAX_TRANSACTION_BATCH_SIZE = 500
+MAX_SCAN_JOURNAL_LOOKUP = 5000
+STAT_RETRY_COUNT = 3
+STAT_RETRY_BASE_DELAY_S = 0.15
+
 _EXT_TO_KIND: Dict[str, FileKind] = {}
 try:
     for _kind, _exts in (EXTENSIONS or {}).items():
@@ -1044,7 +1049,7 @@ class IndexScanner:
         else:
             batch_size = int(SCAN_BATCH_XL)
 
-        batch_size = max(1, min(500, int(batch_size)))
+        batch_size = max(1, min(MAX_TRANSACTION_BATCH_SIZE, int(batch_size)))
 
         for start in range(0, total, batch_size):
             yield files[start:start + batch_size]
@@ -1093,8 +1098,8 @@ class IndexScanner:
         cleaned = [str(p) for p in (filepaths or []) if p]
         if not cleaned:
             return {}
-        if len(cleaned) > 5000:
-            cleaned = cleaned[:5000]
+        if len(cleaned) > MAX_SCAN_JOURNAL_LOOKUP:
+            cleaned = cleaned[:MAX_SCAN_JOURNAL_LOOKUP]
         res = self.db.query_in(
             "SELECT filepath, state_hash FROM scan_journal WHERE {IN_CLAUSE}",
             "filepath",
@@ -1131,13 +1136,13 @@ class IndexScanner:
         )
 
     def _stat_with_retry(self, file_path: Path):
-        for attempt in range(3):
+        for attempt in range(STAT_RETRY_COUNT):
             try:
                 stat = file_path.stat()
                 return True, stat
             except OSError as exc:
-                if attempt < 2:
-                    time.sleep(0.15 * (attempt + 1))
+                if attempt < (STAT_RETRY_COUNT - 1):
+                    time.sleep(STAT_RETRY_BASE_DELAY_S * (attempt + 1))
                     continue
                 logger.warning("Failed to stat %s after retries: %s", file_path, exc)
                 return False, exc

@@ -16,6 +16,7 @@ except Exception:
     folder_paths = _FolderPathsStub()  # type: ignore
 
 from backend.config import OUTPUT_ROOT, get_tool_paths, MEDIA_PROBE_BACKEND
+from backend.config import TO_THREAD_TIMEOUT_S
 from backend.custom_roots import resolve_custom_root
 from backend.shared import Result
 from backend.tool_detect import get_tool_status
@@ -31,7 +32,9 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
             return _json_response(error_result)
 
         try:
-            result = await asyncio.to_thread(svc["health"].status)
+            result = await asyncio.wait_for(asyncio.to_thread(svc["health"].status), timeout=TO_THREAD_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            result = Result.Err("TIMEOUT", "Health status timed out")
         except Exception as exc:
             result = Result.Err("DEGRADED", f"Health status failed: {exc}")
         return _json_response(result)
@@ -65,7 +68,9 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
             return _json_response(Result.Err("INVALID_INPUT", f"Unknown scope: {scope}"))
 
         try:
-            result = await asyncio.to_thread(svc["health"].get_counters, roots=roots)
+            result = await asyncio.wait_for(asyncio.to_thread(svc["health"].get_counters, roots=roots), timeout=TO_THREAD_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            result = Result.Err("TIMEOUT", "Health counters timed out")
         except Exception as exc:
             result = Result.Err("DEGRADED", f"Health counters failed: {exc}")
         if result.ok:

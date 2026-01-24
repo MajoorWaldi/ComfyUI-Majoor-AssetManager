@@ -606,7 +606,7 @@ export function createViewer() {
             }
         })();
         try {
-            const showHud = Boolean(state?.hudEnabled);
+            const showHud = state?.mode === VIEWER_MODES.SINGLE && Boolean(state?.hudEnabled);
             const showScopes = String(state?.scopesMode || "off") !== "off";
             const showMask = Boolean(state?.overlayMaskEnabled);
             gridCanvas.style.display =
@@ -615,8 +615,10 @@ export function createViewer() {
 
         const size = grid.ensureCanvasSize();
         if (!(size.w > 0 && size.h > 0)) return;
-        const wantGridOrMask =
-            (Number(state.gridMode) || 0) !== 0 || Boolean(state?.overlayMaskEnabled) || Boolean(state?.hudEnabled);
+        const wantGridOrMask = (() => {
+            const showHud = state?.mode === VIEWER_MODES.SINGLE && Boolean(state?.hudEnabled);
+            return (Number(state.gridMode) || 0) !== 0 || Boolean(state?.overlayMaskEnabled) || showHud;
+        })();
         if (wantGridOrMask) {
             grid.redrawGrid(size);
         } else {

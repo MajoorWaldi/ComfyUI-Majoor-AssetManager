@@ -16,12 +16,28 @@ except Exception:
 
     folder_paths = _FolderPathsStub()  # type: ignore
 
-from backend.config import OUTPUT_ROOT
+from backend.config import OUTPUT_ROOT, TO_THREAD_TIMEOUT_S
 from backend.custom_roots import resolve_custom_root
 from backend.shared import Result
 from backend.features.index.metadata_helpers import MetadataHelpers
 from ..core import _json_response, _require_services, _read_json, safe_error_message
+from ..core.security import _check_rate_limit
 from .filesystem import _list_filesystem_assets, _kickoff_background_scan
+
+DEFAULT_LIST_LIMIT = 50
+DEFAULT_LIST_OFFSET = 0
+MAX_LIST_LIMIT = 5000
+MAX_LIST_OFFSET = 1_000_000
+MAX_RATING = 5
+
+LIST_RATE_LIMIT_MAX_REQUESTS = 50
+LIST_RATE_LIMIT_WINDOW_SECONDS = 60
+
+SEARCH_CHUNK_MIN = 50
+SEARCH_CHUNK_MAX = 500
+SEARCH_MERGE_TRIM_START = 256
+SEARCH_MERGE_TRIM_RATIO = 2
+SEARCH_MAX_BATCH_IDS = 200
 
 
 def _date_bounds_for_range(range_name, reference=None):
@@ -72,14 +88,23 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
         raw_query = (request.query.get("q") or "").strip()
         query = raw_query or "*"
 
-        MAX_OFFSET = 1_000_000
+        allowed, retry_after = _check_rate_limit(
+            request,
+            "list_assets",
+            max_requests=LIST_RATE_LIMIT_MAX_REQUESTS,
+            window_seconds=LIST_RATE_LIMIT_WINDOW_SECONDS,
+        )
+        if not allowed:
+            return _json_response(Result.Err("RATE_LIMITED", "Rate limit exceeded. Please wait before retrying.", retry_after=retry_after))
+
+        MAX_OFFSET = MAX_LIST_OFFSET
         try:
-            limit = int(request.query.get("limit", "50"))
-            offset = int(request.query.get("offset", "0"))
+            limit = int(request.query.get("limit", str(DEFAULT_LIST_LIMIT)))
+            offset = int(request.query.get("offset", str(DEFAULT_LIST_OFFSET)))
         except ValueError:
             return _json_response(Result.Err("INVALID_INPUT", "Invalid limit or offset"))
 
-        limit = max(0, min(5000, limit))
+        limit = max(0, min(MAX_LIST_LIMIT, limit))
         offset = max(0, offset)
         if offset > MAX_OFFSET:
             return _json_response(Result.Err("INVALID_INPUT", f"Offset must be less than {MAX_OFFSET}"))
@@ -93,7 +118,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
             filters["kind"] = kind
         if "min_rating" in request.query:
             try:
-                filters["min_rating"] = max(0, min(5, int(request.query["min_rating"])))
+                filters["min_rating"] = max(0, min(MAX_RATING, int(request.query["min_rating"])))
             except ValueError:
                 return _json_response(Result.Err("INVALID_INPUT", "Invalid min_rating"))
         if "has_workflow" in request.query:
@@ -256,9 +281,13 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
 
                 def _under(root: str, fp: str) -> bool:
                     try:
-                        root_n = root.replace("/", "\\").casefold().rstrip("\\") + "\\"
-                        fp_n = fp.replace("/", "\\").casefold()
-                        return fp_n == root_n.rstrip("\\") or fp_n.startswith(root_n)
+                        import os
+
+                        root_p = Path(str(root)).resolve()
+                        fp_p = Path(str(fp)).resolve()
+                        # commonpath raises on different drives; treat as not-under.
+                        common = os.path.commonpath([str(fp_p), str(root_p)])
+                        return Path(common).resolve() == root_p
                     except Exception:
                         return False
 
@@ -342,7 +371,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
                 return _json_response(Result.Ok({"assets": assets, "total": total, "limit": limit, "offset": offset, "query": query, "scope": scope}))
 
             # Browse-all (`*`): merge by mtime for better UX, with chunked streaming merge.
-            chunk = max(50, min(500, int(limit) * 2))
+            chunk = max(SEARCH_CHUNK_MIN, min(SEARCH_CHUNK_MAX, int(limit) * 2))
             out_offset = 0
             in_offset = 0
             out_buf = []
@@ -436,10 +465,10 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
                     in_i += 1
 
                 # Periodically truncate consumed prefixes to keep buffers small.
-                if out_i > 256 and out_i >= len(out_buf) // 2:
+                if out_i > SEARCH_MERGE_TRIM_START and out_i >= len(out_buf) // SEARCH_MERGE_TRIM_RATIO:
                     out_buf = out_buf[out_i:]
                     out_i = 0
-                if in_i > 256 and in_i >= len(in_buf) // 2:
+                if in_i > SEARCH_MERGE_TRIM_START and in_i >= len(in_buf) // SEARCH_MERGE_TRIM_RATIO:
                     in_buf = in_buf[in_i:]
                     in_i = 0
 
@@ -523,8 +552,12 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
         raw_query = request.query.get("q", "").strip()
         query = raw_query or "*"
 
+        allowed, retry_after = _check_rate_limit(request, "search_assets", max_requests=50, window_seconds=60)
+        if not allowed:
+            return _json_response(Result.Err("RATE_LIMITED", "Rate limit exceeded. Please wait before retrying.", retry_after=retry_after))
+
         # Parse pagination
-        MAX_OFFSET = 1_000_000
+        MAX_OFFSET = MAX_LIST_OFFSET
         try:
             limit = int(request.query.get("limit", "50"))
             offset = int(request.query.get("offset", "0"))
@@ -532,7 +565,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
             result = Result.Err("INVALID_INPUT", "Invalid limit or offset")
             return _json_response(result)
 
-        limit = max(0, min(5000, limit))
+        limit = max(0, min(MAX_LIST_LIMIT, limit))
         offset = max(0, offset)
         if offset > MAX_OFFSET:
             return _json_response(Result.Err("INVALID_INPUT", f"Offset must be less than {MAX_OFFSET}"))
@@ -594,7 +627,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
             if n <= 0:
                 continue
             ids.append(n)
-            if len(ids) >= 200:
+            if len(ids) >= SEARCH_MAX_BATCH_IDS:
                 break
 
         result = await svc["index"].get_assets_batch(ids)
@@ -711,20 +744,26 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
                         meta_svc = svc.get("metadata")
                         db = svc.get("db")
                         if meta_svc and db:
-                            meta_res = await asyncio.to_thread(meta_svc.extract_rating_tags_only, fp)
+                            try:
+                                meta_res = await asyncio.wait_for(asyncio.to_thread(meta_svc.extract_rating_tags_only, fp), timeout=TO_THREAD_TIMEOUT_S)
+                            except asyncio.TimeoutError:
+                                meta_res = Result.Err("TIMEOUT", "Rating/tags extraction timed out")
                             if meta_res and meta_res.ok and meta_res.data:
                                 try:
-                                    await asyncio.to_thread(
-                                        MetadataHelpers.write_asset_metadata_row,
-                                        db,
-                                        asset_id,
-                                        Result.Ok(
-                                            {
-                                                "rating": meta_res.data.get("rating"),
-                                                "tags": meta_res.data.get("tags") or [],
-                                                "quality": "partial",
-                                            }
+                                    await asyncio.wait_for(
+                                        asyncio.to_thread(
+                                            MetadataHelpers.write_asset_metadata_row,
+                                            db,
+                                            asset_id,
+                                            Result.Ok(
+                                                {
+                                                    "rating": meta_res.data.get("rating"),
+                                                    "tags": meta_res.data.get("tags") or [],
+                                                    "quality": "partial",
+                                                }
+                                            ),
                                         ),
+                                        timeout=TO_THREAD_TIMEOUT_S,
                                     )
                                 except Exception:
                                     pass

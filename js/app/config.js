@@ -7,17 +7,30 @@ import { ENDPOINTS } from "../api/endpoints.js";
 
 // Cache for output directory
 let outputDirectory = null;
+let outputDirectoryAt = 0;
+const OUTPUT_DIR_CACHE_TTL_MS = 30_000;
+
+export function invalidateOutputDirectoryCache() {
+    outputDirectory = null;
+    outputDirectoryAt = 0;
+}
 
 /**
  * Get ComfyUI output directory
  * Cached after first fetch
  */
 export async function getOutputDirectory() {
-    if (outputDirectory) return outputDirectory;
+    try {
+        const now = Date.now();
+        if (outputDirectory && now - (outputDirectoryAt || 0) < OUTPUT_DIR_CACHE_TTL_MS) return outputDirectory;
+    } catch {}
 
     const result = await get(ENDPOINTS.CONFIG);
     if (result.ok) {
         outputDirectory = result.data.output_directory;
+        try {
+            outputDirectoryAt = Date.now();
+        } catch {}
         console.log("📂 Majoor [ℹ️]: Output directory:", outputDirectory);
         return outputDirectory;
     }

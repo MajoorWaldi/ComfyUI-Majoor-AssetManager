@@ -16,6 +16,10 @@ from aiohttp import web
 
 from backend.shared import Result, ErrorCode
 
+DEFAULT_MAX_JSON_BYTES = 10 * 1024 * 1024  # 10MB
+MIN_JSON_BYTES = 1024
+REQUEST_STREAM_CHUNK_BYTES = 64 * 1024
+
 
 def _max_json_bytes() -> int:
     try:
@@ -26,7 +30,7 @@ def _max_json_bytes() -> int:
                 return n
     except Exception:
         pass
-    return 10 * 1024 * 1024  # 10MB default
+    return DEFAULT_MAX_JSON_BYTES
 
 
 async def _read_json(request: web.Request, *, max_bytes: Optional[int] = None) -> Result[dict]:
@@ -37,7 +41,7 @@ async def _read_json(request: web.Request, *, max_bytes: Optional[int] = None) -
         Result.Ok(dict) or Result.Err(code, error, ...)
     """
     limit = int(max_bytes) if max_bytes is not None else _max_json_bytes()
-    limit = max(1024, limit)
+    limit = max(MIN_JSON_BYTES, limit)
 
     # Fast path: reject obviously too large bodies by Content-Length.
     try:
@@ -52,7 +56,7 @@ async def _read_json(request: web.Request, *, max_bytes: Optional[int] = None) -
     # Stream the body to enforce the limit even when Content-Length is missing/incorrect.
     buf = bytearray()
     try:
-        async for chunk in request.content.iter_chunked(64 * 1024):
+        async for chunk in request.content.iter_chunked(REQUEST_STREAM_CHUNK_BYTES):
             if not chunk:
                 continue
             buf.extend(chunk)
@@ -74,4 +78,3 @@ async def _read_json(request: web.Request, *, max_bytes: Optional[int] = None) -
     if not isinstance(parsed, dict):
         return Result.Err(ErrorCode.INVALID_JSON, "JSON body must be an object")
     return Result.Ok(parsed)
-

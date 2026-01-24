@@ -1,8 +1,19 @@
 # Majoor Assets Manager for ComfyUI
 
-An asset browser that lives directly inside ComfyUI: browse outputs/inputs/custom roots, search (FTS5), inspect generation metadata, rate/tag, collect, and drag assets into ComfyUI (or out to your OS).
+Majoor Assets Manager is an advanced asset browser for ComfyUI that provides a comprehensive solution for managing, organizing, and viewing your generated assets. It integrates directly into ComfyUI, offering features like full-text search, metadata extraction, rating and tagging systems, and advanced viewing capabilities.
 
 ![Majoor Assets Manager Demo](examples/ComfyUI_Majoor_AssetsManager_Video.gif)
+
+**[User Guide](user_guide.html)** - Complete documentation with features, installation, and usage instructions.
+**[Documentation Index](docs/DOCUMENTATION_INDEX.md)** - All docs (install, viewer, metadata, settings, etc).
+
+## License
+
+Copyright (c) 2026 Ewald ALOEBOETOE (MajoorWaldi).
+
+Licensed under the **GNU General Public License v3.0**. See `LICENSE`.
+
+Optional attribution request (non-binding): see `NOTICE`.
 
 ## Key Features
 
@@ -157,9 +168,19 @@ Backend persistence is currently limited to `probeBackend.mode` (stored in the S
 - `MAJOOR_ENABLE_FILE_WATCHER` - auto reindexing (default `false`)
 - `MAJOOR_WATCHER_INTERVAL` / `MAJOOR_WATCHER_JOIN_TIMEOUT` / `MAJOOR_WATCHER_PATHS`
 - `MAJOOR_DB_TIMEOUT` / `MAJOOR_DB_MAX_CONNECTIONS` / `MAJOOR_DB_QUERY_TIMEOUT`
+- `MAJOOR_TO_THREAD_TIMEOUT` - timeout (seconds) for `asyncio.to_thread(...)` work in HTTP handlers (default `30`)
+- `MAJOOR_MAX_METADATA_JSON_BYTES` - max metadata JSON size stored in DB/cache (default `2097152`)
 - `MJR_AM_NO_AUTO_PIP` - set to `1` to disable best-effort dependency auto-install on startup
 - `MJR_COLLECTION_MAX_ITEMS` - max items per collection JSON (default `50000`)
 - `MJR_ALLOW_SYMLINKS` - allow symlink/junction custom roots (default `off`)
+- `MAJOOR_TRUSTED_PROXIES` - comma-separated IPs/CIDRs allowed to supply `X-Forwarded-For`/`X-Real-IP` (default `127.0.0.1,::1`)
+
+## Security Model (high level)
+
+- **CSRF**: state-changing endpoints require `X-Requested-With: XMLHttpRequest` (or `X-CSRF-Token`) and validate `Origin` vs `Host` when present.
+- **Rate limiting**: in-memory per-client limits exist on expensive endpoints (search/scan/metadata/batch-zip). Client identity is based on IP; `X-Forwarded-For` is only honored when the connection comes from `MAJOOR_TRUSTED_PROXIES`.
+- **Path safety**: file operations validate root containment for output/input/custom roots and reject paths outside allowed roots (symlink/junction handling is opt-in).
+- **Batch ZIP**: ZIP building streams from an open file handle (avoids TOCTOU rename/replace races).
 
 ## Files & Storage
 
@@ -173,6 +194,23 @@ Backend persistence is currently limited to `probeBackend.mode` (stored in the S
 ```bash
 python -m pytest -q
 ```
+
+### Tests (Windows)
+
+Batch runners generate both JUnit XML and a styled HTML report in `tests/__reports__/`:
+
+- Full suite: `run_tests.bat` (or `tests/run_tests_all.bat`)
+- Quick suite (skips the long Comfy output scan): `run_tests_quick.bat`
+- Metadata / parser suite: `run_tests_parser.bat` (runs `tests/metadata/`)
+
+Open the report index:
+- `tests/__reports__/index.html`
+
+Test runtime DB artifacts (`*.db`, `*.db-wal`, `*.db-shm`, etc.) are created under:
+- `tests/__pytest_tmp__/`
+
+Parser samples scan (metadata suite):
+- Put sample files under `tests/parser/` (subfolders supported), or set `MJR_TEST_PARSER_DIR` to an external folder.
 
 ## Release (zip)
 

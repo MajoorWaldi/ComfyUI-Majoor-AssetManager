@@ -14,6 +14,9 @@ from ...shared import Result, get_logger
 
 logger = get_logger(__name__)
 
+DEFAULT_MAX_GRAPH_NODES = 5000
+DEFAULT_MAX_LINK_NODES = 200
+
 _PROMPT_TEXT_RE = None
 
 
@@ -253,7 +256,7 @@ def _find_candidate_sinks(nodes_by_id: Dict[str, Dict[str, Any]]) -> List[str]:
 
 
 def _collect_upstream_nodes(
-    nodes_by_id: Dict[str, Dict[str, Any]], start_node_id: str, max_nodes: int = 5000
+    nodes_by_id: Dict[str, Dict[str, Any]], start_node_id: str, max_nodes: int = DEFAULT_MAX_GRAPH_NODES
 ) -> Dict[str, int]:
     """
     BFS upstream from a node id, returning node->distance.
@@ -628,7 +631,7 @@ def _looks_like_conditioning_text(node: Dict[str, Any]) -> bool:
 
 
 def _collect_text_encoder_nodes_from_conditioning(
-    nodes_by_id: Dict[str, Dict[str, Any]], start_link: Any, max_nodes: int = 200, branch: Optional[str] = None
+    nodes_by_id: Dict[str, Dict[str, Any]], start_link: Any, max_nodes: int = DEFAULT_MAX_LINK_NODES, branch: Optional[str] = None
 ) -> List[str]:
     """
     DFS upstream from a conditioning link, collecting "text-encoder-like" node ids.
@@ -716,7 +719,7 @@ def _collect_text_encoder_nodes_from_conditioning(
 
 
 def _collect_texts_from_conditioning(
-    nodes_by_id: Dict[str, Dict[str, Any]], start_link: Any, max_nodes: int = 200, branch: Optional[str] = None
+    nodes_by_id: Dict[str, Dict[str, Any]], start_link: Any, max_nodes: int = DEFAULT_MAX_LINK_NODES, branch: Optional[str] = None
 ) -> List[Tuple[str, str]]:
     """
     Collect prompt text fragments from a conditioning link, returning (text, source).

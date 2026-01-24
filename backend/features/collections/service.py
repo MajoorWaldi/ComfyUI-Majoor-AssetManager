@@ -21,13 +21,21 @@ from ...shared import Result, ErrorCode, get_logger, classify_file
 
 logger = get_logger(__name__)
 
-_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{6,80}$")
-_DEFAULT_MAX_ITEMS = 50_000
+MIN_COLLECTION_ID_LEN = 6
+MAX_COLLECTION_ID_LEN = 80
+MAX_COLLECTION_NAME_LEN = 80
+
+DEFAULT_MAX_COLLECTION_ITEMS = 50_000
+MIN_COLLECTION_ITEMS = 100
+HARD_MAX_COLLECTION_ITEMS = 500_000
+
+_ID_RE = re.compile(rf"^[a-zA-Z0-9_-]{{{MIN_COLLECTION_ID_LEN},{MAX_COLLECTION_ID_LEN}}}$")
+_DEFAULT_MAX_ITEMS = DEFAULT_MAX_COLLECTION_ITEMS
 try:
     _MAX_COLLECTION_ITEMS = int(os.environ.get("MJR_COLLECTION_MAX_ITEMS", str(_DEFAULT_MAX_ITEMS)))
 except Exception:
     _MAX_COLLECTION_ITEMS = _DEFAULT_MAX_ITEMS
-_MAX_COLLECTION_ITEMS = max(100, min(500_000, int(_MAX_COLLECTION_ITEMS or _DEFAULT_MAX_ITEMS)))
+_MAX_COLLECTION_ITEMS = max(MIN_COLLECTION_ITEMS, min(HARD_MAX_COLLECTION_ITEMS, int(_MAX_COLLECTION_ITEMS or _DEFAULT_MAX_ITEMS)))
 
 
 def _now_iso() -> str:
@@ -67,8 +75,8 @@ def _safe_name(value: str) -> Optional[str]:
     s = str(value or "").strip()
     if not s:
         return None
-    if len(s) > 80:
-        s = s[:80].strip()
+    if len(s) > MAX_COLLECTION_NAME_LEN:
+        s = s[:MAX_COLLECTION_NAME_LEN].strip()
     return s or None
 
 

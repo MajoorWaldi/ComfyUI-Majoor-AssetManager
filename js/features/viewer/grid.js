@@ -420,9 +420,9 @@ export function createViewerGrid({
                 }
             } catch {}
 
-            // Nuke-like format box per image (drawn in all modes when HUD is enabled).
+            // Nuke-like format box per image (single mode only).
             try {
-                if (state?.hudEnabled) {
+                if (state?.hudEnabled && state?.mode === VIEWER_MODES?.SINGLE) {
                     for (const r of baseRects) {
                         try {
                             ctx.save();

@@ -16,6 +16,10 @@ _PROBE_BACKEND_KEY = "media_probe_backend"
 _SETTINGS_VERSION_KEY = "__settings_version"
 _VALID_PROBE_MODES = {"auto", "exiftool", "ffprobe", "both"}
 
+_SETTINGS_CACHE_TTL_S = 10.0
+_VERSION_CACHE_TTL_S = 1.0
+_MS_PER_S = 1000.0
+
 
 class AppSettings:
     """
@@ -28,8 +32,8 @@ class AppSettings:
         self._cache: dict[str, str] = {}
         self._cache_at: dict[str, float] = {}
         self._cache_version: dict[str, int] = {}
-        self._cache_ttl_s = 10.0
-        self._version_cache_ttl_s = 1.0
+        self._cache_ttl_s = _SETTINGS_CACHE_TTL_S
+        self._version_cache_ttl_s = _VERSION_CACHE_TTL_S
         self._version_cached: int = 0
         self._version_cached_at: float = 0.0
         self._default_probe_mode = MEDIA_PROBE_BACKEND
@@ -78,7 +82,7 @@ class AppSettings:
         """
         try:
             # Unix ms timestamp is monotonic enough for our purposes and works across processes.
-            v = int(time.time() * 1000)
+            v = int(time.time() * _MS_PER_S)
         except Exception:
             v = int(time.time())
         res = self._write_setting(_SETTINGS_VERSION_KEY, str(v))

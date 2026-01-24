@@ -11,6 +11,7 @@
 import { post } from "../../../api/client.js";
 import { ENDPOINTS, buildBatchZipDownloadURL } from "../../../api/endpoints.js";
 import { getDownloadMimeForFilename } from "../utils/video.js";
+import { pickRootId } from "../../../utils/ids.js";
 
 const _abs = (url) => {
     try {
@@ -48,7 +49,7 @@ const _assetToZipItem = (asset) => {
         filename,
         subfolder: a.subfolder || "",
         type: String(a.type || "output").toLowerCase(),
-        root_id: a.root_id || a.rootId || a.custom_root_id || undefined
+        root_id: pickRootId(a) || undefined
     };
 };
 

@@ -1,5 +1,6 @@
 import { createImageProcessor, drawMediaError } from "./imageProcessor.js";
 import { createVideoProcessor } from "./videoProcessor.js";
+import { safeAddListener as defaultSafeAddListener, safeCall as defaultSafeCall } from "../../utils/safeCall.js";
 
 export function createViewerMediaFactory({
     overlay,
@@ -18,28 +19,8 @@ export function createViewerMediaFactory({
     safeAddListener,
     safeCall,
 } = {}) {
-    const _safeCall = safeCall || ((fn) => {
-        try {
-            return fn?.();
-        } catch {
-            return undefined;
-        }
-    });
-
-    const _safeAddListener =
-        safeAddListener ||
-        ((target, event, handler, options) => {
-            try {
-                target?.addEventListener?.(event, handler, options);
-                return () => {
-                    try {
-                        target?.removeEventListener?.(event, handler, options);
-                    } catch {}
-                };
-            } catch {
-                return () => {};
-            }
-        });
+    const _safeCall = safeCall || defaultSafeCall;
+    const _safeAddListener = safeAddListener || defaultSafeAddListener;
 
     const _seedNaturalSizeFromAsset = (canvas, asset) => {
         try {

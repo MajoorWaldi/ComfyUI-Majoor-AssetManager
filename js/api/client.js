@@ -3,6 +3,7 @@
  */
 
 import { SETTINGS_KEY } from "../app/settingsStore.js";
+import { normalizeAssetId, pickRootId } from "../utils/ids.js";
 
 /**
  * @template T
@@ -37,6 +38,8 @@ let _tagsCache = { value: null, at: 0 };
 const TAGS_CACHE_TTL_MS = 30_000;
 const DEFAULT_TAGS_CACHE_TTL_MS = TAGS_CACHE_TTL_MS;
 const CLIENT_GLOBAL_KEY = "__MJR_API_CLIENT__";
+const SETTINGS_FAST_CACHE_TTL_MS = 2000;
+const MAX_BATCH_ASSET_IDS = 200;
 
 function _getTagsCacheTTL() {
     try {
@@ -63,8 +66,17 @@ function _isRetryableError(error) {
         if (!error) return false;
         const name = String(error.name || "");
         if (name === "AbortError") return false;
-        if (name === "TypeError") return true;
         const msg = String(error.message || "").toLowerCase();
+        // TypeError is often used for network failures ("Failed to fetch"), but can also be real code bugs.
+        if (name === "TypeError") {
+            return (
+                msg.includes("failed to fetch") ||
+                msg.includes("networkerror") ||
+                msg.includes("load failed") ||
+                msg.includes("fetch") ||
+                msg.includes("network")
+            );
+        }
         return msg.includes("fetch") || msg.includes("network") || msg.includes("failed");
     } catch {
         return false;
@@ -109,7 +121,7 @@ try {
 
 const _readObsEnabled = () => {
     const now = Date.now();
-    if (_obsCache.value !== null && now - (_obsCache.at || 0) < 2000) {
+    if (_obsCache.value !== null && now - (_obsCache.at || 0) < SETTINGS_FAST_CACHE_TTL_MS) {
         return _obsCache.value;
     }
     try {
@@ -129,7 +141,7 @@ const _readObsEnabled = () => {
 
 const _readRatingTagsSyncEnabled = () => {
     const now = Date.now();
-    if (_rtSyncCache.value !== null && now - (_rtSyncCache.at || 0) < 2000) {
+    if (_rtSyncCache.value !== null && now - (_rtSyncCache.at || 0) < SETTINGS_FAST_CACHE_TTL_MS) {
         return _rtSyncCache.value;
     }
     try {
@@ -257,7 +269,7 @@ export async function post(url, body, options = {}) {
 /**
  * Update asset rating (0-5 stars)
  */
-export async function updateAssetRating(assetId, rating) {
+export async function updateAssetRating(assetId, rating, options = {}) {
     const enabled = _readRatingTagsSyncEnabled();
     const asset = assetId && typeof assetId === "object" ? assetId : null;
     const resolvedId = asset ? asset.id : assetId;
@@ -265,15 +277,16 @@ export async function updateAssetRating(assetId, rating) {
         rating: Math.max(0, Math.min(5, Number(rating) || 0))
     };
     if (resolvedId != null) {
-        payload.asset_id = resolvedId;
+        payload.asset_id = normalizeAssetId(resolvedId);
     } else if (asset) {
         payload.filepath = asset.filepath || asset.path || asset?.file_info?.filepath || "";
         payload.type = asset.type || "output";
-        payload.root_id = asset.root_id || asset.rootId || asset.custom_root_id || "";
+        payload.root_id = pickRootId(asset);
     } else {
-        payload.asset_id = resolvedId;
+        payload.asset_id = normalizeAssetId(resolvedId);
     }
     return fetchAPI("/mjr/am/asset/rating", {
+        ...(options || {}),
         method: "POST",
         headers: {
             "Content-Type": "application/json",
@@ -286,7 +299,7 @@ export async function updateAssetRating(assetId, rating) {
 /**
  * Update asset tags
  */
-export async function updateAssetTags(assetId, tags) {
+export async function updateAssetTags(assetId, tags, options = {}) {
     const enabled = _readRatingTagsSyncEnabled();
     const asset = assetId && typeof assetId === "object" ? assetId : null;
     const resolvedId = asset ? asset.id : assetId;
@@ -294,15 +307,16 @@ export async function updateAssetTags(assetId, tags) {
         tags: Array.isArray(tags) ? tags : []
     };
     if (resolvedId != null) {
-        payload.asset_id = resolvedId;
+        payload.asset_id = normalizeAssetId(resolvedId);
     } else if (asset) {
         payload.filepath = asset.filepath || asset.path || asset?.file_info?.filepath || "";
         payload.type = asset.type || "output";
-        payload.root_id = asset.root_id || asset.rootId || asset.custom_root_id || "";
+        payload.root_id = pickRootId(asset);
     } else {
-        payload.asset_id = resolvedId;
+        payload.asset_id = normalizeAssetId(resolvedId);
     }
     const result = await fetchAPI("/mjr/am/asset/tags", {
+        ...(options || {}),
         method: "POST",
         headers: {
             "Content-Type": "application/json",
@@ -346,7 +360,7 @@ export async function getAvailableTags() {
  * Get full asset metadata by ID
  */
 export async function getAssetMetadata(assetId, options = {}) {
-    return get(`/mjr/am/asset/${assetId}`, options);
+    return get(`/mjr/am/asset/${encodeURIComponent(normalizeAssetId(assetId))}`, options);
 }
 
 /**
@@ -354,7 +368,7 @@ export async function getAssetMetadata(assetId, options = {}) {
  */
 /** @returns {Promise<ApiResult<ViewerInfo>>} */
 export async function getViewerInfo(assetId, options = {}) {
-    const id = String(assetId ?? "").trim();
+    const id = normalizeAssetId(assetId);
     if (!id) return { ok: false, data: null, error: "Missing assetId", code: "INVALID_INPUT" };
     return get(`/mjr/am/viewer/info?asset_id=${encodeURIComponent(id)}`, options);
 }
@@ -369,14 +383,14 @@ export async function getAssetsBatch(assetIds, options = {}) {
         const n = Number(id);
         if (!Number.isFinite(n)) continue;
         cleaned.push(Math.trunc(n));
-        if (cleaned.length >= 200) break;
+        if (cleaned.length >= MAX_BATCH_ASSET_IDS) break;
     }
     if (!cleaned.length) return { ok: true, data: [], error: null, code: "OK" };
     return post("/mjr/am/assets/batch", { asset_ids: cleaned }, options);
 }
 
 export async function hydrateAssetRatingTags(assetId) {
-    const id = String(assetId ?? "").trim();
+    const id = normalizeAssetId(assetId);
     if (!id) return { ok: false, error: "Missing assetId" };
     return get(`/mjr/am/asset/${encodeURIComponent(id)}?hydrate=rating_tags`);
 }
@@ -418,7 +432,7 @@ export async function setProbeBackendMode(mode) {
 }
 
 export async function openInFolder(assetId) {
-    return post("/mjr/am/open-in-folder", { asset_id: assetId });
+    return post("/mjr/am/open-in-folder", { asset_id: normalizeAssetId(assetId) });
 }
 
 /**
@@ -431,7 +445,7 @@ export async function optimizeDb() {
 }
 
 export async function deleteAsset(assetId) {
-    return post("/mjr/am/asset/delete", { asset_id: assetId });
+    return post("/mjr/am/asset/delete", { asset_id: normalizeAssetId(assetId) });
 }
 
 export async function deleteAssets(assetIds) {
@@ -439,7 +453,7 @@ export async function deleteAssets(assetIds) {
 }
 
 export async function renameAsset(assetId, newName) {
-    return post("/mjr/am/asset/rename", { asset_id: assetId, new_name: newName });
+    return post("/mjr/am/asset/rename", { asset_id: normalizeAssetId(assetId), new_name: newName });
 }
 
 // -----------------------------

@@ -10,6 +10,7 @@ from backend.custom_roots import (
     resolve_custom_root,
 )
 from backend.shared import Result, get_logger
+from backend.adapters.fs.list_cache_watcher import ensure_fs_list_cache_watching
 from ..core import _json_response, _csrf_error, _safe_rel_path, _is_within_root, _read_json, _guess_content_type_for_file, _is_allowed_view_media_file
 from .filesystem import _kickoff_background_scan
 
@@ -42,6 +43,10 @@ def register_custom_roots_routes(routes: web.RouteTableDef) -> None:
                 root_id = str(result.data.get("id") or "")
                 if root_path and root_id:
                     _kickoff_background_scan(root_path, source="custom", root_id=root_id, recursive=True, incremental=True)
+                    try:
+                        ensure_fs_list_cache_watching(root_path)
+                    except Exception:
+                        pass
             except Exception as exc:
                 # Best-effort: never fail the request because background scan scheduling failed.
                 logger.debug("Background scan kickoff skipped: %s", exc)

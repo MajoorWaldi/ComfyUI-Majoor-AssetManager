@@ -1,6 +1,7 @@
 import { createWorkflowDot } from "../../../components/Badges.js";
 import { post, getAssetMetadata } from "../../../api/client.js";
 import { ENDPOINTS } from "../../../api/endpoints.js";
+import { pickRootId } from "../../../utils/ids.js";
 
 const RESCAN_FLAG = "_mjrRescanning";
 const RESCAN_TTL_MS = 1500;
@@ -28,7 +29,7 @@ async function rescanSingleAsset({ card, asset, sidebar, onAssetUpdated }) {
         filename: asset.filename,
         subfolder: asset.subfolder || "",
         type: String(asset.type || "output").toLowerCase(),
-        root_id: asset.root_id || asset.rootId || asset.custom_root_id || undefined,
+        root_id: pickRootId(asset) || undefined,
     };
 
     let updated = null;

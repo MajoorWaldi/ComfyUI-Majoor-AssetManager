@@ -19,6 +19,21 @@ const UI_FLAGS = {
     useComfyThemeUI: true,
 };
 
+const ENTRY_RUNTIME_KEY = "__MJR_AM_ENTRY_RUNTIME__";
+const UI_BOOT_DELAY_MS = 1500;
+const RAF_STABILIZE_FRAMES = 2;
+const AUTO_REFRESH_DEBOUNCE_MS = 500;
+const AUTO_INSERT_FETCH_LIMIT = 50;
+
+const _raf = () =>
+    new Promise((resolve) => {
+        try {
+            requestAnimationFrame(() => resolve(true));
+        } catch {
+            resolve(false);
+        }
+    });
+
 function isObservabilityEnabled() {
     try {
         const raw = localStorage?.getItem?.("mjrSettings");
@@ -34,6 +49,85 @@ app.registerExtension({
     name: "Majoor.AssetsManager",
 
     async setup() {
+        // Best-effort hot-reload safety: abort previous listeners/timers for this extension instance.
+        const runtime = (() => {
+            try {
+                const w = typeof window !== "undefined" ? window : null;
+                const prev = w?.[ENTRY_RUNTIME_KEY] || null;
+                try {
+                    prev?.abort?.();
+                } catch {}
+
+                const ac = typeof AbortController !== "undefined" ? new AbortController() : null;
+                const timers = new Set();
+                const trackTimeout = (fn, ms) => {
+                    try {
+                        const id = setTimeout(fn, ms);
+                        timers.add(id);
+                        return id;
+                    } catch {
+                        return null;
+                    }
+                };
+                const clearTimers = () => {
+                    try {
+                        for (const t of Array.from(timers)) {
+                            try {
+                                clearTimeout(t);
+                            } catch {}
+                        }
+                    } catch {}
+                    try {
+                        timers.clear();
+                    } catch {}
+                };
+                try {
+                    ac?.signal?.addEventListener?.("abort", clearTimers, { once: true });
+                } catch {}
+
+                const delay = (ms) =>
+                    new Promise((resolve) => {
+                        try {
+                            if (ac?.signal?.aborted) return resolve(false);
+                        } catch {}
+                        const id = trackTimeout(() => resolve(true), ms);
+                        try {
+                            ac?.signal?.addEventListener?.(
+                                "abort",
+                                () => {
+                                    try {
+                                        if (id != null) clearTimeout(id);
+                                    } catch {}
+                                    resolve(false);
+                                },
+                                { once: true }
+                            );
+                        } catch {}
+                    });
+
+                const rt = {
+                    ac,
+                    trackTimeout,
+                    delay,
+                    abort: () => {
+                        try {
+                            clearTimers();
+                        } catch {}
+                        try {
+                            ac?.abort?.();
+                        } catch {}
+                    },
+                };
+
+                try {
+                    if (w) w[ENTRY_RUNTIME_KEY] = rt;
+                } catch {}
+                return rt;
+            } catch {
+                return { ac: null, trackTimeout: setTimeout, delay: (ms) => new Promise((r) => setTimeout(() => r(true), ms)), abort: () => {} };
+            }
+        })();
+
         testAPI();
         ensureStyleLoaded({ enabled: UI_FLAGS.useComfyThemeUI });
         initDragDrop();
@@ -61,6 +155,9 @@ app.registerExtension({
             } catch {}
 
             api._mjrExecutedHandler = async (event) => {
+                try {
+                    if (runtime?.ac?.signal?.aborted) return;
+                } catch {}
                 // ComfyUI variants differ: sometimes the payload is on `detail.output`, sometimes `detail` is the output.
                 const output = event?.detail?.output || event?.detail || null;
                 const grid = getActiveGridContainer();
@@ -71,8 +168,9 @@ app.registerExtension({
 
                 console.log("📂 Majoor [ℹ️] New media generated, refreshing grid...");
 
-                setTimeout(async () => {
-                    await new Promise((resolve) => setTimeout(resolve, 1500));
+                const outerTimer = runtime?.trackTimeout?.(async () => {
+                    const ok = await runtime?.delay?.(UI_BOOT_DELAY_MS);
+                    if (ok === false) return;
 
                     const files = extractOutputFiles(output);
                     if (!files.length) return;
@@ -105,7 +203,7 @@ app.registerExtension({
                         // Fetch the newest page and upsert into the grid (more reliable than filename search).
                         const url = buildListURL({
                             q: "*",
-                            limit: 50,
+                            limit: AUTO_INSERT_FETCH_LIMIT,
                             offset: 0,
                             scope,
                             subfolder,
@@ -132,27 +230,64 @@ app.registerExtension({
                             // If user is at bottom, scroll to bottom after upserting all assets
 
                             // Wait for layout to stabilize before scrolling
-                            await new Promise(r => requestAnimationFrame(() => r()));
-                            await new Promise(r => requestAnimationFrame(() => r()));
+                            for (let i = 0; i < RAF_STABILIZE_FRAMES; i++) {
+                                await _raf();
+                            }
                             scrollToBottom(latestGrid);
                         } else {
                             // If user is not at bottom, preserve scroll position
                             await restoreAnchor(latestGrid, anchor);
                         }
                     }
-                }, 500);
+                }, AUTO_REFRESH_DEBOUNCE_MS);
+                try {
+                    if (outerTimer != null) {
+                        runtime?.ac?.signal?.addEventListener?.(
+                            "abort",
+                            () => {
+                                try {
+                                    clearTimeout(outerTimer);
+                                } catch {}
+                            },
+                            { once: true }
+                        );
+                    }
+                } catch {}
             };
 
             // Bind to multiple event names across ComfyUI variants.
             const rtHandlers = {};
             const bind = (evt) => {
                 try {
-                    api.addEventListener(evt, api._mjrExecutedHandler);
+                    api.addEventListener(evt, api._mjrExecutedHandler, runtime?.ac ? { signal: runtime.ac.signal } : undefined);
                     rtHandlers[evt] = api._mjrExecutedHandler;
                 } catch {}
             };
             for (const evt of ["executed", "execution_success", "execution_complete"]) bind(evt);
             api._mjrRtHandlers = rtHandlers;
+            try {
+                runtime?.ac?.signal?.addEventListener?.(
+                    "abort",
+                    () => {
+                        try {
+                            if (api._mjrRtHandlers && typeof api._mjrRtHandlers === "object") {
+                                for (const [evt, handler] of Object.entries(api._mjrRtHandlers)) {
+                                    try {
+                                        api.removeEventListener(String(evt), handler);
+                                    } catch {}
+                                }
+                            }
+                        } catch {}
+                        try {
+                            api._mjrRtHandlers = {};
+                        } catch {}
+                        try {
+                            api._mjrExecutedHandler = null;
+                        } catch {}
+                    },
+                    { once: true }
+                );
+            } catch {}
 
             console.log("📂 Majoor [✅] Real-time listener registered");
         } else {

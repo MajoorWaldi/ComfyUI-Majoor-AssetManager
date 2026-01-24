@@ -4,7 +4,7 @@ Metadata extraction endpoint.
 import asyncio
 from aiohttp import web
 from backend.shared import Result
-from backend.config import OUTPUT_ROOT
+from backend.config import OUTPUT_ROOT, TO_THREAD_TIMEOUT_S
 from backend.custom_roots import resolve_custom_root
 from ..core import (
     _json_response,
@@ -112,9 +112,11 @@ def register_metadata_routes(routes: web.RouteTableDef) -> None:
             mode = (request.query.get("mode") or "").strip().lower()
             workflow_only = (request.query.get("workflow_only") or "").strip().lower() in ("1", "true", "yes")
             if mode in ("workflow", "workflow_only", "workflow-only") or workflow_only:
-                result = await asyncio.to_thread(svc["metadata"].get_workflow_only, str(normalized))
+                result = await asyncio.wait_for(asyncio.to_thread(svc["metadata"].get_workflow_only, str(normalized)), timeout=TO_THREAD_TIMEOUT_S)
             else:
-                result = await asyncio.to_thread(svc["metadata"].get_metadata, str(normalized))
+                result = await asyncio.wait_for(asyncio.to_thread(svc["metadata"].get_metadata, str(normalized)), timeout=TO_THREAD_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            result = Result.Err("TIMEOUT", "Metadata extraction timed out")
         except Exception as exc:
             result = Result.Err("METADATA_FAILED", f"Failed to extract metadata: {exc}")
 

@@ -8,6 +8,29 @@ function srgbToLuma(r, g, b) {
     return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
+const HIST_BINS = 256;
+const DEFAULT_HIST_SAMPLE_STEP = 3;
+const DEFAULT_WF_COLUMNS = 220;
+const DEFAULT_WF_ROWS = 110;
+const DEFAULT_WF_SAMPLE_STEP = 2;
+const PANEL_RADIUS_PX = 10;
+const PANEL_BORDER_W = 1;
+const PANEL_TITLE_FONT = "12px var(--comfy-font, ui-sans-serif, system-ui)";
+const PANEL_TITLE_PAD_X = 10;
+const PANEL_TITLE_PAD_Y = 8;
+const PLOT_PAD = 10;
+const PLOT_PAD_TOP = 28;
+const PLOT_MIN_SIZE_PX = 10;
+const HIST_LINE_W = 1.2;
+const HIST_LUMA_LINE_W = 1.0;
+const SCOPE_MAX_SRC_W = 420;
+const SCOPE_MAX_SRC_H = 240;
+const WAVE_MIN_GRID_W = 32;
+const WAVE_MIN_GRID_H = 24;
+const WAVE_CELL_ALPHA_BASE = 0.06;
+const WAVE_CELL_ALPHA_MAX = 0.9;
+const WAVE_CELL_ALPHA_SCALE = 0.9;
+
 let _scopesTmpCanvas = null;
 let _scopesTmpCtx = null;
 
@@ -38,8 +61,8 @@ function drawPanel(ctx, { x, y, w, h, title }) {
         ctx.save();
         ctx.fillStyle = "rgba(0,0,0,0.55)";
         ctx.strokeStyle = "rgba(255,255,255,0.14)";
-        ctx.lineWidth = 1;
-        const r = 10;
+        ctx.lineWidth = PANEL_BORDER_W;
+        const r = PANEL_RADIUS_PX;
         ctx.beginPath();
         ctx.moveTo(x + r, y);
         ctx.arcTo(x + w, y, x + w, y + h, r);
@@ -51,18 +74,18 @@ function drawPanel(ctx, { x, y, w, h, title }) {
         ctx.stroke();
 
         if (title) {
-            ctx.font = "12px var(--comfy-font, ui-sans-serif, system-ui)";
+            ctx.font = PANEL_TITLE_FONT;
             ctx.textAlign = "left";
             ctx.textBaseline = "top";
             ctx.fillStyle = "rgba(255,255,255,0.86)";
-            ctx.fillText(String(title), x + 10, y + 8);
+            ctx.fillText(String(title), x + PANEL_TITLE_PAD_X, y + PANEL_TITLE_PAD_Y);
         }
         ctx.restore();
     } catch {}
 }
 
-function computeHistogramFromImageData(img, { sampleStep = 3 } = {}) {
-    const bins = 256;
+function computeHistogramFromImageData(img, { sampleStep = DEFAULT_HIST_SAMPLE_STEP } = {}) {
+    const bins = HIST_BINS;
     const hr = new Uint32Array(bins);
     const hg = new Uint32Array(bins);
     const hb = new Uint32Array(bins);
@@ -94,18 +117,18 @@ function computeHistogramFromImageData(img, { sampleStep = 3 } = {}) {
 function drawHistogram(ctx, rect, hist, { channel = "rgb" } = {}) {
     try {
         const { x, y, w, h } = rect;
-        const padTop = 28;
-        const pad = 10;
+        const padTop = PLOT_PAD_TOP;
+        const pad = PLOT_PAD;
         const gx = x + pad;
         const gy = y + padTop;
         const gw = w - pad * 2;
         const gh = h - padTop - pad;
-        if (!(gw > 10 && gh > 10)) return;
+        if (!(gw > PLOT_MIN_SIZE_PX && gh > PLOT_MIN_SIZE_PX)) return;
 
         ctx.save();
         ctx.globalCompositeOperation = "source-over";
         ctx.strokeStyle = "rgba(255,255,255,0.10)";
-        ctx.lineWidth = 1;
+        ctx.lineWidth = PANEL_BORDER_W;
         ctx.beginPath();
         ctx.rect(gx, gy, gw, gh);
         ctx.stroke();
@@ -114,7 +137,7 @@ function drawHistogram(ctx, rect, hist, { channel = "rgb" } = {}) {
         const drawChannel = (arr, color) => {
             ctx.strokeStyle = color;
             ctx.beginPath();
-            for (let i = 0; i < 256; i++) {
+            for (let i = 0; i < HIST_BINS; i++) {
                 const v = (arr?.[i] || 0) / max;
                 const px = gx + (i / 255) * gw;
                 const py = gy + gh - v * gh;
@@ -125,7 +148,7 @@ function drawHistogram(ctx, rect, hist, { channel = "rgb" } = {}) {
         };
 
         const ch = String(channel || "rgb");
-        ctx.lineWidth = 1.2;
+        ctx.lineWidth = HIST_LINE_W;
         if (ch === "r") {
             drawChannel(hist.hr, "rgba(255,90,90,0.95)");
         } else if (ch === "g") {
@@ -141,16 +164,19 @@ function drawHistogram(ctx, rect, hist, { channel = "rgb" } = {}) {
         }
         // Luma overlay (subtle) when not explicitly luma-only.
         if (ch !== "l") {
-            ctx.lineWidth = 1.0;
+            ctx.lineWidth = HIST_LUMA_LINE_W;
             drawChannel(hist.hl, "rgba(255,255,255,0.45)");
         }
         ctx.restore();
     } catch {}
 }
 
-function computeWaveformFromImageData(img, { columns = 220, rows = 110, sampleStep = 2 } = {}) {
-    const gridW = Math.max(32, Math.floor(columns));
-    const gridH = Math.max(24, Math.floor(rows));
+function computeWaveformFromImageData(
+    img,
+    { columns = DEFAULT_WF_COLUMNS, rows = DEFAULT_WF_ROWS, sampleStep = DEFAULT_WF_SAMPLE_STEP } = {}
+) {
+    const gridW = Math.max(WAVE_MIN_GRID_W, Math.floor(columns));
+    const gridH = Math.max(WAVE_MIN_GRID_H, Math.floor(rows));
     const out = new Uint16Array(gridW * gridH);
     try {
         const d = img?.data;
@@ -186,17 +212,17 @@ function computeWaveformFromImageData(img, { columns = 220, rows = 110, sampleSt
 function drawWaveform(ctx, rect, wf) {
     try {
         const { x, y, w, h } = rect;
-        const padTop = 28;
-        const pad = 10;
+        const padTop = PLOT_PAD_TOP;
+        const pad = PLOT_PAD;
         const gx = x + pad;
         const gy = y + padTop;
         const gw = w - pad * 2;
         const gh = h - padTop - pad;
-        if (!(gw > 10 && gh > 10)) return;
+        if (!(gw > PLOT_MIN_SIZE_PX && gh > PLOT_MIN_SIZE_PX)) return;
 
         ctx.save();
         ctx.strokeStyle = "rgba(255,255,255,0.10)";
-        ctx.lineWidth = 1;
+        ctx.lineWidth = PANEL_BORDER_W;
         ctx.beginPath();
         ctx.rect(gx, gy, gw, gh);
         ctx.stroke();
@@ -213,7 +239,7 @@ function drawWaveform(ctx, rect, wf) {
                 if (v <= 0) continue;
                 const px = gx + (xx / (gridW - 1 || 1)) * gw;
                 const py = gy + (yy / (gridH - 1 || 1)) * gh;
-                const a = Math.min(0.9, 0.06 + v * 0.9);
+                const a = Math.min(WAVE_CELL_ALPHA_MAX, WAVE_CELL_ALPHA_BASE + v * WAVE_CELL_ALPHA_SCALE);
                 ctx.fillStyle = `rgba(255,255,255,${a})`;
                 ctx.fillRect(px, py, Math.max(1, gw / gridW), Math.max(1, gh / gridH));
             }
@@ -243,9 +269,7 @@ export function drawScopesLight(ctx, viewport, sourceCanvas, opts = {}) {
         if (!(srcW > 1 && srcH > 1)) return;
 
         // Downscale to keep work bounded and stable.
-        const maxW = 420;
-        const maxH = 240;
-        const s = Math.max(srcW / maxW, srcH / maxH, 1);
+        const s = Math.max(srcW / SCOPE_MAX_SRC_W, srcH / SCOPE_MAX_SRC_H, 1);
         const dw = Math.max(1, Math.floor(srcW / s));
         const dh = Math.max(1, Math.floor(srcH / s));
 

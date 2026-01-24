@@ -37,6 +37,10 @@ from ...shared import ErrorCode, Result, get_logger
 
 logger = get_logger(__name__)
 
+SQLITE_BUSY_TIMEOUT_MS = 5000
+# Negative cache_size is in KiB. -64000 ~= 64 MiB cache.
+SQLITE_CACHE_SIZE_KIB = -64000
+
 _TX_TOKEN: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("mjr_db_tx_token", default=None)
 _COLUMN_NAME_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?$")
 _KNOWN_COLUMNS = {
@@ -119,7 +123,7 @@ def _validate_in_base_query(base_query: str) -> Tuple[bool, str]:
 
     # Only allow SELECT (optionally with WITH) templates.
     q_lower = q.lower().lstrip()
-    if not (q_lower.startswith("select ") or q_lower.startswith("with ")):
+    if not re.match(r"^(select|with)\b", q_lower):
         return False, "base_query must be a SELECT query"
 
     # Reject obvious multi-statement or dangerous SQL constructs.
@@ -263,6 +267,7 @@ class Sqlite:
         self._loop_thread = _AsyncLoopThread()
         self._write_lock: Optional[asyncio.Lock] = None
         self._tx_write_lock_tokens: set[str] = set()
+        self._tx_state_lock = threading.Lock()
         # Thread-local storage for sync transactions (caller thread).
         self._tx_local = threading.local()
 
@@ -292,9 +297,9 @@ class Sqlite:
     async def _apply_connection_pragmas(self, conn: aiosqlite.Connection):
         await conn.execute("PRAGMA journal_mode=WAL")
         await conn.execute("PRAGMA synchronous=NORMAL")
-        await conn.execute("PRAGMA cache_size=-64000")
+        await conn.execute(f"PRAGMA cache_size={SQLITE_CACHE_SIZE_KIB}")
         await conn.execute("PRAGMA temp_store=MEMORY")
-        await conn.execute("PRAGMA busy_timeout = 5000")
+        await conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
         await conn.execute("PRAGMA foreign_keys=ON")
 
     async def _create_connection(self) -> aiosqlite.Connection:
@@ -424,7 +429,15 @@ class Sqlite:
             if is_write and lock is not None:
                 # BEGIN acquires the write lock already; avoid deadlocking by reacquiring it
                 # for statements executed within the same transaction.
-                if tx_token and tx_token in self._tx_write_lock_tokens:
+                if tx_token:
+                    try:
+                        with self._tx_state_lock:
+                            in_tx = tx_token in self._tx_write_lock_tokens
+                    except Exception:
+                        in_tx = False
+                else:
+                    in_tx = False
+                if in_tx:
                     return await self._execute_on_conn_locked_async(conn, query, params, fetch, commit=commit)
                 async with lock:
                     return await self._execute_on_conn_locked_async(conn, query, params, fetch, commit=commit)
@@ -597,7 +610,17 @@ class Sqlite:
             lock = self._write_lock
             is_write = self._is_write_sql(query)
             if is_write and lock is not None:
-                if tx_token and tx_token in self._tx_write_lock_tokens:
+                # Check if we're inside an existing transaction that holds the write lock.
+                # Use _tx_state_lock to avoid race conditions with concurrent rollback/commit.
+                if tx_token:
+                    try:
+                        with self._tx_state_lock:
+                            in_tx = tx_token in self._tx_write_lock_tokens
+                    except Exception:
+                        in_tx = False
+                else:
+                    in_tx = False
+                if in_tx:
                     return await self._executemany_on_conn_locked_async(conn, query, params_list, commit=commit)
                 async with lock:
                     return await self._executemany_on_conn_locked_async(conn, query, params_list, commit=commit)
@@ -779,9 +802,13 @@ class Sqlite:
                         self._sleep_backoff(attempt)
                         continue
                     raise
-            self._tx_conns[token] = conn
-            if lock is not None:
-                self._tx_write_lock_tokens.add(token)
+            try:
+                with self._tx_state_lock:
+                    self._tx_conns[token] = conn
+                    if lock is not None:
+                        self._tx_write_lock_tokens.add(token)
+            except Exception:
+                raise
             return Result.Ok(token)
         except Exception as exc:
             try:
@@ -798,7 +825,13 @@ class Sqlite:
 
     async def _commit_tx_async(self, token: str) -> Result[bool]:
         lock = self._write_lock
-        conn = self._tx_conns.pop(token, None)
+        try:
+            with self._tx_state_lock:
+                conn = self._tx_conns.get(token)
+                had_write_lock = token in self._tx_write_lock_tokens
+        except Exception:
+            conn = None
+            had_write_lock = False
         if not conn:
             return Result.Err(ErrorCode.DB_ERROR, "Transaction connection missing")
         try:
@@ -813,11 +846,22 @@ class Sqlite:
                     raise
             return Result.Ok(True)
         except Exception as exc:
+            # Best-effort rollback to avoid returning a connection with an open transaction to the pool.
+            try:
+                await conn.rollback()
+            except Exception:
+                pass
             return Result.Err(ErrorCode.DB_ERROR, str(exc))
         finally:
+            try:
+                with self._tx_state_lock:
+                    self._tx_conns.pop(token, None)
+                    if had_write_lock:
+                        self._tx_write_lock_tokens.discard(token)
+            except Exception:
+                pass
             await self._release_connection_async(conn)
-            if lock is not None and token in self._tx_write_lock_tokens:
-                self._tx_write_lock_tokens.discard(token)
+            if lock is not None and had_write_lock:
                 try:
                     lock.release()
                 except Exception:
@@ -825,7 +869,13 @@ class Sqlite:
 
     async def _rollback_tx_async(self, token: str) -> Result[bool]:
         lock = self._write_lock
-        conn = self._tx_conns.pop(token, None)
+        try:
+            with self._tx_state_lock:
+                conn = self._tx_conns.get(token)
+                had_write_lock = token in self._tx_write_lock_tokens
+        except Exception:
+            conn = None
+            had_write_lock = False
         if not conn:
             return Result.Err(ErrorCode.DB_ERROR, "Transaction connection missing")
         try:
@@ -835,9 +885,15 @@ class Sqlite:
                 pass
             return Result.Ok(True)
         finally:
+            try:
+                with self._tx_state_lock:
+                    self._tx_conns.pop(token, None)
+                    if had_write_lock:
+                        self._tx_write_lock_tokens.discard(token)
+            except Exception:
+                pass
             await self._release_connection_async(conn)
-            if lock is not None and token in self._tx_write_lock_tokens:
-                self._tx_write_lock_tokens.discard(token)
+            if lock is not None and had_write_lock:
                 try:
                     lock.release()
                 except Exception:

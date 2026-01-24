@@ -164,10 +164,11 @@
     color: var(--content-fg, var(--input-text, #ddd));
 
     /* Provide fallbacks when outside `.mjr-assets-manager` scope */
-    --mjr-surface-1: var(--comfy-menu-bg, #2a2a2a);
-    --mjr-border: var(--border-color, rgba(255, 255, 255, 0.12));
-    --mjr-muted: var(--descrip-text, rgba(255, 255, 255, 0.65));
-    --mjr-accent: var(--comfy-accent, #5fb3ff);
+	    --mjr-surface-1: var(--comfy-menu-bg, #2a2a2a);
+	    --mjr-border: var(--border-color, rgba(255, 255, 255, 0.12));
+	    --mjr-muted: var(--descrip-text, rgba(255, 255, 255, 0.65));
+	    --mjr-accent: var(--comfy-accent, #5fb3ff);
+	    --mjr-popover-z-index: 2147483647;
 
     position: fixed;
     top: 0;
@@ -180,7 +181,7 @@
     background: var(--mjr-surface-1, var(--comfy-menu-bg, #2a2a2a));
     border: 1px solid var(--mjr-border, var(--border-color, rgba(255, 255, 255, 0.12)));
     box-shadow: 0 12px 28px rgba(0,0,0,0.35);
-    z-index: 2147483647;
+	    z-index: var(--mjr-popover-z-index);
 }
 
 .mjr-popover-row {
@@ -214,9 +215,10 @@
 }
 
 .mjr-assets-manager .mjr-am-header-icon {
-    color: color-mix(in srgb, var(--mjr-accent) 70%, var(--content-fg, #ddd));
-    font-size: 14px;
-    line-height: 1;
+    width: 16px;
+    height: 16px;
+    display: block;
+    object-fit: contain;
 }
 
 .mjr-assets-manager .mjr-am-header-title {

@@ -6,6 +6,7 @@ import { app } from "../../../../scripts/app.js";
 import { get, post } from "../../api/client.js";
 import { ENDPOINTS, buildCustomViewURL, buildViewURL } from "../../api/endpoints.js";
 import { comfyAlert } from "../../app/dialogs.js";
+import { pickRootId } from "../../utils/ids.js";
 
 import { DND_GLOBAL_KEY, DND_INSTANCE_VERSION, DND_MIME } from "./utils/constants.js";
 import { dndLog } from "./utils/log.js";
@@ -52,10 +53,11 @@ const cleanupWorkflowCache = () => {
 
 const tryLoadWorkflowToCanvas = async (payload, fallbackAbsPath = null) => {
     const pl = payload && typeof payload === "object" ? payload : null;
+    const rootId = pickRootId(pl);
 
     // Check cache first
     const cacheKey = pl?.filename
-        ? `${pl.type || "output"}:${pl.filename}:${pl.subfolder || ""}:${pl.root_id || pl.rootId || pl.custom_root_id || ""}`
+        ? `${pl.type || "output"}:${pl.filename}:${pl.subfolder || ""}:${rootId}`
         : fallbackAbsPath ? `path:${fallbackAbsPath}` : null;
 
     if (cacheKey) {
@@ -98,7 +100,7 @@ const tryLoadWorkflowToCanvas = async (payload, fallbackAbsPath = null) => {
             const quickUrl = `${ENDPOINTS.WORKFLOW_QUICK}?type=${encodeURIComponent(pl.type || "output")}` +
                 `&filename=${encodeURIComponent(pl.filename)}` +
                 `&subfolder=${encodeURIComponent(pl.subfolder || "")}` +
-                (pl.root_id || pl.rootId || pl.custom_root_id ? `&root_id=${encodeURIComponent(pl.root_id || pl.rootId || pl.custom_root_id || "")}` : "");
+                (rootId ? `&root_id=${encodeURIComponent(rootId)}` : "");
 
             const quickRes = await get(quickUrl);
             if (quickRes?.ok && quickRes.workflow) {
@@ -110,7 +112,7 @@ const tryLoadWorkflowToCanvas = async (payload, fallbackAbsPath = null) => {
                 url = `${ENDPOINTS.METADATA}?workflow_only=1&type=${encodeURIComponent(pl.type || "output")}` +
                     `&filename=${encodeURIComponent(pl.filename)}` +
                     `&subfolder=${encodeURIComponent(pl.subfolder || "")}` +
-                    `&root_id=${encodeURIComponent(pl.root_id || pl.rootId || pl.custom_root_id || "")}`;
+                    `&root_id=${encodeURIComponent(rootId)}`;
             }
         } else if (fallbackAbsPath) {
             // For absolute paths, use metadata endpoint (can't use quick lookup)
@@ -187,7 +189,7 @@ export const bindAssetDragStart = (containerEl) => {
                 filename: asset.filename,
                 subfolder: asset.subfolder || "",
                 type,
-                root_id: asset?.root_id || asset?.rootId || asset?.custom_root_id || undefined,
+                root_id: pickRootId(asset) || undefined,
                 kind: asset.kind
             };
 

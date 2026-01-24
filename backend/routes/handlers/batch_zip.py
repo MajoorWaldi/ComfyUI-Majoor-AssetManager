@@ -35,16 +35,32 @@ _BATCH_DIR = OUTPUT_ROOT_PATH / "_mjr_batch_zips"
 _BATCH_LOCK = threading.Lock()
 _BATCH_CACHE: Dict[str, Dict[str, Any]] = {}
 
-_BATCH_TTL_SECONDS = int(os.environ.get("MAJOOR_BATCH_ZIP_TTL_SECONDS", "300"))  # 5 minutes
-_BATCH_MAX = int(os.environ.get("MAJOOR_BATCH_ZIP_MAX", "50"))
-_MAX_ITEMS = int(os.environ.get("MAJOOR_MAX_BATCH_SIZE", "1000"))
+_DEFAULT_BATCH_TTL_SECONDS = 300  # 5 minutes
+_DEFAULT_BATCH_MAX = 50
+_DEFAULT_MAX_ITEMS = 1000
+_DEFAULT_BUILD_TIMEOUT_S = 120.0
+_DEFAULT_ZIP_COPY_CHUNK_BYTES = 1024 * 1024  # 1MB
+
+_TOKEN_MAX_LEN = 200
+_TOKEN_MIN_LEN = 16
+_ZIP_NAME_MAX_LEN = 255
+_MAX_REQUEST_BYTES = 5 * 1024 * 1024
+
+_RATE_LIMIT_MAX_REQUESTS = 30
+_RATE_LIMIT_WINDOW_SECONDS = 60
+
+_BATCH_TTL_SECONDS = int(os.environ.get("MAJOOR_BATCH_ZIP_TTL_SECONDS", str(_DEFAULT_BATCH_TTL_SECONDS)))
+_BATCH_MAX = int(os.environ.get("MAJOOR_BATCH_ZIP_MAX", str(_DEFAULT_BATCH_MAX)))
+_MAX_ITEMS = int(os.environ.get("MAJOOR_MAX_BATCH_SIZE", str(_DEFAULT_MAX_ITEMS)))
+_BUILD_TIMEOUT_S = float(os.environ.get("MAJOOR_BATCH_ZIP_BUILD_TIMEOUT_S", str(_DEFAULT_BUILD_TIMEOUT_S)))
+_ZIP_COPY_CHUNK_BYTES = int(os.environ.get("MAJOOR_BATCH_ZIP_CHUNK_BYTES", str(_DEFAULT_ZIP_COPY_CHUNK_BYTES)))
 
 
 def _sanitize_token(token: Any) -> str:
     raw = str(token or "").strip()
     if not raw:
         return ""
-    if len(raw) > 200:
+    if len(raw) > _TOKEN_MAX_LEN:
         return ""
     allowed = []
     for ch in raw:
@@ -54,7 +70,7 @@ def _sanitize_token(token: Any) -> str:
     if not out:
         return ""
     # Prevent trivially-guessable tokens (very short / enumerable).
-    if len(out) < 16:
+    if len(out) < _TOKEN_MIN_LEN:
         return ""
     return out
 
@@ -74,8 +90,9 @@ def _cleanup_batch_zips() -> None:
                 try:
                     if path.exists():
                         path.unlink()
-                except Exception:
-                    pass
+                        logger.debug("Cleaned up stale batch zip: %s", path.name)
+                except Exception as exc:
+                    logger.warning("Failed to cleanup batch zip %s: %s", path.name if path else token, exc)
 
         # Cap cache size in case of unexpected usage.
         if len(_BATCH_CACHE) > _BATCH_MAX:
@@ -88,8 +105,9 @@ def _cleanup_batch_zips() -> None:
                     try:
                         if path.exists():
                             path.unlink()
-                    except Exception:
-                        pass
+                            logger.debug("Cleaned up batch zip (cache cap): %s", path.name)
+                    except Exception as exc:
+                        logger.warning("Failed to cleanup batch zip %s: %s", path.name if path else token, exc)
 
 
 def _resolve_item_path(item: Dict[str, Any]) -> Optional[Path]:
@@ -147,18 +165,23 @@ def register_batch_zip_routes(routes: web.RouteTableDef) -> None:
         if csrf:
             return _json_response(Result.Err("CSRF", csrf))
 
-        allowed, retry_after = _check_rate_limit(request, "batch_zip_create", max_requests=30, window_seconds=60)
+        allowed, retry_after = _check_rate_limit(
+            request,
+            "batch_zip_create",
+            max_requests=_RATE_LIMIT_MAX_REQUESTS,
+            window_seconds=_RATE_LIMIT_WINDOW_SECONDS,
+        )
         if not allowed:
             return _json_response(Result.Err("RATE_LIMITED", "Rate limit exceeded. Please wait before retrying.", retry_after=retry_after))
 
         # Simple payload guard (dragstart should be tiny).
         try:
-            if request.content_length and int(request.content_length) > 5 * 1024 * 1024:
+            if request.content_length and int(request.content_length) > _MAX_REQUEST_BYTES:
                 return _json_response(Result.Err("PAYLOAD_TOO_LARGE", "Payload too large"))
         except Exception:
             pass
 
-        payload_res = await _read_json(request, max_bytes=5 * 1024 * 1024)
+        payload_res = await _read_json(request, max_bytes=_MAX_REQUEST_BYTES)
         if not payload_res.ok:
             return _json_response(payload_res)
         payload = payload_res.data or {}
@@ -230,12 +253,12 @@ def register_batch_zip_routes(routes: web.RouteTableDef) -> None:
                     suffix = Path(arc_base).suffix
                     if not stem and suffix:
                         stem = arc_base[: -len(suffix)] or arc_base
-                    candidate = arc_base[:255]
+                    candidate = arc_base[:_ZIP_NAME_MAX_LEN]
                     if candidate in used_names:
                         n = 2
                         while True:
                             attempt = f"{stem} ({n}){suffix}" if suffix else f"{stem} ({n})"
-                            attempt = attempt[:255]
+                            attempt = attempt[:_ZIP_NAME_MAX_LEN]
                             if attempt not in used_names:
                                 candidate = attempt
                                 break
@@ -244,17 +267,66 @@ def register_batch_zip_routes(routes: web.RouteTableDef) -> None:
 
                     arc = candidate
                     try:
-                        zf.write(str(target), arc)
-                        count += 1
+                        ok = _zip_add_file_open_handle(zf, target, arc)
+                        if ok:
+                            count += 1
                     except Exception:
                         continue
             return count
+
+        def _zip_add_file_open_handle(zf: zipfile.ZipFile, path: Path, arcname: str) -> bool:
+            """
+            Avoid TOCTOU by opening the file once and streaming bytes into the zip entry.
+
+            Using `ZipFile.write(path)` re-opens the file by name, which can race with
+            rename/replace between checks and reads.
+            """
+            try:
+                arc = str(arcname or "").replace("\x00", "")[:_ZIP_NAME_MAX_LEN]
+                if not arc:
+                    arc = path.name[:_ZIP_NAME_MAX_LEN]
+            except Exception:
+                arc = path.name[:_ZIP_NAME_MAX_LEN]
+
+            try:
+                with open(path, "rb") as f:
+                    try:
+                        st = os.fstat(f.fileno())
+                    except Exception:
+                        st = path.stat()
+
+                    try:
+                        dt = time.localtime(float(getattr(st, "st_mtime", time.time())))
+                        date_time = tuple(int(x) for x in dt[:6])
+                    except Exception:
+                        date_time = time.localtime(time.time())[:6]
+
+                    zi = zipfile.ZipInfo(filename=arc, date_time=date_time)
+                    zi.compress_type = zipfile.ZIP_DEFLATED
+                    try:
+                        zi.file_size = int(getattr(st, "st_size", 0) or 0)
+                    except Exception:
+                        pass
+
+                    with zf.open(zi, "w") as out:
+                        while True:
+                            chunk = f.read(_ZIP_COPY_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            out.write(chunk)
+                return True
+            except Exception:
+                return False
 
         ok = False
         error = None
         count = 0
         try:
-            count = await asyncio.to_thread(_build_zip)
+            try:
+                count = await asyncio.wait_for(asyncio.to_thread(_build_zip), timeout=_BUILD_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                count = 0
+                error = "Batch zip build timed out"
             ok = count > 0
             if not ok:
                 error = "No valid files to archive"
@@ -317,7 +389,7 @@ def register_batch_zip_routes(routes: web.RouteTableDef) -> None:
             return _json_response(Result.Err("NOT_FOUND", "File missing"), status=404)
 
         name = entry.get("filename") or f"{token}.zip"
-        safe_name = str(name).replace('"', "").replace("\r", "").replace("\n", "")[:255]
+        safe_name = str(name).replace('"', "").replace("\r", "").replace("\n", "")[:_ZIP_NAME_MAX_LEN]
         headers = {"Content-Disposition": f'attachment; filename="{safe_name}"'}
         try:
             return web.FileResponse(path, headers=headers)

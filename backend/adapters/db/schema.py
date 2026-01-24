@@ -67,7 +67,8 @@ CREATE TABLE IF NOT EXISTS scan_journal (
     state_hash TEXT,
     mtime INTEGER,
     size INTEGER,
-    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (filepath) REFERENCES assets(filepath) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS metadata_cache (
@@ -75,7 +76,8 @@ CREATE TABLE IF NOT EXISTS metadata_cache (
     state_hash TEXT,
     metadata_hash TEXT,
     metadata_raw TEXT DEFAULT '{}',
-    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (filepath) REFERENCES assets(filepath) ON DELETE CASCADE
 );
 """
 
@@ -141,11 +143,13 @@ CREATE INDEX IF NOT EXISTS idx_assets_filename ON assets(filename);
 CREATE INDEX IF NOT EXISTS idx_assets_subfolder ON assets(subfolder);
 CREATE INDEX IF NOT EXISTS idx_assets_kind ON assets(kind);
 CREATE INDEX IF NOT EXISTS idx_assets_mtime ON assets(mtime);
+CREATE INDEX IF NOT EXISTS idx_assets_kind_mtime ON assets(kind, mtime);
 CREATE INDEX IF NOT EXISTS idx_assets_source ON assets(source);
 CREATE INDEX IF NOT EXISTS idx_assets_root_id ON assets(root_id);
 CREATE INDEX IF NOT EXISTS idx_assets_source_root_id ON assets(source, root_id);
 CREATE INDEX IF NOT EXISTS idx_metadata_rating ON asset_metadata(rating);
 CREATE INDEX IF NOT EXISTS idx_metadata_workflow_hash ON asset_metadata(workflow_hash);
+CREATE INDEX IF NOT EXISTS idx_metadata_quality_workflow ON asset_metadata(metadata_quality, has_workflow);
 CREATE INDEX IF NOT EXISTS idx_scan_journal_dir ON scan_journal(dir_path);
 CREATE INDEX IF NOT EXISTS idx_metadata_cache_state ON metadata_cache(state_hash);
 
@@ -305,61 +309,67 @@ def _repair_asset_metadata_fts(db) -> None:
 
     logger.warning("Repairing asset_metadata_fts (schema/triggers)")
 
-    if needs_table_rebuild:
-        db.executescript(
-            """
-            DROP TRIGGER IF EXISTS asset_metadata_fts_insert;
-            DROP TRIGGER IF EXISTS asset_metadata_fts_delete;
-            DROP TRIGGER IF EXISTS asset_metadata_fts_update;
-            DROP TABLE IF EXISTS asset_metadata_fts;
-            """
-        )
-        db.executescript(
-            """
-            CREATE VIRTUAL TABLE IF NOT EXISTS asset_metadata_fts USING fts5(
-                tags,
-                tags_text,
-                content=''
-            );
-            """
-        )
-    else:
-        db.executescript(
-            """
-            DROP TRIGGER IF EXISTS asset_metadata_fts_insert;
-            DROP TRIGGER IF EXISTS asset_metadata_fts_delete;
-            DROP TRIGGER IF EXISTS asset_metadata_fts_update;
-            """
-        )
+    # Wrap DDL/repair in a single explicit transaction so concurrent writes can't observe
+    # half-applied trigger/table state.
+    try:
+        with db.transaction(mode="immediate"):
+            if needs_table_rebuild:
+                db.executescript(
+                    """
+                    DROP TRIGGER IF EXISTS asset_metadata_fts_insert;
+                    DROP TRIGGER IF EXISTS asset_metadata_fts_delete;
+                    DROP TRIGGER IF EXISTS asset_metadata_fts_update;
+                    DROP TABLE IF EXISTS asset_metadata_fts;
+                    """
+                )
+                db.executescript(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS asset_metadata_fts USING fts5(
+                        tags,
+                        tags_text,
+                        content=''
+                    );
+                    """
+                )
+            else:
+                db.executescript(
+                    """
+                    DROP TRIGGER IF EXISTS asset_metadata_fts_insert;
+                    DROP TRIGGER IF EXISTS asset_metadata_fts_delete;
+                    DROP TRIGGER IF EXISTS asset_metadata_fts_update;
+                    """
+                )
 
-    db.executescript(
-        """
-        CREATE TRIGGER IF NOT EXISTS asset_metadata_fts_insert AFTER INSERT ON asset_metadata BEGIN
-            INSERT INTO asset_metadata_fts(rowid, tags, tags_text)
-            VALUES (new.asset_id, COALESCE(new.tags, ''), COALESCE(new.tags_text, ''));
-        END;
+            db.executescript(
+                """
+                CREATE TRIGGER IF NOT EXISTS asset_metadata_fts_insert AFTER INSERT ON asset_metadata BEGIN
+                    INSERT INTO asset_metadata_fts(rowid, tags, tags_text)
+                    VALUES (new.asset_id, COALESCE(new.tags, ''), COALESCE(new.tags_text, ''));
+                END;
 
-        CREATE TRIGGER IF NOT EXISTS asset_metadata_fts_delete AFTER DELETE ON asset_metadata BEGIN
-            INSERT INTO asset_metadata_fts(asset_metadata_fts, rowid) VALUES('delete', old.asset_id);
-        END;
+                CREATE TRIGGER IF NOT EXISTS asset_metadata_fts_delete AFTER DELETE ON asset_metadata BEGIN
+                    INSERT INTO asset_metadata_fts(asset_metadata_fts, rowid) VALUES('delete', old.asset_id);
+                END;
 
-        CREATE TRIGGER IF NOT EXISTS asset_metadata_fts_update AFTER UPDATE ON asset_metadata BEGIN
-            INSERT INTO asset_metadata_fts(asset_metadata_fts, rowid) VALUES('delete', old.asset_id);
-            INSERT INTO asset_metadata_fts(rowid, tags, tags_text)
-            VALUES (new.asset_id, COALESCE(new.tags, ''), COALESCE(new.tags_text, ''));
-        END;
-        """
-    )
+                CREATE TRIGGER IF NOT EXISTS asset_metadata_fts_update AFTER UPDATE ON asset_metadata BEGIN
+                    INSERT INTO asset_metadata_fts(asset_metadata_fts, rowid) VALUES('delete', old.asset_id);
+                    INSERT INTO asset_metadata_fts(rowid, tags, tags_text)
+                    VALUES (new.asset_id, COALESCE(new.tags, ''), COALESCE(new.tags_text, ''));
+                END;
+                """
+            )
 
-    # Rebuild to ensure consistency after trigger/table repair.
-    db.executescript(
-        """
-        DELETE FROM asset_metadata_fts;
-        INSERT INTO asset_metadata_fts(rowid, tags, tags_text)
-        SELECT asset_id, COALESCE(tags, ''), COALESCE(tags_text, '')
-        FROM asset_metadata;
-        """
-    )
+            # Rebuild to ensure consistency after trigger/table repair.
+            db.executescript(
+                """
+                DELETE FROM asset_metadata_fts;
+                INSERT INTO asset_metadata_fts(rowid, tags, tags_text)
+                SELECT asset_id, COALESCE(tags, ''), COALESCE(tags_text, '')
+                FROM asset_metadata;
+                """
+            )
+    except Exception:
+        return
 
 
 def _schema_fingerprint() -> str:

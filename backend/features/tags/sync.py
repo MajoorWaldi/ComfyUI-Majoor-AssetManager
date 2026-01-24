@@ -21,6 +21,11 @@ from ...shared import Result, ErrorCode, get_logger
 
 logger = get_logger(__name__)
 
+MAX_TAG_LENGTH = 100
+WIN_SHELL_COL_SCAN_MAX = 256
+WIN_SHELL_DEFAULT_RATING_COL_IDX = 14
+WIN_SHELL_DEFAULT_TAGS_COL_IDX = 21
+
 
 def _windows_rating_percent(stars: int) -> int:
     stars = max(0, min(5, int(stars or 0)))
@@ -34,7 +39,7 @@ def _normalize_tags(tags: List[str]) -> List[str]:
         if not isinstance(t, str):
             continue
         tag = t.strip()
-        if not tag or len(tag) > 100:
+        if not tag or len(tag) > MAX_TAG_LENGTH:
             continue
         if tag in seen:
             continue
@@ -158,10 +163,10 @@ def _resolve_shell_indices(folder) -> tuple[int, int]:
         return _WIN_RATING_IDX, _WIN_TAGS_IDX
 
     # Common Windows Explorer column indices; will be replaced by discovery below.
-    rating_idx = 14
-    tags_idx = 21
+    rating_idx = WIN_SHELL_DEFAULT_RATING_COL_IDX
+    tags_idx = WIN_SHELL_DEFAULT_TAGS_COL_IDX
     try:
-        for i in range(0, 256):
+        for i in range(0, WIN_SHELL_COL_SCAN_MAX):
             name = _normalize_label(folder.GetDetailsOf(None, i))
             if not name:
                 continue

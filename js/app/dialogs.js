@@ -56,15 +56,19 @@ const getComfyDialogCtor = () => {
     return ui?.ComfyDialog || null;
 };
 
+const DIALOG_Z_INDEX = 999_999;
+const DIALOG_WIDTH_PX = 420;
+const DIALOG_RADIUS_PX = 10;
+
 const styleDialog = (dialog) => {
     try {
         // Ensure dialogs are above extension panels/popovers.
-        dialog.element.style.zIndex = 999999;
-        dialog.element.style.width = "420px";
+        dialog.element.style.zIndex = String(DIALOG_Z_INDEX);
+        dialog.element.style.width = `${DIALOG_WIDTH_PX}px`;
         dialog.element.style.padding = "0";
         dialog.element.style.backgroundColor = "var(--comfy-menu-bg, #2a2a2a)";
         dialog.element.style.border = "1px solid var(--border-color, #3a3a3a)";
-        dialog.element.style.borderRadius = "10px";
+        dialog.element.style.borderRadius = `${DIALOG_RADIUS_PX}px`;
         dialog.element.style.boxSizing = "border-box";
         dialog.element.style.overflow = "hidden";
     } catch {}

@@ -1,8 +1,9 @@
+import { pickRootId } from "../../../utils/ids.js";
+
 export const buildPayloadViewURL = (payload, { buildCustomViewURL, buildViewURL }) => {
     const type = String(payload?.type || "output").toLowerCase();
     if (type === "custom") {
-        const rootId = payload?.root_id || payload?.rootId || payload?.custom_root_id || "";
-        return buildCustomViewURL(payload?.filename || "", payload?.subfolder || "", rootId);
+        return buildCustomViewURL(payload?.filename || "", payload?.subfolder || "", pickRootId(payload));
     }
     if (type === "input") {
         return buildViewURL(payload?.filename || "", payload?.subfolder || "", "input");

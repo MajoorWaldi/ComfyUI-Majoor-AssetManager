@@ -2,6 +2,11 @@
  * API Endpoints - Centralized URL constants
  */
 
+import { pickRootId } from "../utils/ids.js";
+
+const DEFAULT_QUERY_LIMIT = 100;
+const DEFAULT_QUERY_OFFSET = 0;
+
 export const ENDPOINTS = {
     // Health & Config
     HEALTH: "/mjr/am/health",
@@ -71,8 +76,8 @@ export function buildViewURL(filename, subfolder = null, type = "output") {
 export function buildListURL(params = {}) {
     const {
         q = "*",
-        limit = 100,
-        offset = 0,
+        limit = DEFAULT_QUERY_LIMIT,
+        offset = DEFAULT_QUERY_OFFSET,
         scope = "output",
         subfolder = "",
         customRootId = null,
@@ -153,8 +158,7 @@ export function buildDateHistogramURL(params = {}) {
 export function buildAssetViewURL(asset) {
     const type = (asset?.type || "output").toLowerCase();
     if (type === "custom") {
-        const rootId = asset?.root_id || asset?.rootId || asset?.custom_root_id || "";
-        return buildCustomViewURL(asset?.filename || "", asset?.subfolder || "", rootId);
+        return buildCustomViewURL(asset?.filename || "", asset?.subfolder || "", pickRootId(asset));
     }
     if (type === "input") {
         return buildViewURL(asset?.filename || "", asset?.subfolder || "", "input");
@@ -166,6 +170,6 @@ export function buildAssetViewURL(asset) {
  * Build search URL with query params
  */
 export function buildSearchURL(params = {}) {
-    const { q = "*", limit = 100, offset = 0 } = params;
+    const { q = "*", limit = DEFAULT_QUERY_LIMIT, offset = DEFAULT_QUERY_OFFSET } = params;
     return `${ENDPOINTS.SEARCH}?q=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`;
 }

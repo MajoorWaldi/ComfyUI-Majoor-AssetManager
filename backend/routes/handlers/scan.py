@@ -20,7 +20,7 @@ except Exception:
 
     folder_paths = _FolderPathsStub()  # type: ignore
 
-from backend.config import OUTPUT_ROOT
+from backend.config import OUTPUT_ROOT, TO_THREAD_TIMEOUT_S
 from backend.custom_roots import resolve_custom_root
 from backend.shared import Result, get_logger
 from ..core import (
@@ -39,8 +39,16 @@ from ..core import (
 
 logger = get_logger(__name__)
 
-_MAX_UPLOAD_SIZE = int(os.environ.get("MJR_MAX_UPLOAD_SIZE", str(500 * 1024 * 1024)))
-_MAX_CONCURRENT_INDEX = int(os.environ.get("MJR_MAX_CONCURRENT_INDEX", "10"))
+_DEFAULT_MAX_UPLOAD_SIZE_BYTES = 500 * 1024 * 1024
+_DEFAULT_MAX_RENAME_ATTEMPTS = 1000
+_DEFAULT_MAX_CONCURRENT_INDEX = 10
+_UPLOAD_READ_CHUNK_BYTES = 256 * 1024
+_FILE_COMPARE_CHUNK_BYTES = 4 * 1024 * 1024
+_MAX_FILENAME_LEN = 255
+
+_MAX_UPLOAD_SIZE = int(os.environ.get("MJR_MAX_UPLOAD_SIZE", str(_DEFAULT_MAX_UPLOAD_SIZE_BYTES)))
+_MAX_RENAME_ATTEMPTS = int(os.environ.get("MJR_MAX_RENAME_ATTEMPTS", str(_DEFAULT_MAX_RENAME_ATTEMPTS)))
+_MAX_CONCURRENT_INDEX = int(os.environ.get("MJR_MAX_CONCURRENT_INDEX", str(_DEFAULT_MAX_CONCURRENT_INDEX)))
 _INDEX_SEMAPHORE = asyncio.Semaphore(max(1, _MAX_CONCURRENT_INDEX))
 
 
@@ -119,7 +127,7 @@ async def _write_multipart_file_atomic(dest_dir: Path, filename: str, field) -> 
         with os.fdopen(fd, "wb") as f:
             fd = None
             while True:
-                chunk = await field.read_chunk(size=262144)
+                chunk = await field.read_chunk(size=_UPLOAD_READ_CHUNK_BYTES)
                 if not chunk:
                     break
                 total += len(chunk)
@@ -132,6 +140,8 @@ async def _write_multipart_file_atomic(dest_dir: Path, filename: str, field) -> 
         counter = 0
         while final.exists():
             counter += 1
+            if counter > _MAX_RENAME_ATTEMPTS:
+                raise RuntimeError("Too many rename attempts")
             final = dest_dir / f"{Path(safe_name).stem}_{counter}{ext}"
         tmp_obj.replace(final)
         return Result.Ok(final)
@@ -162,7 +172,7 @@ def _schedule_index_task(fn) -> None:
     except Exception:
         return
 
-def _files_equal_content(src: Path, dst: Path, *, chunk_size: int = 4 * 1024 * 1024) -> bool:
+def _files_equal_content(src: Path, dst: Path, *, chunk_size: int = _FILE_COMPARE_CHUNK_BYTES) -> bool:
     """
     Return True if two files have identical bytes.
 
@@ -310,26 +320,35 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                 incremental = body.get("incremental", True)
                 fast = bool(body.get("fast") or body.get("mode") == "fast" or body.get("manifest_only") is True)
                 background_metadata = bool(body.get("background_metadata") or body.get("enrich_metadata") or body.get("enqueue_metadata"))
-                out_res = await asyncio.to_thread(
-                    svc["index"].scan_directory,
-                    str(Path(OUTPUT_ROOT).resolve()),
-                    recursive,
-                    incremental,
-                    "output",
-                    None,
-                    fast,
-                    background_metadata,
-                )
-                in_res = await asyncio.to_thread(
-                    svc["index"].scan_directory,
-                    str(Path(folder_paths.get_input_directory()).resolve()),
-                    recursive,
-                    incremental,
-                    "input",
-                    None,
-                    fast,
-                    background_metadata,
-                )
+                try:
+                    out_res = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            svc["index"].scan_directory,
+                            str(Path(OUTPUT_ROOT).resolve()),
+                            recursive,
+                            incremental,
+                            "output",
+                            None,
+                            fast,
+                            background_metadata,
+                        ),
+                        timeout=TO_THREAD_TIMEOUT_S,
+                    )
+                    in_res = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            svc["index"].scan_directory,
+                            str(Path(folder_paths.get_input_directory()).resolve()),
+                            recursive,
+                            incremental,
+                            "input",
+                            None,
+                            fast,
+                            background_metadata,
+                        ),
+                        timeout=TO_THREAD_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    return _json_response(Result.Err("TIMEOUT", "Scan timed out"))
                 if not out_res.ok:
                     return _json_response(out_res)
                 if not in_res.ok:
@@ -406,16 +425,22 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
         background_metadata = bool(body.get("background_metadata") or body.get("enrich_metadata") or body.get("enqueue_metadata"))
 
         try:
-            result = await asyncio.to_thread(
-                svc["index"].scan_directory,
-                str(normalized_dir),
-                recursive,
-                incremental,
-                scan_source,
-                scan_root_id,
-                fast,
-                background_metadata,
-            )
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        svc["index"].scan_directory,
+                        str(normalized_dir),
+                        recursive,
+                        incremental,
+                        scan_source,
+                        scan_root_id,
+                        fast,
+                        background_metadata,
+                    ),
+                    timeout=TO_THREAD_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                return _json_response(Result.Err("TIMEOUT", "Scan timed out"))
             try:
                 if result.ok and isinstance(result.data, dict):
                     request["mjr_stats"] = {
@@ -469,6 +494,8 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
 
         incremental = body.get("incremental", True)
         grouped_paths: Dict[Tuple[str, str, str], list] = {}
+
+        pending_ops: list[dict[str, Any]] = []
 
         for item in files:
             if not isinstance(item, dict):
@@ -531,14 +558,20 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
         for (base_dir, file_type, root_id), paths in grouped_paths.items():
             source = file_type if file_type in ("output", "input", "custom") else "output"
             try:
-                result = await asyncio.to_thread(
-                    svc["index"].index_paths,
-                    paths,
-                    base_dir,
-                    incremental,
-                    source,
-                    (root_id or None),
-                )
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            svc["index"].index_paths,
+                            paths,
+                            base_dir,
+                            incremental,
+                            source,
+                            (root_id or None),
+                        ),
+                        timeout=TO_THREAD_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    result = Result.Err("TIMEOUT", "Indexing timed out")
             except Exception as exc:
                 result = Result.Err("INDEX_FAILED", f"Indexing failed: {exc}")
             if not result.ok:
@@ -717,49 +750,72 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                 })
                 continue
 
+            # Batch file ops into a single threadpool task to reduce overhead and avoid threadpool pressure.
             try:
-                # Performance: for large media, copying can be slow. Run in thread to avoid blocking event loop.
-                # Prefer a hardlink when possible (same filesystem/volume). Fall back to copy2 if linking is not supported.
-                def link_or_copy():
-                    did_link = False
-                    try:
-                        src = Path(str(normalized))
-                        dst = Path(str(dest_path))
-                        # Only attempt hardlink when both paths are on the same drive (Windows)
-                        # or when the OS supports hardlinks generally.
-                        same_drive = True
-                        try:
-                            if getattr(src, "drive", "") and getattr(dst, "drive", ""):
-                                same_drive = src.drive.lower() == dst.drive.lower()
-                        except Exception:
-                            same_drive = True
-
-                        if same_drive:
-                            import os
-                            os.link(str(src), str(dst))
-                            did_link = True
-                    except Exception:
-                        did_link = False
-
-                    if not did_link:
-                        shutil.copy2(str(normalized), str(dest_path))
-                    return did_link
-
-                # Run the potentially slow file operation in a thread
-                did_link = await asyncio.to_thread(link_or_copy)
-            except Exception as exc:
-                errors.append({"file": raw_filename, "error": str(exc)})
+                pending_ops.append({
+                    "raw_filename": raw_filename,
+                    "src": str(normalized),
+                    "dst": str(dest_path),
+                    "name": dest_path.name,
+                    "subfolder": "" if dest_dir == input_root else str(dest_dir.relative_to(input_root)),
+                })
+            except Exception:
+                errors.append({"file": raw_filename, "error": "Failed to stage file (internal error)"})
                 continue
-            try:
-                staged_paths.append(dest_path)
-            except Exception as exc:
-                logger.debug("Failed to track staged path: %s", exc)
 
-            staged.append({
-                "name": dest_path.name,
-                "subfolder": "" if dest_dir == input_root else str(dest_dir.relative_to(input_root)),
-                "path": str(dest_path)
-            })
+        if pending_ops:
+            def _link_or_copy_many(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                results: list[dict[str, Any]] = []
+                for op in ops:
+                    try:
+                        src = Path(str(op.get("src") or ""))
+                        dst = Path(str(op.get("dst") or ""))
+                        did_link = False
+                        try:
+                            same_drive = True
+                            try:
+                                if getattr(src, "drive", "") and getattr(dst, "drive", ""):
+                                    same_drive = src.drive.lower() == dst.drive.lower()
+                            except Exception:
+                                same_drive = True
+
+                            if same_drive:
+                                os.link(str(src), str(dst))
+                                did_link = True
+                        except Exception:
+                            did_link = False
+
+                        if not did_link:
+                            shutil.copy2(str(src), str(dst))
+
+                        results.append({"ok": True})
+                    except Exception as exc:
+                        results.append({"ok": False, "error": str(exc)})
+                return results
+
+            try:
+                results = await asyncio.wait_for(asyncio.to_thread(_link_or_copy_many, pending_ops), timeout=TO_THREAD_TIMEOUT_S)
+            except asyncio.TimeoutError as exc:
+                result = Result.Err("TIMEOUT", safe_error_message(exc, "Staging timed out"), errors=errors)
+                return _json_response(result)
+            except Exception as exc:
+                result = Result.Err("STAGE_FAILED", safe_error_message(exc, "Failed to stage files"), errors=errors)
+                return _json_response(result)
+
+            for op, r in zip(pending_ops, results):
+                if not isinstance(r, dict) or not r.get("ok"):
+                    errors.append({"file": op.get("raw_filename"), "error": str((r or {}).get("error") or "Failed to stage file")})
+                    continue
+                try:
+                    dest_path = Path(str(op.get("dst") or ""))
+                    staged_paths.append(dest_path)
+                except Exception as exc:
+                    logger.debug("Failed to track staged path: %s", exc)
+                staged.append({
+                    "name": op.get("name"),
+                    "subfolder": op.get("subfolder") or "",
+                    "path": str(op.get("dst") or ""),
+                })
 
         if not staged:
             result = Result.Err("STAGE_FAILED", "No files staged", errors=errors)
@@ -939,7 +995,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
 
         # Sanitize filename to prevent header injection
         safe_filename = (filename or file_path.name).replace('"', '').replace('\r', '').replace('\n', '')
-        safe_filename = safe_filename[:255]  # Limit length
+        safe_filename = safe_filename[:_MAX_FILENAME_LEN]  # Limit length
 
         # Determine content type
         content_type, _ = mimetypes.guess_type(str(file_path))

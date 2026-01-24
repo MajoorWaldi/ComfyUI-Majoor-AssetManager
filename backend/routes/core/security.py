@@ -5,6 +5,8 @@ Security utilities: CSRF protection and rate limiting.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
+import os
 import threading
 import time
 from collections import defaultdict, OrderedDict
@@ -15,25 +17,114 @@ from aiohttp import web
 
 # Per-client rate limiting state: {client_id: {endpoint: [timestamps]}}
 # Use LRU eviction to prevent unbounded memory growth from spoofed client IPs.
-_MAX_RATE_LIMIT_CLIENTS = 10_000
+_DEFAULT_MAX_RATE_LIMIT_CLIENTS = 10_000
+_DEFAULT_RATE_LIMIT_CLEANUP_INTERVAL = 100
+_DEFAULT_RATE_LIMIT_MIN_WINDOW_SECONDS = 60
+_DEFAULT_CLIENT_ID_HASH_HEX_CHARS = 16
+_DEFAULT_TRUSTED_PROXIES = "127.0.0.1,::1"
+
+try:
+    _MAX_RATE_LIMIT_CLIENTS = int(os.environ.get("MAJOOR_RATE_LIMIT_MAX_CLIENTS", str(_DEFAULT_MAX_RATE_LIMIT_CLIENTS)))
+except Exception:
+    _MAX_RATE_LIMIT_CLIENTS = _DEFAULT_MAX_RATE_LIMIT_CLIENTS
+
+try:
+    _rate_limit_cleanup_interval = int(
+        os.environ.get("MAJOOR_RATE_LIMIT_CLEANUP_INTERVAL", str(_DEFAULT_RATE_LIMIT_CLEANUP_INTERVAL))
+    )
+except Exception:
+    _rate_limit_cleanup_interval = _DEFAULT_RATE_LIMIT_CLEANUP_INTERVAL
+
+try:
+    _RATE_LIMIT_MIN_WINDOW_SECONDS = int(
+        os.environ.get("MAJOOR_RATE_LIMIT_MIN_WINDOW_SECONDS", str(_DEFAULT_RATE_LIMIT_MIN_WINDOW_SECONDS))
+    )
+except Exception:
+    _RATE_LIMIT_MIN_WINDOW_SECONDS = _DEFAULT_RATE_LIMIT_MIN_WINDOW_SECONDS
+
+try:
+    _CLIENT_ID_HASH_HEX_CHARS = int(
+        os.environ.get("MAJOOR_CLIENT_ID_HASH_CHARS", str(_DEFAULT_CLIENT_ID_HASH_HEX_CHARS))
+    )
+except Exception:
+    _CLIENT_ID_HASH_HEX_CHARS = _DEFAULT_CLIENT_ID_HASH_HEX_CHARS
+
 _rate_limit_state: "OrderedDict[str, dict]" = OrderedDict()
 _rate_limit_lock = threading.Lock()
 _rate_limit_cleanup_counter = 0
-_rate_limit_cleanup_interval = 100
+
+
+def _parse_trusted_proxies() -> list["ipaddress._BaseNetwork"]:
+    raw = os.environ.get("MAJOOR_TRUSTED_PROXIES", _DEFAULT_TRUSTED_PROXIES)
+    out: list["ipaddress._BaseNetwork"] = []
+    for part in (raw or "").split(","):
+        s = part.strip()
+        if not s:
+            continue
+        try:
+            # Accept either an IP or a CIDR.
+            if "/" in s:
+                out.append(ipaddress.ip_network(s, strict=False))
+            else:
+                ip = ipaddress.ip_address(s)
+                out.append(ipaddress.ip_network(f"{ip}/{ip.max_prefixlen}", strict=False))
+        except Exception:
+            continue
+    return out
+
+
+_TRUSTED_PROXY_NETS = _parse_trusted_proxies()
+
+
+def _is_trusted_proxy(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(str(ip or "").strip())
+    except Exception:
+        return False
+    try:
+        for net in _TRUSTED_PROXY_NETS:
+            try:
+                if addr in net:
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        return False
+    return False
+
+
+def _extract_peer_ip(request: web.Request) -> str:
+    try:
+        peername = request.transport.get_extra_info("peername") if request.transport else None
+        return peername[0] if peername else "unknown"
+    except Exception:
+        return "unknown"
 
 
 def _get_client_identifier(request: web.Request) -> str:
-    forwarded_for = request.headers.get("X-Forwarded-For")
+    peer_ip = _extract_peer_ip(request)
+
+    # Only trust X-Forwarded-For / X-Real-IP when we are behind a trusted proxy.
+    forwarded_for = request.headers.get("X-Forwarded-For") if _is_trusted_proxy(peer_ip) else None
     if forwarded_for:
-        client_ip = forwarded_for.split(",")[0].strip()
+        cand = forwarded_for.split(",")[0].strip()
+        try:
+            ipaddress.ip_address(cand)
+            client_ip = cand
+        except Exception:
+            client_ip = peer_ip
     else:
-        real_ip = request.headers.get("X-Real-IP")
+        real_ip = request.headers.get("X-Real-IP") if _is_trusted_proxy(peer_ip) else None
         if real_ip:
-            client_ip = real_ip.strip()
+            cand = real_ip.strip()
+            try:
+                ipaddress.ip_address(cand)
+                client_ip = cand
+            except Exception:
+                client_ip = peer_ip
         else:
-            peername = request.transport.get_extra_info("peername") if request.transport else None
-            client_ip = peername[0] if peername else "unknown"
-    return hashlib.sha256(client_ip.encode("utf-8", errors="ignore")).hexdigest()[:16]
+            client_ip = peer_ip
+    return hashlib.sha256(client_ip.encode("utf-8", errors="ignore")).hexdigest()[:_CLIENT_ID_HASH_HEX_CHARS]
 
 def _evict_oldest_clients_if_needed() -> None:
     while len(_rate_limit_state) > _MAX_RATE_LIMIT_CLIENTS:
@@ -90,7 +181,7 @@ def _check_rate_limit(
         with _rate_limit_lock:
             _rate_limit_cleanup_counter += 1
             if _rate_limit_cleanup_counter >= _rate_limit_cleanup_interval:
-                _cleanup_rate_limit_state(now, max(window_seconds, 60))
+                _cleanup_rate_limit_state(now, max(window_seconds, _RATE_LIMIT_MIN_WINDOW_SECONDS))
                 _rate_limit_cleanup_counter = 0
 
             client_state = _get_or_create_client_state(client_id)

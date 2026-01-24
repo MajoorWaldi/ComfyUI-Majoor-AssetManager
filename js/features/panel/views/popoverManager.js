@@ -7,6 +7,14 @@ export function createPopoverManager(container) {
     let windowScrollHandlerBound = false;
     let windowResizeHandlerBound = false;
 
+    const POPOVER_GAP_PX = 8;
+    const POPOVER_PAD_PX = 8;
+    const POPOVER_MIN_WIDTH_PX = 200;
+    const POPOVER_MAX_WIDTH_PX = 360;
+    const POPOVER_DEFAULT_WIDTH_PX = 280;
+    const POPOVER_BOTTOM_SAFETY_PX = 80;
+    const POPOVER_MIN_HEIGHT_PX = 140;
+
     const attachPopoverToPortal = (popover) => {
         if (!popover || !(popover instanceof HTMLElement)) return;
         if (!popover._mjrPortal) {
@@ -42,39 +50,43 @@ export function createPopoverManager(container) {
         try {
             const anchorRect = anchor.getBoundingClientRect();
             const panelRect = container.getBoundingClientRect();
-            const gap = 8;
-            const pad = 8;
 
             attachPopoverToPortal(popover);
 
             popover.style.position = "fixed";
-            popover.style.zIndex = "2147483647";
             popover.style.margin = "0";
 
             const maxWidth = Math.max(
-                200,
-                Math.min(360, panelRect.width - pad * 2, window.innerWidth - pad * 2)
+                POPOVER_MIN_WIDTH_PX,
+                Math.min(
+                    POPOVER_MAX_WIDTH_PX,
+                    panelRect.width - POPOVER_PAD_PX * 2,
+                    window.innerWidth - POPOVER_PAD_PX * 2
+                )
             );
             popover.style.maxWidth = `${maxWidth}px`;
 
-            const popW = popover.offsetWidth || Math.min(280, maxWidth);
+            const popW = popover.offsetWidth || Math.min(POPOVER_DEFAULT_WIDTH_PX, maxWidth);
             const popH = popover.offsetHeight || 1;
 
             // Align to the anchor's left edge (ComfyUI-like), then clamp inside the panel.
             let left = anchorRect.left;
-            left = Math.max(panelRect.left + pad, Math.min(left, panelRect.right - popW - pad));
+            left = Math.max(
+                panelRect.left + POPOVER_PAD_PX,
+                Math.min(left, panelRect.right - popW - POPOVER_PAD_PX)
+            );
 
-            let top = anchorRect.bottom + gap;
-            const bottomLimit = Math.min(panelRect.bottom, window.innerHeight) - pad;
-            const topLimit = Math.max(panelRect.top, 0) + pad;
+            let top = anchorRect.bottom + POPOVER_GAP_PX;
+            const bottomLimit = Math.min(panelRect.bottom, window.innerHeight) - POPOVER_PAD_PX;
+            const topLimit = Math.max(panelRect.top, 0) + POPOVER_PAD_PX;
 
-            if (top + popH > bottomLimit && anchorRect.top - gap - popH >= topLimit) {
-                top = anchorRect.top - gap - popH;
+            if (top + popH > bottomLimit && anchorRect.top - POPOVER_GAP_PX - popH >= topLimit) {
+                top = anchorRect.top - POPOVER_GAP_PX - popH;
             }
 
-            top = Math.max(topLimit, Math.min(top, bottomLimit - 80));
+            top = Math.max(topLimit, Math.min(top, bottomLimit - POPOVER_BOTTOM_SAFETY_PX));
             const availableBelow = bottomLimit - top;
-            popover.style.maxHeight = `${Math.max(140, availableBelow)}px`;
+            popover.style.maxHeight = `${Math.max(POPOVER_MIN_HEIGHT_PX, availableBelow)}px`;
             popover.style.overflow = "auto";
 
             popover.style.left = `${Math.round(left)}px`;

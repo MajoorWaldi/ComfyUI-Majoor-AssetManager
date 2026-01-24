@@ -1,6 +1,3 @@
-Majoor_AssetsManager_Deep_Deep_Audit_Fixe04.md
-DEEP_AUDIT_REPORT.md
-
 # Python cache files
 __pycache__/
 *.py[cod]
@@ -40,32 +37,59 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# Test / tooling caches
+.pytest_cache/
+tests/__reports__/
+tests/__pytest_tmp__/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Node / frontend
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Logs
+*.log
+
+# Local databases / artifacts (generated at runtime)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Keep committed DB fixtures used by tests
+!tests/**/*.db
+!tests/**/*.sqlite
+!tests/**/*.sqlite3
+
+# ComfyUI / extension runtime outputs (should not be versioned)
+_mjr_index/
+_mjr_batch_zips/
+output/
+input/
+
+# Local utility scripts
 clean_pycache.bat
-AGENTS.md
-backend/features/metadata/test_extractors.py
-backend/adapters/db/test_sqlite_query_in.py
-.claude/settings.local.json
-SECURITY_FIXES.md
-backend/routes/core/test_security.py
-backend/routes/handlers/test_assets_delete.py
-SECURITY_AUDIT_COMPLETE.md
+
+# Build artifacts
 node.zip
-backend/routes/handlers/test_batch_zip.py
-nul
-backend/features/index/test_date_histogram.py
-backend/routes/handlers/test_list_output_fs_fallback.py
-backend/features/index/test_metadata_quality_monotonic.py
-AUDIT.md
-VIEWER_AUDIT.md
-SETTINGS_AUDIT.md
-CONTEXT_MENU_AUDIT.md
-SECURITY_FIXES_PLAN.md
-docs/AUDIT_VIEWER_BUGS_MajoorAssetsManager_260121_v2.md
-docs/AUDIT_GLOBAL_MajoorAssetsManager_260121_v2.md
-docs/AUDIT_VIEWER_IDEAS_MajoorAssetsManager_260121_v2.md
-docs/AUDIT_VIEWER_GENINFO_FIXES.md
-AUDIT_COMPLETE_CODEBASE.md
-AUDIT_VIEWER_GENINFO.md
-VIEWER_LISTENERS_AUDIT.md
-CODEBASE_LISTENERS_AUDIT.md
-backend/test_viewer_grid_mask.py
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Audit reports (temporary work files)
+*AUDIT*.md
+DEEP_AUDIT*.md
+SECURITY_FIXES*.md

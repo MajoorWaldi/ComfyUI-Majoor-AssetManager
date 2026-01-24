@@ -7,6 +7,15 @@ export function renderABCompareView({
     createCompareMediaElement,
     destroyMediaProcessorsIn,
 } = {}) {
+    const PERCENT_MIN = 0;
+    const PERCENT_MAX = 100;
+    const DEFAULT_WIPE_PERCENT = 50;
+    const SLIDER_BAR_WIDTH_PX = 3;
+    const SLIDER_Z_INDEX = 10;
+    const HANDLE_SIZE_PX = 40;
+    const HANDLE_FONT_SIZE_PX = 16;
+    const HANDLE_SHADOW_BLUR_PX = 10;
+
     try {
         destroyMediaProcessorsIn?.(abView);
     } catch {}
@@ -92,10 +101,12 @@ export function renderABCompareView({
     })();
     const setClipPercent = (percent) => {
         try {
-            const clamped = Math.max(0, Math.min(100, Number(percent) || 0));
+            const clamped = Math.max(PERCENT_MIN, Math.min(PERCENT_MAX, Number(percent) || 0));
             if (supportsClipPath) {
                 const value =
-                    wipeAxis === "y" ? `inset(0 0 ${100 - clamped}% 0)` : `inset(0 ${100 - clamped}% 0 0)`;
+                    wipeAxis === "y"
+                        ? `inset(0 0 ${PERCENT_MAX - clamped}% 0)`
+                        : `inset(0 ${PERCENT_MAX - clamped}% 0 0)`;
                 topLayer.style.clipPath = value;
                 topLayer.style.webkitClipPath = value;
                 return;
@@ -104,18 +115,18 @@ export function renderABCompareView({
             const w = rect.width || 1;
             const h = rect.height || 1;
             if (wipeAxis === "y") {
-                const py = Math.round((h * clamped) / 100);
+                const py = Math.round((h * clamped) / PERCENT_MAX);
                 topLayer.style.clip = `rect(0px, ${w}px, ${py}px, 0px)`;
             } else {
-                const px = Math.round((w * clamped) / 100);
+                const px = Math.round((w * clamped) / PERCENT_MAX);
                 topLayer.style.clip = `rect(0px, ${px}px, ${h}px, 0px)`;
             }
         } catch {}
     };
 
-    setClipPercent(50);
+    setClipPercent(DEFAULT_WIPE_PERCENT);
     try {
-        state._abWipePercent = 50;
+        state._abWipePercent = DEFAULT_WIPE_PERCENT;
     } catch {}
     const topMedia = createCompareMediaElement?.(currentAsset, viewUrl);
     if (topMedia) topLayer.appendChild(topMedia);
@@ -134,11 +145,11 @@ export function renderABCompareView({
         position: absolute;
         top: 0;
         left: 50%;
-        width: 3px;
+        width: ${SLIDER_BAR_WIDTH_PX}px;
         height: 100%;
         background: white;
         cursor: ew-resize;
-        z-index: 10;
+        z-index: ${SLIDER_Z_INDEX};
     `;
 
     const handle = document.createElement("div");
@@ -147,16 +158,16 @@ export function renderABCompareView({
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
-        width: 40px;
-        height: 40px;
+        width: ${HANDLE_SIZE_PX}px;
+        height: ${HANDLE_SIZE_PX}px;
         background: white;
         border-radius: 50%;
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 16px;
+        font-size: ${HANDLE_FONT_SIZE_PX}px;
         color: black;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+        box-shadow: 0 2px ${HANDLE_SHADOW_BLUR_PX}px rgba(0,0,0,0.3);
     `;
     handle.textContent = "\u2194";
     slider.appendChild(handle);

@@ -1,5 +1,6 @@
 import { APP_CONFIG } from "../../app/config.js";
 import { VIEWER_ZOOM } from "./constants.js";
+import { safeAddListener as defaultSafeAddListener, safeCall as defaultSafeCall } from "../../utils/safeCall.js";
 
 export function createViewerPanZoom({
     overlay,
@@ -12,25 +13,8 @@ export function createViewerPanZoom({
     scheduleOverlayRedraw,
     lifecycle,
 } = {}) {
-    const safeCall = lifecycle?.safeCall || ((fn) => {
-        try {
-            return fn?.();
-        } catch {
-            return undefined;
-        }
-    });
-    const safeAddListener = lifecycle?.safeAddListener || ((target, event, handler, options) => {
-        try {
-            target?.addEventListener?.(event, handler, options);
-            return () => {
-                try {
-                    target?.removeEventListener?.(event, handler, options);
-                } catch {}
-            };
-        } catch {
-            return () => {};
-        }
-    });
+    const safeCall = lifecycle?.safeCall || defaultSafeCall;
+    const safeAddListener = lifecycle?.safeAddListener || defaultSafeAddListener;
 
     const unsubs = lifecycle?.unsubs || [];
 

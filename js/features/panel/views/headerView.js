@@ -11,8 +11,12 @@ export function createHeaderView() {
     const headerLeft = document.createElement("div");
     headerLeft.classList.add("mjr-am-header-left");
 
-    const headerIcon = document.createElement("i");
-    headerIcon.className = "pi pi-images mjr-am-header-icon";
+    const headerIcon = document.createElement("img");
+    headerIcon.className = "mjr-am-header-icon";
+    headerIcon.alt = "Assets Manager";
+    try {
+        headerIcon.src = new URL("../../../../ressources/icon.png", import.meta.url).toString();
+    } catch {}
 
     const headerTitle = document.createElement("div");
     headerTitle.classList.add("mjr-am-header-title");

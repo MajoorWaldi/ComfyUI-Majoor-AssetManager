@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 
 from backend.shared import Result, get_logger
-from backend.config import OUTPUT_ROOT
+from backend.config import OUTPUT_ROOT, TO_THREAD_TIMEOUT_S
 from backend.custom_roots import list_custom_roots, resolve_custom_root
 
 try:
@@ -40,6 +40,7 @@ logger = get_logger(__name__)
 
 MAX_TAGS_PER_ASSET = 50
 MAX_TAG_LENGTH = 100
+MAX_RENAME_LENGTH = 255
 _DEBUG_MODE = os.environ.get("MJR_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
 
 
@@ -168,22 +169,30 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
 
         # Index the file (best-effort) so it gets a stable asset_id.
         try:
-            await asyncio.to_thread(
-                services["index"].index_paths,
-                [Path(resolved)],
-                str(base_dir),
-                True,  # incremental
-                source,
-                (resolved_root_id or None),
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    services["index"].index_paths,
+                    [Path(resolved)],
+                    str(base_dir),
+                    True,  # incremental
+                    source,
+                    (resolved_root_id or None),
+                ),
+                timeout=TO_THREAD_TIMEOUT_S,
             )
+        except asyncio.TimeoutError:
+            logger.debug("Index-on-demand timed out for %s", filepath)
         except Exception as exc:
             logger.debug("Index-on-demand skipped for %s: %s", filepath, exc)
 
         try:
-            q = await asyncio.to_thread(
-                services["db"].query,
-                "SELECT id FROM assets WHERE filepath = ?",
-                (str(resolved),),
+            q = await asyncio.wait_for(
+                asyncio.to_thread(
+                    services["db"].query,
+                    "SELECT id FROM assets WHERE filepath = ?",
+                    (str(resolved),),
+                ),
+                timeout=TO_THREAD_TIMEOUT_S,
             )
             if not q.ok or not q.data:
                 return Result.Err("NOT_FOUND", "Asset not indexed")
@@ -191,6 +200,8 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
             if asset_id is None:
                 return Result.Err("NOT_FOUND", "Asset id not available")
             return Result.Ok(int(asset_id))
+        except asyncio.TimeoutError:
+            return Result.Err("TIMEOUT", "Asset lookup timed out")
         except Exception as exc:
             return Result.Err("DB_ERROR", f"Failed to resolve asset id: {exc}")
 
@@ -396,7 +407,7 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         try:
             result = await svc["index"].update_asset_tags(asset_id, sanitized_tags)
         except Exception as exc:
-            result = Result.Err("UPDATE_FAILED", f"Failed to update tags: {exc}")
+            result = Result.Err("UPDATE_FAILED", _safe_error_message(exc, "Failed to update tags"))
         if result.ok:
             _enqueue_rating_tags_sync(request, svc, asset_id)
         return _json_response(result)
@@ -675,8 +686,8 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         if "/" in new_name or "\\" in new_name:
             return _json_response(Result.Err("INVALID_INPUT", "New name cannot contain path separators"))
 
-        if len(new_name) > 255:
-            return _json_response(Result.Err("INVALID_INPUT", "New name is too long (max 255 chars)"))
+        if len(new_name) > MAX_RENAME_LENGTH:
+            return _json_response(Result.Err("INVALID_INPUT", f"New name is too long (max {MAX_RENAME_LENGTH} chars)"))
 
         # Get current asset info from database
         try:
@@ -720,12 +731,17 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         try:
             current_resolved.rename(new_path)
         except Exception as exc:
-            return _json_response(Result.Err("RENAME_FAILED", f"Failed to rename file: {exc}"))
+            return _json_response(Result.Err("RENAME_FAILED", _safe_error_message(exc, "Failed to rename file")))
 
         # Update database record
         try:
             # Update assets table
-            mtime = int(new_path.stat().st_mtime)
+            try:
+                mtime = int(new_path.stat().st_mtime)
+            except FileNotFoundError:
+                return _json_response(Result.Err("NOT_FOUND", "Renamed file does not exist"))
+            except Exception as exc:
+                return _json_response(Result.Err("FS_ERROR", _safe_error_message(exc, "Failed to stat renamed file")))
             update_res = await svc["db"].aexecute(
                 "UPDATE assets SET filename = ?, filepath = ?, mtime = ? WHERE id = ?",
                 (new_name, str(new_path), mtime, asset_id)
@@ -737,7 +753,7 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
             await svc["db"].aexecute("DELETE FROM scan_journal WHERE filepath = ?", (str(current_path),))
             await svc["db"].aexecute("DELETE FROM metadata_cache WHERE filepath = ?", (str(current_path),))
         except Exception as exc:
-            return _json_response(Result.Err("DB_ERROR", f"Failed to update asset record: {exc}"))
+            return _json_response(Result.Err("DB_ERROR", _safe_error_message(exc, "Failed to update asset record")))
 
         return _json_response(Result.Ok({
             "renamed": 1,

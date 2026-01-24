@@ -21,11 +21,21 @@ logger = get_logger(__name__)
 
 _APPKEY_OBS_INSTALLED = web.AppKey("mjr_observability_installed", bool)
 
+# Time constants (ms) / tunables
+MS_PER_S = 1000.0
+_DEFAULT_LOG_RATELIMIT_MS = 2000.0
+_DEFAULT_SLOW_MS = 750.0
+_DEFAULT_RATELIMIT_CLEAN_INTERVAL_MS = 60_000.0
+_DEFAULT_RATELIMIT_CLEAN_WINDOW_MULT = 4.0
+_DEFAULT_RATELIMIT_CLEAN_MIN_CUTOFF_MS = 120_000.0
+
 # Prevent log spam when a client polls rapidly or an endpoint repeatedly errors (e.g. 404 loop).
 # This rate limiter is intentionally simple and process-local.
 _LOG_RATELIMIT_LOCK = threading.Lock()
 _LOG_RATELIMIT_STATE: Dict[str, float] = {}
 _LOG_RATELIMIT_CLEAN_AT = 0.0
+
+# Runtime-configured values are read from env at call time (tests rely on monkeypatching env).
 
 
 def _new_request_id() -> str:
@@ -61,12 +71,15 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
+# (no cached env reads here on purpose)
+
+
 def _should_emit_log(key: str, *, window_ms: float) -> bool:
     """
     Return True if this log key should be emitted now (best-effort rate limit).
     """
     global _LOG_RATELIMIT_CLEAN_AT
-    now = time.monotonic() * 1000.0
+    now = time.monotonic() * MS_PER_S
     try:
         with _LOG_RATELIMIT_LOCK:
             last = _LOG_RATELIMIT_STATE.get(key, 0.0)
@@ -75,8 +88,12 @@ def _should_emit_log(key: str, *, window_ms: float) -> bool:
             _LOG_RATELIMIT_STATE[key] = now
 
             # Periodic cleanup to avoid unbounded growth.
-            if not _LOG_RATELIMIT_CLEAN_AT or now - _LOG_RATELIMIT_CLEAN_AT > 60_000:
-                cutoff = now - max(window_ms * 4.0, 120_000.0)
+            clean_interval_ms = _env_float("MJR_OBS_RATELIMIT_CLEAN_INTERVAL_MS", _DEFAULT_RATELIMIT_CLEAN_INTERVAL_MS)
+            clean_window_mult = _env_float("MJR_OBS_RATELIMIT_CLEAN_WINDOW_MULT", _DEFAULT_RATELIMIT_CLEAN_WINDOW_MULT)
+            clean_min_cutoff_ms = _env_float("MJR_OBS_RATELIMIT_CLEAN_MIN_CUTOFF_MS", _DEFAULT_RATELIMIT_CLEAN_MIN_CUTOFF_MS)
+
+            if not _LOG_RATELIMIT_CLEAN_AT or now - _LOG_RATELIMIT_CLEAN_AT > clean_interval_ms:
+                cutoff = now - max(window_ms * clean_window_mult, clean_min_cutoff_ms)
                 for k, ts in list(_LOG_RATELIMIT_STATE.items()):
                     if ts < cutoff:
                         _LOG_RATELIMIT_STATE.pop(k, None)
@@ -133,7 +150,7 @@ def _should_log(request: web.Request, *, status: Optional[int], duration_ms: flo
     if not _env_flag("MJR_OBS_LOG_SLOW", default=False):
         return False
 
-    slow_ms = _env_float("MJR_OBS_SLOW_MS", 750.0)
+    slow_ms = _env_float("MJR_OBS_SLOW_MS", _DEFAULT_SLOW_MS)
     return duration_ms >= slow_ms
 
 
@@ -201,7 +218,7 @@ async def request_context_middleware(request: web.Request, handler):
 
             if _should_log(request, status=status, duration_ms=duration_ms):
                 # Rate-limit repetitive logs (especially error loops / polling).
-                window_ms = _env_float("MJR_OBS_RATELIMIT_MS", 2000.0)
+                window_ms = _env_float("MJR_OBS_RATELIMIT_MS", _DEFAULT_LOG_RATELIMIT_MS)
                 try:
                     key = f"{request.method}:{request.path}:{status}"
                 except Exception:

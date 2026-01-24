@@ -1,3 +1,5 @@
+import { pickRootId } from "../../../utils/ids.js";
+
 const _postStageToInput = async ({ post, endpoint, payload, index = true, purpose = null }) => {
     const request = {
         index: Boolean(index),
@@ -7,7 +9,7 @@ const _postStageToInput = async ({ post, endpoint, payload, index = true, purpos
                 subfolder: payload.subfolder || "",
                 dest_subfolder: "",
                 type: payload.type || "output",
-                root_id: payload.root_id || payload.custom_root_id || payload.rootId
+                root_id: pickRootId(payload) || undefined
             }
         ]
     };

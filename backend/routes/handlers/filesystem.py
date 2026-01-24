@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from backend.shared import Result, classify_file, get_logger
+from backend.adapters.fs.list_cache_watcher import ensure_fs_list_cache_watching, get_fs_list_cache_token
+from backend.config import FS_LIST_CACHE_MAX, FS_LIST_CACHE_TTL_SECONDS, FS_LIST_CACHE_WATCHDOG, BG_SCAN_FAILURE_HISTORY_MAX, SCAN_PENDING_MAX
 from ..core import _safe_rel_path, _is_within_root
 
 logger = get_logger(__name__)
@@ -16,17 +18,15 @@ logger = get_logger(__name__)
 _BACKGROUND_SCAN_LOCK = threading.Lock()
 _BACKGROUND_SCAN_LAST: Dict[str, float] = {}
 _BACKGROUND_SCAN_FAILURES: list[dict] = []
-_MAX_FAILURE_HISTORY = 50
+_MAX_FAILURE_HISTORY = int(BG_SCAN_FAILURE_HISTORY_MAX)
 
 _SCAN_PENDING_LOCK = threading.Lock()
 _SCAN_PENDING: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _SCAN_WORKER: Optional[threading.Thread] = None
-_SCAN_PENDING_MAX = 64
+_SCAN_PENDING_MAX = int(SCAN_PENDING_MAX)
 
 _FS_LIST_CACHE_LOCK = threading.Lock()
 _FS_LIST_CACHE: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
-_FS_LIST_CACHE_MAX = 32
-_FS_LIST_CACHE_TTL_SECONDS = 1.5
 
 
 def _kickoff_background_scan(
@@ -162,18 +162,34 @@ def _fs_cache_get_or_build(
     root_id: Optional[str],
 ) -> Result[Dict[str, Any]]:
     try:
+        if FS_LIST_CACHE_WATCHDOG:
+            ensure_fs_list_cache_watching(str(base))
+    except Exception:
+        pass
+
+    try:
         dir_mtime_ns = target_dir_resolved.stat().st_mtime_ns
     except OSError as exc:
         return Result.Err("DIR_NOT_FOUND", f"Directory not found: {exc}")
 
+    try:
+        watch_token = get_fs_list_cache_token(str(base)) if FS_LIST_CACHE_WATCHDOG else 0
+    except Exception:
+        watch_token = 0
+
     cache_key = f"{str(base)}|{str(target_dir_resolved)}|{asset_type}|{str(root_id or '')}"
     with _FS_LIST_CACHE_LOCK:
         cached = _FS_LIST_CACHE.get(cache_key)
-        if cached and cached.get("dir_mtime_ns") == dir_mtime_ns and isinstance(cached.get("entries"), list):
+        if (
+            cached
+            and cached.get("dir_mtime_ns") == dir_mtime_ns
+            and cached.get("watch_token") == watch_token
+            and isinstance(cached.get("entries"), list)
+        ):
             try:
                 now = time.time()
                 cached_at = float(cached.get("cached_at") or 0.0)
-                if cached_at and (now - cached_at) <= float(_FS_LIST_CACHE_TTL_SECONDS):
+                if cached_at and (now - cached_at) <= float(FS_LIST_CACHE_TTL_SECONDS):
                     _FS_LIST_CACHE.move_to_end(cache_key)
                     return Result.Ok({"entries": cached["entries"], "dir_mtime_ns": dir_mtime_ns})
             except Exception:
@@ -225,9 +241,14 @@ def _fs_cache_get_or_build(
         return Result.Err("LIST_FAILED", f"Failed to list directory: {exc}")
 
     with _FS_LIST_CACHE_LOCK:
-        _FS_LIST_CACHE[cache_key] = {"dir_mtime_ns": dir_mtime_ns, "entries": entries, "cached_at": time.time()}
+        _FS_LIST_CACHE[cache_key] = {
+            "dir_mtime_ns": dir_mtime_ns,
+            "watch_token": watch_token,
+            "entries": entries,
+            "cached_at": time.time(),
+        }
         _FS_LIST_CACHE.move_to_end(cache_key)
-        while len(_FS_LIST_CACHE) > _FS_LIST_CACHE_MAX:
+        while len(_FS_LIST_CACHE) > int(FS_LIST_CACHE_MAX):
             _FS_LIST_CACHE.popitem(last=False)
 
     return Result.Ok({"entries": entries, "dir_mtime_ns": dir_mtime_ns})
@@ -335,8 +356,13 @@ async def _list_filesystem_assets(
     except Exception as exc:
         logger.debug("Filesystem DB enrichment skipped: %s", exc)
 
-    # Apply filters after enrichment
-    filtered_entries = []
+    # Apply filters after enrichment.
+    # Keep memory predictable by building only the requested page while still computing `total`.
+    total = 0
+    paged = []
+    start = max(0, int(offset or 0))
+    end = start + int(limit or 0) if int(limit or 0) > 0 else None
+
     for item in entries:
         if filter_kind and item.get("kind") != filter_kind:
             continue
@@ -354,9 +380,11 @@ async def _list_filesystem_assets(
             continue
         if not browse_all and q_lower not in str(item.get("filename", "")).lower():
             continue
-        filtered_entries.append(item)
 
-    total = len(filtered_entries)
-    paged = filtered_entries[offset: offset + limit] if limit > 0 else filtered_entries[offset:]
+        # This entry passed all filters; count it for total.
+        if total >= start:
+            if end is None or len(paged) < (end - start):
+                paged.append(item)
+        total += 1
 
     return Result.Ok({"assets": paged, "total": total, "limit": limit, "offset": offset, "query": q})

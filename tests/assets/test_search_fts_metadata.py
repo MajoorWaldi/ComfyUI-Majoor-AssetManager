@@ -1,0 +1,55 @@
+import json
+
+import pytest
+
+@pytest.mark.asyncio
+async def test_search_matches_tags_and_metadata(services):
+    db = services["db"]
+    index = services["index"]
+
+    # Insert a fake asset + metadata containing searchable tags and prompt-like text.
+    insert_asset = db.execute(
+        """
+        INSERT INTO assets (filename, subfolder, filepath, source, kind, ext, size, mtime)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("ftstest.png", "output", "C:/tmp/ftstest.png", "output", "image", ".png", 123, 1700000000),
+    )
+    assert insert_asset.ok, insert_asset.error
+    asset_id = int(insert_asset.data)
+
+    meta_raw = {"prompt": "a cute red panda on a tree", "model": "some-model.safetensors"}
+    insert_meta = db.execute(
+        """
+        INSERT INTO asset_metadata (
+            asset_id, rating, tags, tags_text, workflow_hash,
+            has_workflow, has_generation_data, metadata_quality, metadata_raw
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            asset_id,
+            0,
+            json.dumps(["redpanda", "cute"]),
+            "redpanda cute",
+            None,
+            0,
+            1,
+            "full",
+            json.dumps(meta_raw),
+        ),
+    )
+    assert insert_meta.ok, insert_meta.error
+
+    # Search by tag
+    res = await index.search("redpanda", limit=50, offset=0)
+    assert res.ok, res.error
+    ids = [a.get("id") for a in (res.data or {}).get("assets", [])]
+    assert asset_id in ids
+
+    # Search by prompt/model content (metadata_raw) is intentionally NOT indexed via FTS
+    # to keep DB size under control. Only tags/tags_text are indexed.
+    res2 = await index.search("panda", limit=50, offset=0)
+    assert res2.ok, res2.error
+    ids2 = [a.get("id") for a in (res2.data or {}).get("assets", [])]
+    assert asset_id not in ids2

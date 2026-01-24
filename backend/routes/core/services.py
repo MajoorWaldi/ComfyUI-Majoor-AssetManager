@@ -45,6 +45,17 @@ def _dispose_services():
             logger.warning(error_msg, exc_info=True)
             disposal_errors.append(error_msg)
 
+    # Stop filesystem list cache watcher (watchdog) if any.
+    try:
+        from backend.adapters.fs.list_cache_watcher import stop_global_fs_list_cache_watcher
+
+        stop_global_fs_list_cache_watcher()
+    except Exception as exc:
+        try:
+            logger.debug("Error stopping fs cache watcher: %s", exc)
+        except Exception:
+            pass
+
     # Clear services reference
     _services = None
 

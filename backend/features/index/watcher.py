@@ -86,7 +86,16 @@ class DirectoryWatcher:
             for directory in self.directories:
                 if self._stop_event.is_set():
                     break
-                if not directory.exists():
+                # Check existence but handle gracefully if directory disappears during scan.
+                # This is a benign TOCTOU - if it disappears mid-scan, scan_directory will
+                # return an error which we log and continue.
+                try:
+                    exists = directory.exists()
+                except Exception as exc:
+                    logger.debug("Watcher cannot stat directory %s: %s", directory, exc)
+                    exists = False
+
+                if not exists:
                     # Avoid busy-looping when watched path disappears
                     self._stop_event.wait(self.interval)
                     continue
@@ -95,9 +104,9 @@ class DirectoryWatcher:
                     scan_result = self.index_service.scan_directory(str(directory), recursive=True, incremental=True)
                     if not scan_result.ok:
                         logger.warning(
-                            "Watcher scan reported issues",
-                            extra={"directory": str(directory), "error": scan_result.error}
+                            "Watcher scan reported issues for %s: %s (code=%s)",
+                            directory, scan_result.error, getattr(scan_result, 'code', 'UNKNOWN')
                         )
                 except Exception as exc:
-                    logger.warning("Watcher scan failed", extra={"directory": str(directory), "error": str(exc)})
+                    logger.warning("Watcher scan failed for %s: %s", directory, exc)
             self._stop_event.wait(self.interval)

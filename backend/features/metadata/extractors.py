@@ -18,6 +18,11 @@ logger = get_logger(__name__)
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/=\s]+$")
 _AUTO1111_KV_RE = re.compile(r"(?:^|,\s*)([^:,]+):\s*")
 
+MAX_METADATA_JSON_SIZE = 10 * 1024 * 1024  # 10MB
+MIN_BASE64_CANDIDATE_LEN = 80
+MAX_ZLIB_DECOMPRESS_BYTES = 5 * 1024 * 1024  # 5MB
+MAX_TAG_LENGTH = 100
+
 
 def _try_parse_json_text(text: str) -> Optional[Dict[str, Any]]:
     """
@@ -65,7 +70,7 @@ def _try_parse_json_text(text: str) -> Optional[Dict[str, Any]]:
 
     # Base64 (possibly zlib-compressed) JSON payload.
     # Only attempt when the string looks like base64 and is reasonably sized.
-    if len(raw) < 80 or len(raw) > (MAX_METADATA_JSON_SIZE * 2):
+    if len(raw) < MIN_BASE64_CANDIDATE_LEN or len(raw) > (MAX_METADATA_JSON_SIZE * 2):
         return None
     if not _BASE64_RE.match(raw):
         return None
@@ -92,7 +97,7 @@ def _try_parse_json_text(text: str) -> Optional[Dict[str, Any]]:
             return None
 
     if decoded.startswith(b"x\x9c") or decoded.startswith(b"x\xda"):
-        maybe = _safe_zlib_decompress(decoded, 5 * 1024 * 1024)
+        maybe = _safe_zlib_decompress(decoded, MAX_ZLIB_DECOMPRESS_BYTES)
         if maybe is not None:
             decoded = maybe
 
@@ -171,7 +176,7 @@ def _split_tags(text: str) -> list[str]:
                 continue
             if tag in seen:
                 continue
-            if len(tag) > 100:
+            if len(tag) > MAX_TAG_LENGTH:
                 continue
             seen.add(tag)
             out.append(tag)
@@ -919,4 +924,3 @@ def _looks_like_comfyui_prompt_graph(value: Optional[Dict[str, Any]]) -> bool:
             valid_nodes += 1
 
     return digit_keys >= max(2, len(keys) // 2) and valid_nodes >= max(2, len(keys) // 2)
-MAX_METADATA_JSON_SIZE = 10 * 1024 * 1024  # 10 MB
