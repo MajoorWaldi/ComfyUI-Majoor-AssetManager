@@ -42,7 +42,7 @@ Documentation = "https://github.com/MajoorWaldi/ComfyUI-Majoor-AssetsManager/blo
 [tool.comfy]
 PublisherId = "majoor-waldi"
 DisplayName = "ComfyUI-Majoor-AssetsManager"
-Icon = ""
+Icon = "https://raw.githubusercontent.com/MajoorWaldi/ComfyUI-Majoor-AssetsManager/main/ressources/icon.png"
 includes = [] 
 # "requires-comfyui" = ">=1.0.0"  # ComfyUI version compatibility
 
