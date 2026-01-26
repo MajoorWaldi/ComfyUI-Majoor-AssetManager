@@ -10,7 +10,7 @@ export function renderABCompareView({
     const PERCENT_MIN = 0;
     const PERCENT_MAX = 100;
     const DEFAULT_WIPE_PERCENT = 50;
-    const SLIDER_BAR_WIDTH_PX = 3;
+    const SLIDER_BAR_WIDTH_PX = 2;
     const SLIDER_Z_INDEX = 10;
     const HANDLE_SIZE_PX = 40;
     const HANDLE_FONT_SIZE_PX = 16;
@@ -39,6 +39,18 @@ export function renderABCompareView({
     } catch {}
 
     if (!abView || !state || !currentAsset) return;
+
+    const mode = (() => {
+        try {
+            const m = String(state.abCompareMode || "wipe");
+            return m === "wipeH" ? "wipe" : m;
+        } catch {
+            return "wipe";
+        }
+    })();
+
+    const isWipe = mode === "wipe" || mode === "wipeV";
+    const wipeAxis = mode === "wipeV" ? "y" : "x"; // x = left/right, y = top/bottom
 
     const other =
         state.compareAsset ||
@@ -124,9 +136,17 @@ export function renderABCompareView({
         } catch {}
     };
 
-    setClipPercent(DEFAULT_WIPE_PERCENT);
+    const initialWipePercent = (() => {
+        if (!isWipe) return 100;
+        try {
+            const v = Number(state._abWipePercent);
+            if (Number.isFinite(v) && v >= PERCENT_MIN && v <= PERCENT_MAX) return v;
+        } catch {}
+        return DEFAULT_WIPE_PERCENT;
+    })();
+    setClipPercent(initialWipePercent);
     try {
-        state._abWipePercent = DEFAULT_WIPE_PERCENT;
+        if (isWipe) state._abWipePercent = initialWipePercent;
     } catch {}
     const topMedia = createCompareMediaElement?.(currentAsset, viewUrl);
     if (topMedia) topLayer.appendChild(topMedia);
@@ -173,18 +193,6 @@ export function renderABCompareView({
     slider.appendChild(handle);
 
     // Video sync is handled centrally by the viewer bar (Viewer.js) so we avoid double-sync here.
-
-    const mode = (() => {
-        try {
-            const m = String(state.abCompareMode || "wipe");
-            return m === "wipeH" ? "wipe" : m;
-        } catch {
-            return "wipe";
-        }
-    })();
-
-    const isWipe = mode === "wipe" || mode === "wipeV";
-    const wipeAxis = mode === "wipeV" ? "y" : "x"; // x = left/right, y = top/bottom
 
     const isCompositeMode = (m) => m === "multiply" || m === "screen" || m === "add";
     const isMathMode = (m) => m === "difference" || m === "absdiff" || m === "subtract";
@@ -509,16 +517,20 @@ export function renderABCompareView({
             slider.style.left = "0";
             slider.style.top = "50%";
             slider.style.width = "100%";
-            slider.style.height = "3px";
+            slider.style.height = `${SLIDER_BAR_WIDTH_PX}px`;
             slider.style.cursor = "ns-resize";
             handle.textContent = "\u2195";
         } else {
             slider.style.top = "0";
             slider.style.left = "50%";
-            slider.style.width = "3px";
+            slider.style.width = `${SLIDER_BAR_WIDTH_PX}px`;
             slider.style.height = "100%";
             slider.style.cursor = "ew-resize";
             handle.textContent = "\u2194";
+        }
+        if (isWipe) {
+            if (wipeAxis === "y") slider.style.top = `${initialWipePercent}%`;
+            else slider.style.left = `${initialWipePercent}%`;
         }
     } catch {}
 
