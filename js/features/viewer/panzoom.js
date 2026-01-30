@@ -163,9 +163,19 @@ export function createViewerPanZoom({
                 return;
             }
 
-            // Fit-by-height base (may overflow horizontally).
-            const baseH = vh;
-            const baseW = vh * aspect;
+            // Calculate "contain" dimensions correctly against the viewport aspect ratio.
+            const vpAspect = vw / vh;
+            let baseW = 0;
+            let baseH = 0;
+            if (aspect > vpAspect) {
+                // Image is wider than viewport (relative to aspect): constrained by width.
+                baseW = vw;
+                baseH = vw / aspect;
+            } else {
+                // Image is taller than viewport: constrained by height.
+                baseH = vh;
+                baseW = vh * aspect;
+            }
 
             const scaledW = baseW * zoom;
             const scaledH = baseH * zoom;
@@ -434,10 +444,11 @@ export function createViewerPanZoom({
             const t = e.target;
             if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
         } catch {}
-        // Do not start panning when interacting with viewer controls (player bar, buttons, seek handles, menus).
+        // Do not start panning when interacting with viewer controls (player bar, buttons, seek handles, menus, slider).
         try {
             if (e?.target?.closest?.(".mjr-video-controls")) return;
             if (e?.target?.closest?.(".mjr-context-menu")) return;
+            if (e?.target?.closest?.(".mjr-ab-slider")) return;
         } catch {}
         try {
             if (!content?.contains?.(e.target)) return;

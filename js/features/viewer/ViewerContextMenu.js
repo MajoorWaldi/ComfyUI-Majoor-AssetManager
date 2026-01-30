@@ -187,16 +187,25 @@ export function bindViewerContextMenu({
 
         menu.innerHTML = "";
 
+        // Auto-close wrapper for cleaner menu code
+        const withClose = (fn) => async () => {
+            try {
+                await fn();
+            } finally {
+                hideMenu(menu);
+            }
+        };
+
         const viewUrl = typeof getCurrentViewUrl === "function" ? getCurrentViewUrl(asset) : buildAssetViewURL(asset);
 
         menu.appendChild(
-            createItem("Open in New Tab", "pi pi-external-link", null, () => {
+            createItem("Open in New Tab", "pi pi-external-link", null, withClose(() => {
                 window.open(viewUrl, "_blank");
-            })
+            }))
         );
 
         menu.appendChild(
-            createItem("Copy file path", "pi pi-copy", null, async () => {
+            createItem("Copy file path", "pi pi-copy", null, withClose(async () => {
                 const p = asset?.filepath ? String(asset.filepath) : "";
                 if (!p) {
                     await comfyAlert("No file path available for this asset.");
@@ -207,42 +216,36 @@ export function bindViewerContextMenu({
                 } catch (err) {
                     console.error("[ViewerContextMenu] Copy failed:", err);
                 }
-            })
+            }))
         );
 
         // Download Original
         menu.appendChild(
-            createItem("Download Original", "pi pi-download", null, () => {
-                // Use asset from context
-                const contextAsset = asset;
+            createItem("Download Original", "pi pi-download", null, withClose(() => {
+                if (!asset || !asset.filepath) return;
 
-                if (!contextAsset || !contextAsset.filepath) return;
-
-                const url = buildDownloadURL(contextAsset.filepath);
+                const url = buildDownloadURL(asset.filepath);
                 const link = document.createElement("a");
                 link.href = url;
-                link.download = contextAsset.filename;
+                link.download = asset.filename;
                 document.body.appendChild(link);
                 link.click();
                 document.body.removeChild(link);
-            }, { disabled: (asset) => !asset?.filepath })
+            }), { disabled: !asset?.filepath })
         );
 
         menu.appendChild(
-            createItem("Open in Folder", "pi pi-folder-open", null, async () => {
+            createItem("Open in Folder", "pi pi-folder-open", null, withClose(async () => {
                 if (!asset?.id) return;
                 const res = await openInFolder(asset.id);
                 if (!res?.ok) {
                     await comfyAlert(res?.error || "Failed to open folder.");
                 }
-            }, { disabled: !asset?.id })
+            }), { disabled: !asset?.id })
         );
 
         menu.appendChild(
-            createItem("Add to collection...", "pi pi-bookmark", null, async () => {
-                try {
-                    hideMenu(menu);
-                } catch {}
+            createItem("Add to collection...", "pi pi-bookmark", null, withClose(async () => {
                 try {
                     await showAddToCollectionMenu({ x: e.clientX, y: e.clientY, assets: [asset] });
                 } catch (err) {
@@ -250,17 +253,14 @@ export function bindViewerContextMenu({
                         console.error("Add to collection failed:", err);
                     } catch {}
                 }
-            })
+            }))
         );
 
         menu.appendChild(separator());
 
-        menu.appendChild(createItem("Edit Tags...", "pi pi-tags", null, () => {
-            try {
-                hideMenu(menu);
-            } catch {}
+        menu.appendChild(createItem("Edit Tags...", "pi pi-tags", null, withClose(() => {
             showTagsPopover(e.clientX + 6, e.clientY + 6, asset, onAssetChanged);
-        }));
+        })));
 
         menu.appendChild(separator());
 
@@ -360,7 +360,7 @@ export function bindViewerContextMenu({
 
         // Rename option
         menu.appendChild(
-            createItem("Rename...", "pi pi-pencil", null, async () => {
+            createItem("Rename...", "pi pi-pencil", null, withClose(async () => {
                 if (!asset?.id) return;
 
                 const currentName = asset.filename || "";
@@ -382,12 +382,12 @@ export function bindViewerContextMenu({
                 } catch (error) {
                     await comfyAlert(`Error renaming file: ${error.message}`);
                 }
-            }, { disabled: !asset?.id })
+            }), { disabled: !asset?.id })
         );
 
         // Delete option
         menu.appendChild(
-            createItem("Delete...", "pi pi-trash", null, async () => {
+            createItem("Delete...", "pi pi-trash", null, withClose(async () => {
                 if (!asset?.id) return;
 
                 const confirmed = await comfyConfirm("Delete this file? This cannot be undone.");
@@ -405,7 +405,7 @@ export function bindViewerContextMenu({
                 } catch (error) {
                     await comfyAlert(`Error deleting file: ${error.message}`);
                 }
-            }, { disabled: !asset?.id })
+            }), { disabled: !asset?.id })
         );
 
         showAt(menu, e.clientX, e.clientY);

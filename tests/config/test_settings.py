@@ -1,9 +1,10 @@
+import pytest
 from backend.adapters.db.sqlite import Sqlite
 from backend.settings import AppSettings
 
 
-def _init_settings_db(db: Sqlite) -> None:
-    db.executescript(
+async def _init_settings_db(db: Sqlite) -> None:
+    await db.aexecutescript(
         """
         CREATE TABLE metadata (
             key TEXT PRIMARY KEY,
@@ -13,9 +14,10 @@ def _init_settings_db(db: Sqlite) -> None:
     )
 
 
-def test_settings_cache_version_invalidation(tmp_path):
+@pytest.mark.asyncio
+async def test_settings_cache_version_invalidation(tmp_path):
     db = Sqlite(str(tmp_path / "test.db"))
-    _init_settings_db(db)
+    await _init_settings_db(db)
 
     a = AppSettings(db)
     b = AppSettings(db)
@@ -24,14 +26,14 @@ def test_settings_cache_version_invalidation(tmp_path):
     a._cache_ttl_s = 999.0
     a._version_cache_ttl_s = 0.0
 
-    before = a.get_probe_backend()
+    before = await a.get_probe_backend()
     assert before in ("auto", "exiftool", "ffprobe", "both")
 
-    res = b.set_probe_backend("ffprobe")
+    res = await b.set_probe_backend("ffprobe")
     assert res.ok
 
-    after = a.get_probe_backend()
+    after = await a.get_probe_backend()
     assert after == "ffprobe"
 
-    db.close()
+    await db.aclose()
 

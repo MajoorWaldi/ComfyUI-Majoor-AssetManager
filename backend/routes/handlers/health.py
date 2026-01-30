@@ -38,12 +38,12 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
     @routes.get("/mjr/am/health")
     async def health(request):
         """Get health status."""
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
         try:
-            result = await asyncio.wait_for(asyncio.to_thread(svc["health"].status), timeout=TO_THREAD_TIMEOUT_S)
+            result = await asyncio.wait_for(svc['health'].status(), timeout=TO_THREAD_TIMEOUT_S)
         except asyncio.TimeoutError:
             result = Result.Err("TIMEOUT", "Health status timed out")
         except Exception as exc:
@@ -53,7 +53,7 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
     @routes.get("/mjr/am/health/counters")
     async def health_counters(request):
         """Get database counters."""
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
@@ -79,7 +79,7 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
             return _json_response(Result.Err("INVALID_INPUT", f"Unknown scope: {scope}"))
 
         try:
-            result = await asyncio.wait_for(asyncio.to_thread(svc["health"].get_counters, roots=roots), timeout=TO_THREAD_TIMEOUT_S)
+            result = await asyncio.wait_for(svc['health'].get_counters(roots=roots), timeout=TO_THREAD_TIMEOUT_S)
         except asyncio.TimeoutError:
             result = Result.Err("TIMEOUT", "Health counters timed out")
         except Exception as exc:
@@ -96,7 +96,7 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
         """
         Get configuration (output directory, etc.).
         """
-        svc, _ = _require_services()
+        svc, _ = await _require_services()
         probe_mode = MEDIA_PROBE_BACKEND
         if svc:
             settings_service = svc.get("settings")
@@ -120,7 +120,7 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
         if csrf:
             return _json_response(Result.Err("CSRF", csrf))
 
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
@@ -137,14 +137,14 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
         if not mode:
             return _json_response(Result.Err("INVALID_INPUT", "Missing probe backend mode"))
 
-        result = settings_service.set_probe_backend(mode)
+        result = await settings_service.set_probe_backend(mode)
         if result.ok:
             return _json_response(Result.Ok({"media_probe_backend": result.data}))
         return _json_response(result)
 
     @routes.get("/mjr/am/settings/security")
     async def get_security_settings(request):
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
@@ -152,7 +152,7 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
         if not settings_service:
             return _json_response(Result.Err("SERVICE_UNAVAILABLE", "Settings service unavailable"))
 
-        prefs = settings_service.get_security_prefs()
+        prefs = await settings_service.get_security_prefs()
         return _json_response(Result.Ok({"prefs": prefs}))
 
     @routes.post("/mjr/am/settings/security")
@@ -165,7 +165,7 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
         if not auth.ok:
             return _json_response(auth)
 
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
@@ -185,9 +185,10 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
         if not prefs:
             return _json_response(Result.Err("INVALID_INPUT", "No security settings provided"))
 
-        result = settings_service.set_security_prefs(prefs)
+        result = await settings_service.set_security_prefs(prefs)
         if result.ok:
-            return _json_response(Result.Ok({"prefs": result.data or settings_service.get_security_prefs()}))
+            current_prefs = result.data or (await settings_service.get_security_prefs())
+            return _json_response(Result.Ok({"prefs": current_prefs}))
         return _json_response(result)
 
     @routes.get("/mjr/am/tools/status")

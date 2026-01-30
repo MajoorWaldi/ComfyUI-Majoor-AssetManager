@@ -1,3 +1,4 @@
+import pytest
 import json
 
 from backend.features.metadata.extractors import extract_png_metadata, extract_webp_metadata
@@ -20,7 +21,8 @@ def _dummy_prompt_graph():
     }
 
 
-def test_png_extractor_does_not_misclassify_prompt_graph_as_workflow(tmp_path):
+@pytest.mark.asyncio
+async def test_png_extractor_does_not_misclassify_prompt_graph_as_workflow(tmp_path):
     img = tmp_path / "test.png"
     img.write_bytes(b"")
 
@@ -32,7 +34,8 @@ def test_png_extractor_does_not_misclassify_prompt_graph_as_workflow(tmp_path):
     assert isinstance(res.data.get("prompt"), dict)
 
 
-def test_webp_extractor_does_not_misclassify_prompt_graph_as_workflow(tmp_path):
+@pytest.mark.asyncio
+async def test_webp_extractor_does_not_misclassify_prompt_graph_as_workflow(tmp_path):
     img = tmp_path / "test.webp"
     img.write_bytes(b"")
 
@@ -43,7 +46,8 @@ def test_webp_extractor_does_not_misclassify_prompt_graph_as_workflow(tmp_path):
     assert isinstance(res.data.get("prompt"), dict)
 
 
-def test_png_extractor_accepts_real_workflow_export(tmp_path):
+@pytest.mark.asyncio
+async def test_png_extractor_accepts_real_workflow_export(tmp_path):
     img = tmp_path / "test.png"
     img.write_bytes(b"")
 

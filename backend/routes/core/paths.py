@@ -76,14 +76,16 @@ def _normalize_path(value: str) -> Optional[Path]:
         return None
 
 
-def _is_path_allowed(candidate: Optional[Path]) -> bool:
+def _is_path_allowed(candidate: Optional[Path], *, must_exist: bool = False) -> bool:
     if not candidate:
         return False
 
     # Prefer strict resolution when possible (prevents symlink/junction escapes).
     cand_norm = candidate
     try:
-        if cand_norm.exists():
+        if must_exist:
+            cand_norm = cand_norm.resolve(strict=True)
+        elif cand_norm.exists():
             cand_norm = cand_norm.resolve(strict=True)
         else:
             cand_norm = cand_norm.resolve(strict=False)

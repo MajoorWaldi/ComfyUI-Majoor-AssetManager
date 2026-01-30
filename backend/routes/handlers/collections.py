@@ -152,7 +152,7 @@ def register_collections_routes(routes: web.RouteTableDef) -> None:
 
         # Enrich with DB fields when available
         try:
-            svc, error_result = _require_services()
+            svc, error_result = await _require_services()
             if not error_result and svc and "index" in svc:
                 lookup = getattr(svc["index"], "lookup_assets_by_filepaths", None)
                 if callable(lookup) and filepaths:

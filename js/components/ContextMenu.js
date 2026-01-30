@@ -114,16 +114,31 @@ function createMenuItem(label, iconClass, shortcut, onClick) {
             if (item.dataset?.executing === "1") return;
             item.dataset.executing = "1";
         } catch {}
+
         try {
             const res = onClick?.();
-            if (res && typeof res.then === "function") {
-                res.finally?.(() => {
-                    try {
-                        item.dataset.executing = "0";
-                    } catch {}
-                });
-                return;
-            }
+
+            // Auto-close menu if logical
+            try {
+                // If it returns a promise, wait for it
+                if (res && typeof res.then === "function") {
+                    res.finally(() => {
+                         try { item.dataset.executing = "0"; } catch {}
+                         try {
+                              const parentMenu = item.closest(".mjr-legacy-context-menu");
+                              if (parentMenu) parentMenu.style.display = "none";
+                         } catch {}
+                    });
+                    return;
+                }
+
+                // Immediate close for sync actions
+                try {
+                     const parentMenu = item.closest(".mjr-legacy-context-menu");
+                     if (parentMenu) parentMenu.style.display = "none";
+                } catch {}
+            } catch {}
+
             try {
                 item.dataset.executing = "0";
             } catch {}

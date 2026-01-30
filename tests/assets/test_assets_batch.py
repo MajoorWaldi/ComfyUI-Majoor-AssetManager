@@ -9,7 +9,7 @@ async def test_get_assets_batch_preserves_order_and_parses_fields(services):
     index = services["index"]
 
     # Insert two assets
-    r1 = db.execute(
+    r1 = await db.aexecute(
         """
         INSERT INTO assets (filepath, filename, kind, ext, subfolder, source, root_id, size, mtime)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -17,7 +17,7 @@ async def test_get_assets_batch_preserves_order_and_parses_fields(services):
         (r"C:\fake\a.png", "a.png", "image", ".png", "", "output", 0, 1, 1),
     )
     assert r1.ok
-    r2 = db.execute(
+    r2 = await db.aexecute(
         """
         INSERT INTO assets (filepath, filename, kind, ext, subfolder, source, root_id, size, mtime)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -26,7 +26,7 @@ async def test_get_assets_batch_preserves_order_and_parses_fields(services):
     )
     assert r2.ok
 
-    rows = db.query(
+    rows = await db.aquery(
         "SELECT id, filepath FROM assets WHERE filepath IN (?, ?) ORDER BY filepath ASC",
         (r"C:\fake\a.png", r"C:\fake\b.png"),
     )
@@ -37,20 +37,22 @@ async def test_get_assets_batch_preserves_order_and_parses_fields(services):
     meta_a = {"quality": "partial", "prompt": {"1": {"class_type": "KSampler", "inputs": {}}}}
     meta_b = {"quality": "none"}
 
-    assert db.execute(
+    res = await db.aexecute(
         """
         INSERT INTO asset_metadata (asset_id, rating, tags, tags_text, has_workflow, has_generation_data, metadata_quality, metadata_raw)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (id_a, 3, json.dumps(["tag1", "tag2"]), "tag1 tag2", 1, 1, "partial", json.dumps(meta_a)),
-    ).ok
-    assert db.execute(
+    )
+    assert res.ok
+    res = await db.aexecute(
         """
         INSERT INTO asset_metadata (asset_id, rating, tags, tags_text, has_workflow, has_generation_data, metadata_quality, metadata_raw)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (id_b, 0, json.dumps([]), "", 0, 0, "none", json.dumps(meta_b)),
-    ).ok
+        (id_b, 0, "[]", "", 0, 0, "none", json.dumps(meta_b)),
+    )
+    assert res.ok
 
     res = await index.get_assets_batch([id_b, id_a])
     assert res.ok

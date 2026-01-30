@@ -1,10 +1,12 @@
+import pytest
 import os
 from pathlib import Path
 
 from backend.adapters.tools.exiftool import _build_match_map, _normalize_match_path
 
 
-def test_build_match_map_dedupes_identical_paths(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_build_match_map_dedupes_identical_paths(tmp_path: Path):
     f = tmp_path / "a.txt"
     f.write_text("hello", encoding="utf-8")
     p = str(f)
@@ -18,7 +20,8 @@ def test_build_match_map_dedupes_identical_paths(tmp_path: Path):
     assert key_to_paths[only_key] == [p, p]
 
 
-def test_normalize_match_path_is_case_insensitive_on_windows(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_normalize_match_path_is_case_insensitive_on_windows(tmp_path: Path):
     f = tmp_path / "MiXeD.txt"
     f.write_text("hello", encoding="utf-8")
 

@@ -2,6 +2,7 @@
 Metadata helpers - shared utilities for metadata operations.
 """
 import hashlib
+import asyncio
 import json
 from typing import Dict, Any, Tuple, Optional
 
@@ -125,7 +126,7 @@ class MetadataHelpers:
         return Result.Ok(payload, quality=quality)
 
     @staticmethod
-    def write_asset_metadata_row(db: Sqlite, asset_id: int, metadata_result: Result[Dict[str, Any]]) -> Result[Any]:
+    async def write_asset_metadata_row(db: Sqlite, asset_id: int, metadata_result: Result[Dict[str, Any]]) -> Result[Any]:
         """
         Insert or update the asset_metadata row with the latest metadata flags.
 
@@ -200,7 +201,7 @@ class MetadataHelpers:
         quality_rank_current = "CASE COALESCE(asset_metadata.metadata_quality, 'none') WHEN 'full' THEN 3 WHEN 'partial' THEN 2 WHEN 'degraded' THEN 1 ELSE 0 END"
         should_upgrade = f"({quality_rank_excluded} >= {quality_rank_current})"
 
-        return db.execute(
+        return await db.aexecute(
             """
             INSERT INTO asset_metadata
             (asset_id, rating, tags, tags_text, has_workflow, has_generation_data, metadata_quality, metadata_raw)
@@ -248,7 +249,7 @@ class MetadataHelpers:
         )
 
     @staticmethod
-    def refresh_metadata_if_needed(
+    async def refresh_metadata_if_needed(
         db: Sqlite,
         asset_id: int,
         metadata_result: Result[Dict[str, Any]],
@@ -276,7 +277,7 @@ class MetadataHelpers:
         Returns:
             True if metadata was refreshed, False otherwise
         """
-        result = db.query(
+        result = await db.aquery(
             "SELECT has_workflow, has_generation_data, metadata_raw FROM asset_metadata WHERE asset_id = ?",
             (asset_id,)
         )
@@ -295,13 +296,14 @@ class MetadataHelpers:
                 current_raw == new_metadata_raw):
             return False
 
-        write_result = MetadataHelpers.write_asset_metadata_row(db, asset_id, metadata_result)
+        write_result = await MetadataHelpers.write_asset_metadata_row(db, asset_id, metadata_result)
         if write_result.ok:
-            write_journal_fn(filepath, base_dir, state_hash, mtime, size)
+            # We assume write_journal_fn is async now
+            await write_journal_fn(filepath, base_dir, state_hash, mtime, size)
         return write_result.ok
 
     @staticmethod
-    def retrieve_cached_metadata(db: Sqlite, filepath: str, state_hash: str) -> Optional[Result[Dict[str, Any]]]:
+    async def retrieve_cached_metadata(db: Sqlite, filepath: str, state_hash: str) -> Optional[Result[Dict[str, Any]]]:
         """
         Retrieve metadata from cache if available.
 
@@ -316,7 +318,7 @@ class MetadataHelpers:
         if not state_hash:
             return None
 
-        result = db.query(
+        result = await db.aquery(
             "SELECT metadata_raw FROM metadata_cache WHERE filepath = ? AND state_hash = ?",
             (filepath, state_hash)
         )
@@ -335,7 +337,7 @@ class MetadataHelpers:
             return None
 
     @staticmethod
-    def store_metadata_cache(db: Sqlite, filepath: str, state_hash: str, metadata_result: Result[Dict[str, Any]]) -> Result[Any]:
+    async def store_metadata_cache(db: Sqlite, filepath: str, state_hash: str, metadata_result: Result[Dict[str, Any]]) -> Result[Any]:
         """
         Store metadata in cache for future use.
 
@@ -370,7 +372,7 @@ class MetadataHelpers:
                 return Result.Err("CACHE_SKIPPED", "Metadata JSON too large to cache")
         metadata_hash = MetadataHelpers.compute_metadata_hash(metadata_raw)
 
-        return db.execute(
+        return await db.aexecute(
             """
             INSERT INTO metadata_cache
             (filepath, state_hash, metadata_hash, metadata_raw)
@@ -398,7 +400,7 @@ class MetadataHelpers:
         return hashlib.md5(raw_json.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def set_metadata_value(db: Sqlite, key: str, value: str) -> Result[Any]:
+    async def set_metadata_value(db: Sqlite, key: str, value: str) -> Result[Any]:
         """
         Persist a simple key/value in the metadata table.
 
@@ -410,7 +412,7 @@ class MetadataHelpers:
         Returns:
             Result from database operation
         """
-        return db.execute(
+        return await db.aexecute(
             "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
             (key, value)
         )

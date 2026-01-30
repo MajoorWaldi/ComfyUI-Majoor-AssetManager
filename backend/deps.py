@@ -7,7 +7,7 @@ import os
 
 from .shared import get_logger, log_success
 from .adapters.db.sqlite import Sqlite
-from .adapters.db.schema import init_schema, migrate_schema
+from .adapters.db.schema import init_schema, migrate_schema, table_has_column
 from .adapters.tools import ExifTool, FFProbe
 from .features.metadata import MetadataService
 from .features.health import HealthService
@@ -31,7 +31,7 @@ from .config import (
 
 logger = get_logger(__name__)
 
-def build_services(db_path: str = None) -> dict:
+async def build_services(db_path: str = None) -> dict:
     """
     Build all services (DI container).
 
@@ -52,7 +52,7 @@ def build_services(db_path: str = None) -> dict:
     db = Sqlite(db_path, max_connections=DB_MAX_CONNECTIONS, timeout=DB_TIMEOUT)
 
     # Run migrations
-    migrate_result = migrate_schema(db)
+    migrate_result = await migrate_schema(db)
     if not migrate_result.ok:
         logger.error(f"Schema migration failed: {migrate_result.error}")
         raise RuntimeError(f"Failed to initialize database: {migrate_result.error}")
@@ -86,9 +86,13 @@ def build_services(db_path: str = None) -> dict:
         ffprobe=ffprobe
     )
 
+    # Check for optional columns
+    matches = await table_has_column(db, "asset_metadata", "tags_text")
+    
     index_service = IndexService(
         db=db,
-        metadata_service=metadata_service
+        metadata_service=metadata_service,
+        has_tags_text_column=matches
     )
 
     services = {

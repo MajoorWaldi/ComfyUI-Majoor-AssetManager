@@ -16,7 +16,8 @@ from shared import get_logger, log_success
 
 logger = get_logger(__name__)
 
-def test_services_build(services):
+@pytest.mark.asyncio
+async def test_services_build(services):
     """Test service container builds successfully."""
     logger.info("Testing service container...")
 
@@ -29,14 +30,15 @@ def test_services_build(services):
 
     log_success(logger, "Service container built successfully!")
 
-def test_health_service(services):
+@pytest.mark.asyncio
+async def test_health_service(services):
     """Test health service."""
     logger.info("Testing health service...")
 
     health = services["health"]
 
     # Get status
-    status_result = health.status()
+    status_result = await health.status()
     assert status_result.ok
 
     logger.info(f"Health status: {status_result.data['overall']}")
@@ -44,14 +46,15 @@ def test_health_service(services):
     logger.info(f"ffprobe available: {status_result.data['tools']['ffprobe']['available']}")
 
     # Get counters
-    counters_result = health.get_counters()
+    counters_result = await health.get_counters()
     assert counters_result.ok
 
     logger.info(f"Total assets: {counters_result.data.get('total')}")
 
     log_success(logger, "Health service works!")
 
-def test_metadata_service(services):
+@pytest.mark.asyncio
+async def test_metadata_service(services):
     """Test metadata extraction on real files."""
     logger.info("Testing metadata service...")
 

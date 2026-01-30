@@ -99,7 +99,7 @@ def register_custom_roots_routes(routes: web.RouteTableDef) -> None:
                 root_path = str(result.data.get("path") or "")
                 root_id = str(result.data.get("id") or "")
                 if root_path and root_id:
-                    _kickoff_background_scan(root_path, source="custom", root_id=root_id, recursive=True, incremental=True)
+                    await _kickoff_background_scan(root_path, source="custom", root_id=root_id, recursive=True, incremental=True)
                     try:
                         ensure_fs_list_cache_watching(root_path)
                     except Exception:
@@ -180,6 +180,8 @@ def register_custom_roots_routes(routes: web.RouteTableDef) -> None:
                 resp.headers["Content-Type"] = content_type
                 resp.headers["Cache-Control"] = "no-cache"
                 resp.headers["X-Content-Type-Options"] = "nosniff"
+                resp.headers["Content-Security-Policy"] = "default-src 'none'"
+                resp.headers["X-Frame-Options"] = "DENY"
             except Exception:
                 pass
             return resp

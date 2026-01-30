@@ -40,7 +40,7 @@ def register_metadata_routes(routes: web.RouteTableDef) -> None:
         Query params:
             path: File path
         """
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
@@ -113,9 +113,9 @@ def register_metadata_routes(routes: web.RouteTableDef) -> None:
             mode = (request.query.get("mode") or "").strip().lower()
             workflow_only = (request.query.get("workflow_only") or "").strip().lower() in ("1", "true", "yes")
             if mode in ("workflow", "workflow_only", "workflow-only") or workflow_only:
-                result = await asyncio.wait_for(asyncio.to_thread(svc["metadata"].get_workflow_only, str(normalized)), timeout=TO_THREAD_TIMEOUT_S)
+                result = await asyncio.wait_for(svc["metadata"].get_workflow_only(str(normalized)), timeout=TO_THREAD_TIMEOUT_S)
             else:
-                result = await asyncio.wait_for(asyncio.to_thread(svc["metadata"].get_metadata, str(normalized)), timeout=TO_THREAD_TIMEOUT_S)
+                result = await asyncio.wait_for(svc["metadata"].get_metadata(str(normalized)), timeout=TO_THREAD_TIMEOUT_S)
         except asyncio.TimeoutError:
             result = Result.Err("TIMEOUT", "Metadata extraction timed out")
         except Exception as exc:

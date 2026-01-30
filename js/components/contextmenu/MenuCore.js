@@ -270,6 +270,26 @@ export function createMenuItem(label, iconClass, rightHint, onClick, { disabled 
                 item.style.pointerEvents = "";
                 item.style.opacity = disabled ? "0.45" : "1";
             } catch {}
+
+            // Close the menu if this item has a close callback configured
+            try {
+                // Find parent menu and trigger hide if available
+                const menu = item.closest('.mjr-context-menu');
+                if (menu && typeof menu._mjrHide === 'function') {
+                    // Check if this action wants to keep the menu open (e.g. submenus return specific flag?)
+                    // For now, assume most actions want to close.
+                    // Submenu triggers usually don't have onClick, or use mouseover.
+                    // If onClick was provided, it's likely an action.
+                    
+                    // We can also let the caller invoke hideMenu(menu).
+                    // However, to enforce what the user asked: "must desapear once a validate my choice"
+                    // we can modify createMenuItem to accept an option "autoClose: true" or simple force it here.
+                    
+                    menu._mjrHide();
+                } else if (menu) {
+                     menu.style.display = 'none';
+                }
+            } catch {}
         }
     });
 

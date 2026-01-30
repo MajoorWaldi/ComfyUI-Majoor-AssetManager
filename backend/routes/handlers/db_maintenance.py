@@ -26,7 +26,7 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
         if csrf:
             return _json_response(Result.Err("CSRF", csrf))
 
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 

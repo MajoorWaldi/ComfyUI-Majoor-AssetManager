@@ -12,9 +12,7 @@ export function renderABCompareView({
     const DEFAULT_WIPE_PERCENT = 50;
     const SLIDER_BAR_WIDTH_PX = 2;
     const SLIDER_Z_INDEX = 10;
-    const HANDLE_SIZE_PX = 40;
-    const HANDLE_FONT_SIZE_PX = 16;
-    const HANDLE_SHADOW_BLUR_PX = 10;
+    const SLIDER_HIT_AREA_PX = 40;
 
     try {
         destroyMediaProcessorsIn?.(abView);
@@ -159,38 +157,25 @@ export function renderABCompareView({
         if (topCanvas?.dataset) topCanvas.dataset.mjrCompareRole = "A";
     } catch {}
 
-    // Slider handle
+    // Slider container (Invisible hit area around the visible line)
     const slider = document.createElement("div");
+    slider.className = "mjr-ab-slider";
     slider.style.cssText = `
         position: absolute;
-        top: 0;
-        left: 50%;
-        width: ${SLIDER_BAR_WIDTH_PX}px;
-        height: 100%;
-        background: white;
-        cursor: ew-resize;
         z-index: ${SLIDER_Z_INDEX};
+        touch-action: none;
+        user-select: none;
     `;
 
-    const handle = document.createElement("div");
-    handle.style.cssText = `
+    // Visual Line (the only visible element - handle is invisible)
+    const line = document.createElement("div");
+    line.style.cssText = `
         position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        width: ${HANDLE_SIZE_PX}px;
-        height: ${HANDLE_SIZE_PX}px;
         background: white;
-        border-radius: 50%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: ${HANDLE_FONT_SIZE_PX}px;
-        color: black;
-        box-shadow: 0 2px ${HANDLE_SHADOW_BLUR_PX}px rgba(0,0,0,0.3);
+        pointer-events: none;
+        box-shadow: 0 0 4px rgba(0,0,0,0.5);
     `;
-    handle.textContent = "\u2194";
-    slider.appendChild(handle);
+    slider.appendChild(line);
 
     // Video sync is handled centrally by the viewer bar (Viewer.js) so we avoid double-sync here.
 
@@ -470,27 +455,54 @@ export function renderABCompareView({
         }
     } catch {}
 
-    // Drag functionality (pointer-capture; uses AbortController to avoid leaking listeners on re-render)
+    // Drag functionality
     let isDragging = false;
-    const onPointerMove = (e) => {
-        if (!isDragging) return;
+    let dragRect = null; // Cache rect during drag to avoid thrashing
+
+    const updateSliderPos = (percent) => {
         try {
-            const rect = abView.getBoundingClientRect();
-            const pos = wipeAxis === "y" ? (Number(e.clientY) || 0) - rect.top : (Number(e.clientX) || 0) - rect.left;
-            const denom = wipeAxis === "y" ? rect.height : rect.width;
-            const percent = (pos / denom) * 100;
             const clamped = Math.max(0, Math.min(100, percent));
             setClipPercent(clamped);
-            try {
-                state._abWipePercent = clamped;
-            } catch {}
+            try { state._abWipePercent = clamped; } catch {}
+            
             if (wipeAxis === "y") slider.style.top = `${clamped}%`;
             else slider.style.left = `${clamped}%`;
         } catch {}
     };
-    const stopDrag = () => {
-        isDragging = false;
+
+    const onPointerMove = (e) => {
+        if (!isDragging) return;
+        try {
+            e.preventDefault(); // Stop scrolling
+            e.stopPropagation();
+
+            if (!dragRect) dragRect = abView.getBoundingClientRect();
+            
+            let percent = 50;
+            if (wipeAxis === "y") {
+                const y = Number(e.clientY) || 0;
+                percent = ((y - dragRect.top) / dragRect.height) * 100;
+            } else {
+                const x = Number(e.clientX) || 0;
+                percent = ((x - dragRect.left) / dragRect.width) * 100;
+            }
+            
+            // Use RAF for smooth visual update if needed, but direct update is usually fine for simple sliders
+            // to minimize lag feel.
+            updateSliderPos(percent);
+        } catch {}
     };
+
+    const stopDrag = (e) => {
+        if (!isDragging) return;
+        isDragging = false;
+        dragRect = null;
+        try { 
+            slider.releasePointerCapture(e.pointerId); 
+            slider.style.cursor = wipeAxis === "y" ? "ns-resize" : "ew-resize";
+        } catch {}
+    };
+
     try {
         const sliderAC = new AbortController();
         abView._mjrSliderAbort = sliderAC;
@@ -498,39 +510,62 @@ export function renderABCompareView({
         slider.addEventListener(
             "pointerdown",
             (e) => {
+                if (e.button !== 0) return; // Left click only
                 isDragging = true;
+                e.preventDefault();
+                e.stopPropagation();
+                
+                // Cache rect immediately
+                try { dragRect = abView.getBoundingClientRect(); } catch {}
+
                 try {
                     slider.setPointerCapture(e.pointerId);
+                    slider.style.cursor = "grabbing";
                 } catch {}
+                
+                // Immediate update on click-to-grab
                 onPointerMove(e);
             },
-            { signal: sliderAC.signal, passive: true }
+            { signal: sliderAC.signal, passive: false }
         );
-        slider.addEventListener("pointermove", onPointerMove, { signal: sliderAC.signal, passive: true });
-        slider.addEventListener("pointerup", stopDrag, { signal: sliderAC.signal, passive: true });
-        slider.addEventListener("pointercancel", stopDrag, { signal: sliderAC.signal, passive: true });
+        
+        window.addEventListener("pointermove", onPointerMove, { signal: sliderAC.signal, passive: false }); // passive:false for preventDefault
+        window.addEventListener("pointerup", stopDrag, { signal: sliderAC.signal, passive: true });
+        window.addEventListener("pointercancel", stopDrag, { signal: sliderAC.signal, passive: true });
     } catch {}
 
-    // Slider styling per wipe mode (horizontal/vertical)
+    // Slide Bar Geometry & Orientation
     try {
         if (wipeAxis === "y") {
-            slider.style.left = "0";
-            slider.style.top = "50%";
+            // Horizontal bar (Vertical wipe)
+            // Hit area: wide horizontally, invisible handle along the line
             slider.style.width = "100%";
-            slider.style.height = `${SLIDER_BAR_WIDTH_PX}px`;
+            slider.style.height = `${SLIDER_HIT_AREA_PX}px`;
+            slider.style.left = "0";
+            slider.style.top = `${initialWipePercent}%`;
+            slider.style.transform = "translate(0, -50%)";
             slider.style.cursor = "ns-resize";
-            handle.textContent = "\u2195";
+
+            // Visual line
+            line.style.width = "100%";
+            line.style.height = `${SLIDER_BAR_WIDTH_PX}px`;
+            line.style.top = "50%";
+            line.style.transform = "translate(0, -50%)";
         } else {
-            slider.style.top = "0";
-            slider.style.left = "50%";
-            slider.style.width = `${SLIDER_BAR_WIDTH_PX}px`;
+            // Vertical bar (Horizontal wipe)
+            // Hit area: tall vertically, invisible handle along the line
             slider.style.height = "100%";
+            slider.style.width = `${SLIDER_HIT_AREA_PX}px`;
+            slider.style.top = "0";
+            slider.style.left = `${initialWipePercent}%`;
+            slider.style.transform = "translate(-50%, 0)";
             slider.style.cursor = "ew-resize";
-            handle.textContent = "\u2194";
-        }
-        if (isWipe) {
-            if (wipeAxis === "y") slider.style.top = `${initialWipePercent}%`;
-            else slider.style.left = `${initialWipePercent}%`;
+
+            // Visual line
+            line.style.height = "100%";
+            line.style.width = `${SLIDER_BAR_WIDTH_PX}px`;
+            line.style.left = "50%";
+            line.style.transform = "translate(-50%, 0)";
         }
     } catch {}
 

@@ -82,7 +82,7 @@ def register_calendar_routes(routes: web.RouteTableDef) -> None:
         if "has_workflow" in request.query:
             filters["has_workflow"] = request.query["has_workflow"].lower() in ("true", "1", "yes")
 
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 

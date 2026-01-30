@@ -17,7 +17,7 @@ import pytest
 async def test_date_histogram_scoped_counts_days(tmp_path: Path):
     db_path = tmp_path / "assets.sqlite"
     db = Sqlite(str(db_path), max_connections=1, timeout=1.0)
-    assert init_schema(db).ok
+    assert (await init_schema(db)).ok
 
     root_dir = (tmp_path / "out").resolve()
     root_dir.mkdir(parents=True, exist_ok=True)
@@ -33,7 +33,7 @@ async def test_date_histogram_scoped_counts_days(tmp_path: Path):
     ]
 
     for filename, filepath, kind, mtime, size in assets:
-        db.execute(
+        await db.aexecute(
             """
             INSERT INTO assets(filename, subfolder, filepath, source, root_id, kind, ext, size, mtime, width, height, duration)
             VALUES (?, '', ?, 'output', NULL, ?, ?, ?, ?, NULL, NULL, NULL)
@@ -42,9 +42,9 @@ async def test_date_histogram_scoped_counts_days(tmp_path: Path):
         )
 
     # Add metadata rows so rating/workflow filters can be exercised.
-    rows = db.query("SELECT id FROM assets ORDER BY id").data
+    rows = (await db.aquery("SELECT id FROM assets ORDER BY id")).data
     for r in rows:
-        db.execute(
+        await db.aexecute(
             "INSERT INTO asset_metadata(asset_id, rating, tags, tags_text, has_workflow, has_generation_data, metadata_raw) VALUES (?, ?, '[]', '', ?, 0, '{}')",
             (int(r["id"]), 0, 0),
         )
@@ -64,4 +64,4 @@ async def test_date_histogram_scoped_counts_days(tmp_path: Path):
     res_video = await searcher.date_histogram_scoped([str(root_dir)], month_start, month_end, filters={"kind": "video"})
     assert res_video.ok
     assert res_video.data == {"2026-01-05": 1}
-    db.close()
+    await db.aclose()

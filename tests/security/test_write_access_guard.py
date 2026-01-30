@@ -1,3 +1,4 @@
+import pytest
 import os
 
 
@@ -19,13 +20,15 @@ def _clear_auth_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
-def test_write_allowed_on_loopback_when_no_token(monkeypatch):
+@pytest.mark.asyncio
+async def test_write_allowed_on_loopback_when_no_token(monkeypatch):
     _clear_auth_env(monkeypatch)
     res = _check_write_access(peer_ip="127.0.0.1", headers={})
     assert res.ok, res.error
 
 
-def test_write_blocked_for_forwarded_remote_when_no_token(monkeypatch):
+@pytest.mark.asyncio
+async def test_write_blocked_for_forwarded_remote_when_no_token(monkeypatch):
     _clear_auth_env(monkeypatch)
     # 127.0.0.1 is a trusted proxy by default (see MAJOOR_TRUSTED_PROXIES default),
     # so X-Forwarded-For should be honored and treated as the true client.
@@ -34,7 +37,8 @@ def test_write_blocked_for_forwarded_remote_when_no_token(monkeypatch):
     assert res.code in ("FORBIDDEN", "AUTH_REQUIRED")
 
 
-def test_write_requires_token_when_configured(monkeypatch):
+@pytest.mark.asyncio
+async def test_write_requires_token_when_configured(monkeypatch):
     _clear_auth_env(monkeypatch)
     monkeypatch.setenv("MAJOOR_API_TOKEN", "secret")
 
@@ -46,7 +50,8 @@ def test_write_requires_token_when_configured(monkeypatch):
     assert res2.ok, res2.error
 
 
-def test_write_token_accepts_bearer_header(monkeypatch):
+@pytest.mark.asyncio
+async def test_write_token_accepts_bearer_header(monkeypatch):
     _clear_auth_env(monkeypatch)
     monkeypatch.setenv("MAJOOR_API_TOKEN", "secret")
 
@@ -54,7 +59,8 @@ def test_write_token_accepts_bearer_header(monkeypatch):
     assert res.ok, res.error
 
 
-def test_allow_remote_write_override(monkeypatch):
+@pytest.mark.asyncio
+async def test_allow_remote_write_override(monkeypatch):
     _clear_auth_env(monkeypatch)
     monkeypatch.setenv("MAJOOR_ALLOW_REMOTE_WRITE", "1")
 
@@ -62,7 +68,8 @@ def test_allow_remote_write_override(monkeypatch):
     assert res.ok, res.error
 
 
-def test_require_auth_without_token_blocks(monkeypatch):
+@pytest.mark.asyncio
+async def test_require_auth_without_token_blocks(monkeypatch):
     _clear_auth_env(monkeypatch)
     monkeypatch.setenv("MAJOOR_REQUIRE_AUTH", "1")
 

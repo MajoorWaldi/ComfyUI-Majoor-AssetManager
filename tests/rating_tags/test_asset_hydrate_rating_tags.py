@@ -39,19 +39,19 @@ async def test_get_asset_hydrate_rating_tags_updates_db(tmp_path: Path):
     # DB + schema
     db_path = tmp_path / "t.db"
     db = Sqlite(str(db_path))
-    mig = migrate_schema(db)
+    mig = await migrate_schema(db)
     assert mig.ok
 
     # Asset + empty metadata
     f = tmp_path / "a.png"
     f.write_bytes(b"x")
-    ins = db.execute(
+    ins = await db.aexecute(
         "INSERT INTO assets(filepath, filename, subfolder, source, root_id, kind, ext, size, mtime) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (str(f), "a.png", "", "output", "output", "image", ".png", 1, 1700000000),
     )
     assert ins.ok
-    asset_id = db.query("SELECT id FROM assets").data[0]["id"]
-    db.execute(
+    asset_id = (await db.aquery("SELECT id FROM assets")).data[0]["id"]
+    await db.aexecute(
         "INSERT INTO asset_metadata(asset_id, rating, tags, tags_text, has_workflow, has_generation_data, metadata_quality, metadata_raw) VALUES(?, 0, '[]', '', 0, 0, 'none', '{}')",
         (asset_id,),
     )
@@ -87,6 +87,6 @@ async def test_get_asset_hydrate_rating_tags_updates_db(tmp_path: Path):
     assert body["data"]["rating"] == 4
     assert "foo" in (body["data"]["tags"] or [])
 
-    row = db.query("SELECT rating, tags FROM asset_metadata WHERE asset_id = ?", (asset_id,)).data[0]
+    row = (await db.aquery("SELECT rating, tags FROM asset_metadata WHERE asset_id = ?", (asset_id,))).data[0]
     assert row["rating"] == 4
     assert "foo" in json.loads(row["tags"])

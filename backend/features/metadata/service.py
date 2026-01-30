@@ -155,18 +155,18 @@ class MetadataService:
         self.ffprobe = ffprobe
         self._settings = settings
 
-    def _resolve_probe_mode(self, override: Optional[str]) -> str:
+    async def _resolve_probe_mode(self, override: Optional[str]) -> str:
         if isinstance(override, str):
             normalized = override.strip().lower()
             if normalized in ("auto", "exiftool", "ffprobe", "both"):
                 return normalized
-        return self._settings.get_probe_backend()
+        return await self._settings.get_probe_backend()
 
-    def _probe_backends(self, file_path: str, override: Optional[str]) -> tuple[str, list[str]]:
-        mode = self._resolve_probe_mode(override)
+    async def _probe_backends(self, file_path: str, override: Optional[str]) -> tuple[str, list[str]]:
+        mode = await self._resolve_probe_mode(override)
         return mode, pick_probe_backend(file_path, settings_override=mode)
 
-    def get_metadata(
+    async def get_metadata(
         self,
         file_path: str,
         scan_id: Optional[str] = None,
@@ -202,7 +202,7 @@ class MetadataService:
 
         try:
             # Dispatch to appropriate handler
-            _, backends = self._probe_backends(file_path, probe_mode_override)
+            _, backends = await self._probe_backends(file_path, probe_mode_override)
             allow_exif = "exiftool" in backends
             allow_ffprobe = "ffprobe" in backends
 
@@ -231,7 +231,7 @@ class MetadataService:
                 quality="degraded"
             )
 
-    def get_workflow_only(self, file_path: str, scan_id: Optional[str] = None) -> Result[Dict[str, Any]]:
+    async def get_workflow_only(self, file_path: str, scan_id: Optional[str] = None) -> Result[Dict[str, Any]]:
         """
         Fast path for extracting only embedded ComfyUI workflow/prompt (no ffprobe, no geninfo).
 
@@ -501,7 +501,7 @@ class MetadataService:
             "quality": "partial" if exif_data else "none"
         }, quality="partial" if exif_data else "none")
 
-    def get_metadata_batch(
+    async def get_metadata_batch(
         self,
         file_paths: list[str],
         scan_id: Optional[str] = None,
@@ -545,7 +545,7 @@ class MetadataService:
 
         results = {}
 
-        probe_mode = self._resolve_probe_mode(probe_mode_override)
+        probe_mode = await self._resolve_probe_mode(probe_mode_override)
 
         exif_targets = []
         ffprobe_targets = []
@@ -739,11 +739,16 @@ class MetadataService:
     def _get_file_info(self, file_path: str) -> Dict[str, Any]:
         """Get basic file information."""
         stat = os.stat(file_path)
-        return {
+        info = {
             "filename": os.path.basename(file_path),
             "filepath": file_path,
             "size": stat.st_size,
             "mtime": stat.st_mtime,
+            "ctime": stat.st_ctime,
             "kind": classify_file(file_path),
             "ext": os.path.splitext(file_path)[1].lower()
         }
+        # Try to get birthtime (Unix/Mac)
+        if hasattr(stat, "st_birthtime"):
+            info["birthtime"] = stat.st_birthtime
+        return info

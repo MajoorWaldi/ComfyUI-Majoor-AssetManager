@@ -4,6 +4,7 @@ Application settings persisted in the local metadata store.
 from __future__ import annotations
 
 import threading
+import asyncio
 import time
 from typing import Any, Mapping, Optional
 
@@ -38,7 +39,7 @@ class AppSettings:
 
     def __init__(self, db):
         self._db = db
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
         self._cache: dict[str, str] = {}
         self._cache_at: dict[str, float] = {}
         self._cache_version: dict[str, int] = {}
@@ -48,8 +49,8 @@ class AppSettings:
         self._version_cached_at: float = 0.0
         self._default_probe_mode = MEDIA_PROBE_BACKEND
 
-    def _read_setting(self, key: str) -> Optional[str]:
-        result = self._db.query("SELECT value FROM metadata WHERE key = ?", (key,))
+    async def _read_setting(self, key: str) -> Optional[str]:
+        result = await self._db.aquery("SELECT value FROM metadata WHERE key = ?", (key,))
         if not result.ok or not result.data:
             return None
         raw = result.data[0].get("value")
@@ -57,16 +58,16 @@ class AppSettings:
             return raw.strip().lower()
         return None
 
-    def _write_setting(self, key: str, value: str) -> Result[str]:
-        return self._db.execute(
+    async def _write_setting(self, key: str, value: str) -> Result[str]:
+        return await self._db.aexecute(
             "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
             (key, value),
         )
 
-    def _get_security_prefs_locked(self) -> dict[str, bool]:
+    async def _get_security_prefs_locked(self) -> dict[str, bool]:
         output: dict[str, bool] = {}
         for key, info in _SECURITY_PREFS_INFO.items():
-            raw = self._read_setting(key)
+            raw = await self._read_setting(key)
             if raw is not None:
                 output[key] = parse_bool(raw, bool(info.get("default", False)))
             else:
@@ -75,39 +76,39 @@ class AppSettings:
                 output[key] = env_bool(env_var, default)
         return output
 
-    def get_security_prefs(self) -> dict[str, bool]:
-        with self._lock:
-            return self._get_security_prefs_locked()
+    async def get_security_prefs(self) -> dict[str, bool]:
+        async with self._lock:
+            return await self._get_security_prefs_locked()
 
-    def set_security_prefs(self, prefs: Mapping[str, Any]) -> Result[dict[str, bool]]:
+    async def set_security_prefs(self, prefs: Mapping[str, Any]) -> Result[dict[str, bool]]:
         to_write: dict[str, bool] = {}
         for key in _SECURITY_PREFS_INFO:
             if key in prefs:
                 to_write[key] = parse_bool(prefs[key], False)
         if not to_write:
             return Result.Err("INVALID_INPUT", "No security settings provided")
-        with self._lock:
+        async with self._lock:
             for key, value in to_write.items():
-                res = self._write_setting(key, "1" if value else "0")
+                res = await self._write_setting(key, "1" if value else "0")
                 if not res.ok:
                     return Result.Err("DB_ERROR", res.error or f"Failed to persist {key}")
-            bump = self._bump_settings_version_locked()
+            bump = await self._bump_settings_version_locked()
             if not bump.ok:
                 try:
                     logger.warning("Failed to bump settings version: %s", bump.error)
                 except Exception:
                     pass
-            return Result.Ok(self._get_security_prefs_locked())
+            return Result.Ok(await self._get_security_prefs_locked())
 
-    def _read_settings_version(self) -> int:
+    async def _read_settings_version(self) -> int:
         try:
-            raw = self._read_setting(_SETTINGS_VERSION_KEY)
+            raw = await self._read_setting(_SETTINGS_VERSION_KEY)
             n = int(str(raw or "0").strip() or "0")
             return max(0, n)
         except Exception:
             return 0
 
-    def _get_settings_version(self) -> int:
+    async def _get_settings_version(self) -> int:
         now = time.monotonic()
         try:
             ts = float(self._version_cached_at or 0.0)
@@ -115,12 +116,12 @@ class AppSettings:
             ts = 0.0
         if ts and (now - ts) < float(self._version_cache_ttl_s):
             return int(self._version_cached or 0)
-        v = self._read_settings_version()
+        v = await self._read_settings_version()
         self._version_cached = int(v or 0)
         self._version_cached_at = now
         return self._version_cached
 
-    def _bump_settings_version_locked(self) -> Result[int]:
+    async def _bump_settings_version_locked(self) -> Result[int]:
         """
         Bump a monotonically increasing settings version in the DB.
 
@@ -131,17 +132,17 @@ class AppSettings:
             v = int(time.time() * _MS_PER_S)
         except Exception:
             v = int(time.time())
-        res = self._write_setting(_SETTINGS_VERSION_KEY, str(v))
+        res = await self._write_setting(_SETTINGS_VERSION_KEY, str(v))
         if not res.ok:
             return Result.Err("DB_ERROR", res.error or "Failed to bump settings version")
         self._version_cached = v
         self._version_cached_at = time.monotonic()
         return Result.Ok(v)
 
-    def get_probe_backend(self) -> str:
+    async def get_probe_backend(self) -> str:
         """Return the configured media probe backend mode."""
-        with self._lock:
-            current_version = self._get_settings_version()
+        async with self._lock:
+            current_version = await self._get_settings_version()
             cached = self._cache.get(_PROBE_BACKEND_KEY)
             if cached:
                 try:
@@ -151,7 +152,7 @@ class AppSettings:
                 cached_ver = int(self._cache_version.get(_PROBE_BACKEND_KEY) or 0)
                 if cached_ver == int(current_version or 0) and ts and (time.monotonic() - ts) < self._cache_ttl_s:
                     return cached
-            mode = self._read_setting(_PROBE_BACKEND_KEY)
+            mode = await self._read_setting(_PROBE_BACKEND_KEY)
             if mode not in _VALID_PROBE_MODES:
                 mode = self._default_probe_mode
             self._cache[_PROBE_BACKEND_KEY] = mode
@@ -159,17 +160,17 @@ class AppSettings:
             self._cache_version[_PROBE_BACKEND_KEY] = int(current_version or 0)
             return mode
 
-    def set_probe_backend(self, mode: str) -> Result[str]:
+    async def set_probe_backend(self, mode: str) -> Result[str]:
         """Persist the media probe backend mode and bump the settings version."""
         normalized = (mode or "").strip().lower()
         if not normalized:
             normalized = self._default_probe_mode
         if normalized not in _VALID_PROBE_MODES:
             return Result.Err("INVALID_INPUT", f"Invalid probe mode: {mode}")
-        with self._lock:
-            result = self._write_setting(_PROBE_BACKEND_KEY, normalized)
+        async with self._lock:
+            result = await self._write_setting(_PROBE_BACKEND_KEY, normalized)
             if result.ok:
-                bump = self._bump_settings_version_locked()
+                bump = await self._bump_settings_version_locked()
                 if not bump.ok:
                     try:
                         logger.warning("Failed to bump settings version: %s", bump.error)
@@ -177,7 +178,7 @@ class AppSettings:
                         pass
                 self._cache[_PROBE_BACKEND_KEY] = normalized
                 self._cache_at[_PROBE_BACKEND_KEY] = time.monotonic()
-                self._cache_version[_PROBE_BACKEND_KEY] = int(bump.data or self._get_settings_version() or 0)
+                self._cache_version[_PROBE_BACKEND_KEY] = int(bump.data or await self._get_settings_version() or 0)
                 logger.info("Media probe backend set to %s", normalized)
                 return Result.Ok(normalized)
             return Result.Err("DB_ERROR", result.error or "Failed to persist probe backend")

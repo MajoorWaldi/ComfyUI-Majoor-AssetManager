@@ -1,3 +1,4 @@
+import pytest
 import json
 
 from backend.features.metadata.extractors import extract_video_metadata
@@ -20,7 +21,8 @@ def _dummy_prompt_graph():
     }
 
 
-def test_video_extractor_detects_workflow_json_in_comment(tmp_path):
+@pytest.mark.asyncio
+async def test_video_extractor_detects_workflow_json_in_comment(tmp_path):
     video = tmp_path / "test.mp4"
     video.write_bytes(b"")
 
@@ -32,7 +34,8 @@ def test_video_extractor_detects_workflow_json_in_comment(tmp_path):
     assert res.data["workflow"].get("nodes")
 
 
-def test_video_extractor_detects_prompt_graph_json_in_comment(tmp_path):
+@pytest.mark.asyncio
+async def test_video_extractor_detects_prompt_graph_json_in_comment(tmp_path):
     video = tmp_path / "test.mp4"
     video.write_bytes(b"")
 
@@ -44,7 +47,8 @@ def test_video_extractor_detects_prompt_graph_json_in_comment(tmp_path):
     assert "1" in res.data["prompt"]
 
 
-def test_video_extractor_supports_duplicate_prompt_tags(tmp_path):
+@pytest.mark.asyncio
+async def test_video_extractor_supports_duplicate_prompt_tags(tmp_path):
     video = tmp_path / "test.mp4"
     video.write_bytes(b"")
 
@@ -54,7 +58,8 @@ def test_video_extractor_supports_duplicate_prompt_tags(tmp_path):
     assert isinstance(res.data["prompt"], dict)
 
 
-def test_video_extractor_reads_embedded_json_from_ffprobe_tags(tmp_path):
+@pytest.mark.asyncio
+async def test_video_extractor_reads_embedded_json_from_ffprobe_tags(tmp_path):
     video = tmp_path / "test.mp4"
     video.write_bytes(b"")
 
@@ -70,7 +75,8 @@ def test_video_extractor_reads_embedded_json_from_ffprobe_tags(tmp_path):
     assert isinstance(res.data["prompt"], dict)
 
 
-def test_video_extractor_uses_ffprobe_tags(tmp_path):
+@pytest.mark.asyncio
+async def test_video_extractor_uses_ffprobe_tags(tmp_path):
     video = tmp_path / "test.mp4"
     video.write_bytes(b"")
 

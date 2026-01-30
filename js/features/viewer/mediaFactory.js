@@ -262,6 +262,7 @@ export function createViewerMediaFactory({
         canvas.style.cssText = `
             max-width: 100%;
             max-height: 100%;
+            object-fit: contain;
             display: block;
             transform: ${mediaTransform?.() || ""};
             transform-origin: center center;
@@ -334,6 +335,7 @@ export function createViewerMediaFactory({
             canvas.style.cssText = `
                 max-width: 100%;
                 max-height: 100%;
+                object-fit: contain;
                 display: block;
                 transform: ${mediaTransform?.() || ""};
                 transform-origin: center center;

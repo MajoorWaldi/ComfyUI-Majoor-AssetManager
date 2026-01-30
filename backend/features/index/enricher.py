@@ -3,6 +3,7 @@ Metadata enricher - handles background metadata enrichment for assets.
 """
 import os
 import threading
+import asyncio
 from typing import List, Dict, Any, Tuple, Optional
 
 from ...shared import get_logger
@@ -26,7 +27,7 @@ class MetadataEnricher:
         self,
         db: Sqlite,
         metadata_service: MetadataService,
-        scan_lock: threading.Lock,
+        scan_lock: asyncio.Lock,
         compute_state_hash_fn,
         prepare_metadata_fields_fn,
         metadata_error_payload_fn,
@@ -48,12 +49,12 @@ class MetadataEnricher:
         self._compute_state_hash = compute_state_hash_fn
         self._prepare_metadata_fields = prepare_metadata_fields_fn
         self._metadata_error_payload = metadata_error_payload_fn
-        self._enrich_lock = threading.Lock()
+        self._enrich_lock = asyncio.Lock()
         self._enrich_queue: List[str] = []
         self._enrich_thread: Optional[threading.Thread] = None
         self._enrich_running = False
 
-    def start_enrichment(self, filepaths: List[str]) -> None:
+    async def start_enrichment(self, filepaths: List[str]) -> None:
         """
         Enqueue files for background metadata enrichment.
 
@@ -63,7 +64,7 @@ class MetadataEnricher:
         cleaned = [str(p) for p in (filepaths or []) if p]
         if not cleaned:
             return
-        with self._enrich_lock:
+        async with self._enrich_lock:
             existing = set(self._enrich_queue)
             for fp in cleaned:
                 if fp in existing:
@@ -73,25 +74,24 @@ class MetadataEnricher:
             if self._enrich_running and self._enrich_thread and self._enrich_thread.is_alive():
                 return
             self._enrich_running = True
-            self._enrich_thread = threading.Thread(target=self._enrichment_worker, daemon=True)
-            self._enrich_thread.start()
+            self._enrich_thread = asyncio.create_task(self._enrichment_worker())
 
-    def _enrichment_worker(self) -> None:
+    async def _enrichment_worker(self) -> None:
         """Background worker that processes the enrichment queue."""
         try:
             while True:
-                with self._enrich_lock:
+                async with self._enrich_lock:
                     if not self._enrich_queue:
                         self._enrich_running = False
                         return
                     chunk = self._enrich_queue[:64]
                     del self._enrich_queue[:64]
-                self._enrich_metadata_chunk(chunk)
+                await self._enrich_metadata_chunk(chunk)
         except Exception:
-            with self._enrich_lock:
+            async with self._enrich_lock:
                 self._enrich_running = False
 
-    def _enrich_metadata_chunk(self, filepaths: List[str]) -> None:
+    async def _enrich_metadata_chunk(self, filepaths: List[str]) -> None:
         """
         Process a chunk of files for metadata enrichment.
 
@@ -102,7 +102,7 @@ class MetadataEnricher:
         if not cleaned:
             return
 
-        id_res = self.db.query_in(
+        id_res = await self.db.aquery_in(
             "SELECT id, filepath FROM assets WHERE {IN_CLAUSE}",
             "filepath",
             cleaned,
@@ -137,11 +137,11 @@ class MetadataEnricher:
 
             # Try cache first to avoid tool work.
             from .metadata_helpers import MetadataHelpers
-            metadata_result = MetadataHelpers.retrieve_cached_metadata(self.db, fp, state_hash)
+            metadata_result = await MetadataHelpers.retrieve_cached_metadata(self.db, fp, state_hash)
             if not (metadata_result and metadata_result.ok):
-                metadata_result = self.metadata.get_metadata(fp, scan_id=None)
+                metadata_result = await self.metadata.get_metadata(fp, scan_id=None)
                 if metadata_result.ok:
-                    MetadataHelpers.store_metadata_cache(self.db, fp, state_hash, metadata_result)
+                    await MetadataHelpers.store_metadata_cache(self.db, fp, state_hash, metadata_result)
             if not metadata_result.ok:
                 metadata_result = self._metadata_error_payload(metadata_result, fp)
 
@@ -170,10 +170,10 @@ class MetadataEnricher:
             return
 
         # Keep DB writes serialized with scans/index_files to avoid lock contention.
-        with self._scan_lock:
-            with self.db.transaction(mode="immediate"):
+        async with self._scan_lock:
+            async with self.db.atransaction(mode="immediate"):
                 if asset_updates:
-                    self.db.executemany(
+                    await self.db.aexecutemany(
                         """
                         UPDATE assets
                         SET width = COALESCE(?, width),
@@ -187,12 +187,12 @@ class MetadataEnricher:
                 if meta_updates:
                     # executemany() + triggers can be brittle across SQLite builds; keep this robust.
                     for (_, _, _, _, asset_id) in meta_updates:
-                        self.db.execute(
+                        await self.db.aexecute(
                             "INSERT OR IGNORE INTO asset_metadata(asset_id, rating, tags) VALUES (?, 0, '[]')",
                             (asset_id,),
                         )
                     for hw, hg, q, raw, asset_id in meta_updates:
-                        self.db.execute(
+                        await self.db.aexecute(
                             """
                             UPDATE asset_metadata
                             SET has_workflow = ?,

@@ -8,7 +8,7 @@ async def test_search_matches_tags_and_metadata(services):
     index = services["index"]
 
     # Insert a fake asset + metadata containing searchable tags and prompt-like text.
-    insert_asset = db.execute(
+    insert_asset = await db.aexecute(
         """
         INSERT INTO assets (filename, subfolder, filepath, source, kind, ext, size, mtime)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -19,7 +19,7 @@ async def test_search_matches_tags_and_metadata(services):
     asset_id = int(insert_asset.data)
 
     meta_raw = {"prompt": "a cute red panda on a tree", "model": "some-model.safetensors"}
-    insert_meta = db.execute(
+    insert_meta = await db.aexecute(
         """
         INSERT INTO asset_metadata (
             asset_id, rating, tags, tags_text, workflow_hash,

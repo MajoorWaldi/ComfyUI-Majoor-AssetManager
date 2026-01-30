@@ -48,7 +48,7 @@ def register_viewer_routes(routes: web.RouteTableDef) -> None:
         if asset_id <= 0:
             return _json_response(Result.Err("INVALID_INPUT", "Invalid asset_id"))
 
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 

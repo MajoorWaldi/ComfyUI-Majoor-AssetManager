@@ -17,7 +17,7 @@ from aiohttp import web
 
 # Per-client rate limiting state: {client_id: {endpoint: [timestamps]}}
 # Use LRU eviction to prevent unbounded memory growth from spoofed client IPs.
-_DEFAULT_MAX_RATE_LIMIT_CLIENTS = 10_000
+_DEFAULT_MAX_RATE_LIMIT_CLIENTS = 1_000
 _DEFAULT_RATE_LIMIT_CLEANUP_INTERVAL = 100
 _DEFAULT_RATE_LIMIT_MIN_WINDOW_SECONDS = 60
 _DEFAULT_CLIENT_ID_HASH_HEX_CHARS = 16
@@ -175,7 +175,7 @@ def _require_operation_enabled(operation: str, *, prefs: Mapping[str, Any] | Non
     return Result.Ok(True, operation=op, safe_mode=safe_mode)
 
 
-def _resolve_security_prefs(services: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+async def _resolve_security_prefs(services: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
     """
     Extract stored security preferences from the services container safely.
     """
@@ -185,7 +185,7 @@ def _resolve_security_prefs(services: Mapping[str, Any] | None) -> Mapping[str, 
     if not settings_service:
         return None
     try:
-        return settings_service.get_security_prefs()
+        return await settings_service.get_security_prefs()
     except Exception:
         return None
 
@@ -430,7 +430,9 @@ def _get_client_identifier(request: web.Request) -> str:
     return hashlib.sha256(client_ip.encode("utf-8", errors="ignore")).hexdigest()[:_CLIENT_ID_HASH_HEX_CHARS]
 
 def _evict_oldest_clients_if_needed() -> None:
-    while len(_rate_limit_state) > _MAX_RATE_LIMIT_CLIENTS:
+    # Evict more aggressively when near capacity
+    target = int(_MAX_RATE_LIMIT_CLIENTS * 0.9)
+    while len(_rate_limit_state) > target:
         try:
             _rate_limit_state.popitem(last=False)
         except KeyError:

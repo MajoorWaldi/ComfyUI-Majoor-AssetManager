@@ -1,4 +1,5 @@
 import { noop, safeCall, safeAddListener } from "../utils/safeCall.js";
+import { clamp, clamp01 } from "../features/viewer/state.js";
 
 const MAX_MINOR_TICKS = 400;
 const SEEK_RANGE_MAX = 1000;
@@ -50,18 +51,6 @@ function formatTime(seconds) {
     const sec = total % 60;
     if (h > 0) return `${h}:${pad2(m)}:${pad2(sec)}`;
     return `${m}:${pad2(sec)}`;
-}
-
-function clamp01(v) {
-    const n = Number(v);
-    if (!Number.isFinite(n)) return 0;
-    return Math.max(0, Math.min(1, n));
-}
-
-function clamp(v, min, max) {
-    const n = Number(v);
-    if (!Number.isFinite(n)) return min;
-    return Math.max(min, Math.min(max, n));
 }
 
 function createBtn(className, text, title) {

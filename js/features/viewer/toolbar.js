@@ -179,6 +179,7 @@ export function createViewerToolbar({
     toolsRow.style.cssText = `
         display: flex;
         align-items: center;
+        justify-content: center;
         gap: 10px;
         flex-wrap: wrap;
         padding: 6px 4px 2px;

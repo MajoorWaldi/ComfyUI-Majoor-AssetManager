@@ -798,6 +798,15 @@ class Sqlite:
         )
         return bool(result.ok and result.data and len(result.data) > 0)
 
+    async def ahas_table(self, table_name: str) -> bool:
+        """Return True if `table_name` exists in sqlite_master (async)."""
+        result = await self.aexecute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+            (table_name,),
+            fetch=True,
+        )
+        return bool(result.ok and result.data and len(result.data) > 0)
+
     def get_schema_version(self) -> int:
         """Get the schema version from the `metadata` table (0 if missing)."""
         if not self.has_table("metadata"):
@@ -815,9 +824,33 @@ class Sqlite:
                 return 0
         return 0
 
+    async def aget_schema_version(self) -> int:
+        """Get the schema version from the `metadata` table (0 if missing) (async)."""
+        if not await self.ahas_table("metadata"):
+            return 0
+
+        result = await self.aexecute(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            fetch=True,
+        )
+        if result.ok and result.data and len(result.data) > 0:
+            try:
+                return int(result.data[0]["value"])
+            except (ValueError, KeyError, TypeError):
+                logger.warning("Invalid schema_version value in database")
+                return 0
+        return 0
+
     def set_schema_version(self, version: int) -> Result[bool]:
         """Set the schema version in the `metadata` table."""
         return self.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', ?)",
+            (str(version),),
+        )
+
+    async def aset_schema_version(self, version: int) -> Result[bool]:
+        """Set the schema version in the `metadata` table (async)."""
+        return await self.aexecute(
             "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', ?)",
             (str(version),),
         )

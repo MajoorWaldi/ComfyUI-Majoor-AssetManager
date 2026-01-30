@@ -1,8 +1,4 @@
-function clamp01(v) {
-    const n = Number(v);
-    if (!Number.isFinite(n)) return 0;
-    return Math.max(0, Math.min(1, n));
-}
+import { clamp01 } from "./state.js";
 
 function srgbToLuma(r, g, b) {
     return 0.2126 * r + 0.7152 * g + 0.0722 * b;

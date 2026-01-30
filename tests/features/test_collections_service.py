@@ -1,9 +1,11 @@
+import pytest
 from pathlib import Path
 
 from backend.features.collections.service import CollectionsService
 
 
-def test_add_assets_reports_skipped_existing_and_duplicates(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_add_assets_reports_skipped_existing_and_duplicates(monkeypatch, tmp_path):
     # Ensure the service writes into a temp collections directory.
     import backend.features.collections.service as service_mod
 

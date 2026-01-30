@@ -40,7 +40,7 @@ async def test_get_asset_does_not_self_heal_incomplete_geninfo(services):
         "quality": "partial",
     }
 
-    res = db.execute(
+    res = await db.aexecute(
         """
         INSERT INTO assets (filepath, filename, kind, ext, subfolder, source, root_id, size, mtime)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -58,13 +58,13 @@ async def test_get_asset_does_not_self_heal_incomplete_geninfo(services):
         ),
     )
     assert res.ok
-    row = db.query("SELECT id FROM assets WHERE filepath = ?", (r"C:\fake\girl_in_field.png",))
+    row = await db.aquery("SELECT id FROM assets WHERE filepath = ?", (r"C:\fake\girl_in_field.png",))
     assert row.ok and row.data
     asset_id = int(row.data[0].get("id") or 0)
     assert asset_id > 0
 
     meta_res = Result.Ok(metadata_obj, quality="partial")
-    res = db.execute(
+    res = await db.aexecute(
         """
         INSERT INTO asset_metadata (asset_id, rating, tags, tags_text, has_workflow, has_generation_data, metadata_quality, metadata_raw)
         VALUES (?, 0, '[]', '', 1, 1, 'partial', ?)

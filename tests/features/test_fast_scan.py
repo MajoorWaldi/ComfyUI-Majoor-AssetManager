@@ -1,7 +1,9 @@
+import pytest
 import time
 from pathlib import Path
 
-def test_fast_scan_enriches_metadata_in_background(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_fast_scan_enriches_metadata_in_background(tmp_path: Path):
     """
     Fast scan should avoid running metadata tools inline (metadata_raw initially '{}'),
     then background enrichment should populate metadata_raw and metadata_cache.
@@ -9,7 +11,7 @@ def test_fast_scan_enriches_metadata_in_background(tmp_path: Path):
     from backend.deps import build_services
 
     db_path = tmp_path / "fast_scan.db"
-    services = build_services(db_path=str(db_path))
+    services = await build_services(db_path=str(db_path))
     index = services["index"]
     db = services["db"]
 
@@ -25,14 +27,13 @@ def test_fast_scan_enriches_metadata_in_background(tmp_path: Path):
         f.write_bytes(b"not-a-real-file")
 
     # Run fast scan with background enrichment.
-    res = index.scan_directory(str(scan_dir), recursive=False, incremental=False, source="output", root_id=None, fast=True, background_metadata=True)
-    assert res.ok, res.error
+        res = await index.scan_directory(str(scan_dir), recursive=False, incremental=False, source="output", root_id=None, fast=True, background_metadata=True)
 
     filepaths = [str(f) for f in files]
-    placeholders = ",".join(["?"] * len(filepaths))
+    placeholders = ", ".join(["?"] * len(files))
 
     # Immediately after fast scan: asset_metadata exists but metadata_raw is still '{}' (fast path).
-    meta_res = db.query(
+    meta_res = await db.aquery(
         f"""
         SELECT a.filepath, m.metadata_raw
         FROM assets a
@@ -48,7 +49,7 @@ def test_fast_scan_enriches_metadata_in_background(tmp_path: Path):
     # Background worker should populate metadata_raw and metadata_cache entries.
     deadline = time.time() + 8.0
     while time.time() < deadline:
-        meta_res2 = db.query(
+        meta_res2 = await db.aquery(
             f"""
             SELECT a.filepath, m.metadata_raw
             FROM assets a
@@ -65,7 +66,7 @@ def test_fast_scan_enriches_metadata_in_background(tmp_path: Path):
 
     assert raws and all(isinstance(r, str) and r != "{}" for r in raws)
 
-    cache_res = db.query(
+    cache_res = await db.aquery(
         f"SELECT COUNT(*) as c FROM metadata_cache WHERE filepath IN ({placeholders})",
         tuple(filepaths),
     )

@@ -1,3 +1,4 @@
+import pytest
 from aiohttp.test_utils import make_mocked_request
 
 from backend.routes.core.security import _check_rate_limit, _csrf_error, _reset_security_state_for_tests
@@ -13,17 +14,20 @@ class _DummyTransport:
         return default
 
 
-def test_csrf_allows_get():
+@pytest.mark.asyncio
+async def test_csrf_allows_get():
     req = make_mocked_request("GET", "/mjr/am/health", headers={"Host": "localhost:8188"})
     assert _csrf_error(req) is None
 
 
-def test_csrf_rejects_missing_header_on_post():
+@pytest.mark.asyncio
+async def test_csrf_rejects_missing_header_on_post():
     req = make_mocked_request("POST", "/mjr/am/scan", headers={"Host": "localhost:8188"})
     assert _csrf_error(req)
 
 
-def test_csrf_accepts_x_requested_with_on_post():
+@pytest.mark.asyncio
+async def test_csrf_accepts_x_requested_with_on_post():
     req = make_mocked_request(
         "POST",
         "/mjr/am/scan",
@@ -32,7 +36,8 @@ def test_csrf_accepts_x_requested_with_on_post():
     assert _csrf_error(req) is None
 
 
-def test_csrf_rejects_cross_origin():
+@pytest.mark.asyncio
+async def test_csrf_rejects_cross_origin():
     req = make_mocked_request(
         "POST",
         "/mjr/am/scan",
@@ -46,7 +51,8 @@ def test_csrf_rejects_cross_origin():
     assert err and "Cross-site request blocked" in err
 
 
-def test_rate_limit_is_per_client():
+@pytest.mark.asyncio
+async def test_rate_limit_is_per_client():
     _reset_security_state_for_tests()
 
     req1 = make_mocked_request(
@@ -72,7 +78,8 @@ def test_rate_limit_is_per_client():
     assert _check_rate_limit(req2, "scan", max_requests=2, window_seconds=60)[0] is True
 
 
-def test_csrf_accepts_csrf_token_header():
+@pytest.mark.asyncio
+async def test_csrf_accepts_csrf_token_header():
     """X-CSRF-Token header should also work as anti-CSRF protection."""
     req = make_mocked_request(
         "POST",
@@ -82,7 +89,8 @@ def test_csrf_accepts_csrf_token_header():
     assert _csrf_error(req) is None
 
 
-def test_csrf_rejects_origin_null():
+@pytest.mark.asyncio
+async def test_csrf_rejects_origin_null():
     """Origin: null should be blocked (common in sandboxed iframes)."""
     req = make_mocked_request(
         "POST",
@@ -97,7 +105,8 @@ def test_csrf_rejects_origin_null():
     assert err and "Origin=null" in err
 
 
-def test_csrf_allows_loopback_aliases():
+@pytest.mark.asyncio
+async def test_csrf_allows_loopback_aliases():
     """Loopback aliases (localhost, 127.0.0.1, ::1) should interoperate."""
     req = make_mocked_request(
         "POST",
@@ -111,7 +120,8 @@ def test_csrf_allows_loopback_aliases():
     assert _csrf_error(req) is None
 
 
-def test_csrf_checks_put_delete_patch():
+@pytest.mark.asyncio
+async def test_csrf_checks_put_delete_patch():
     """All state-changing methods should be checked."""
     for method in ["PUT", "DELETE", "PATCH"]:
         req = make_mocked_request(method, "/mjr/am/asset/123", headers={"Host": "localhost:8188"})
@@ -119,7 +129,8 @@ def test_csrf_checks_put_delete_patch():
         assert err is not None, f"{method} should require CSRF protection"
 
 
-def test_rate_limit_per_endpoint():
+@pytest.mark.asyncio
+async def test_rate_limit_per_endpoint():
     """Rate limits should be independent per endpoint."""
     _reset_security_state_for_tests()
 
@@ -142,7 +153,8 @@ def test_rate_limit_per_endpoint():
     assert allowed is True
 
 
-def test_rate_limit_returns_retry_after():
+@pytest.mark.asyncio
+async def test_rate_limit_returns_retry_after():
     """Rate limit should return retry-after seconds."""
     _reset_security_state_for_tests()
 
@@ -163,7 +175,8 @@ def test_rate_limit_returns_retry_after():
     assert 1 <= retry_after <= 61  # Should be between 1 and window_seconds + 1
 
 
-def test_rate_limit_uses_x_real_ip():
+@pytest.mark.asyncio
+async def test_rate_limit_uses_x_real_ip():
     """Should use X-Real-IP if X-Forwarded-For not present."""
     _reset_security_state_for_tests()
 

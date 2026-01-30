@@ -10,8 +10,8 @@ from backend.shared import Result
 from backend.routes.handlers.assets import register_asset_routes
 
 
-def _init_schema(db: Sqlite) -> None:
-    db.executescript(
+async def _init_schema(db: Sqlite) -> None:
+    await db.aexecutescript(
         """
         PRAGMA foreign_keys=ON;
         CREATE TABLE assets (
@@ -38,20 +38,23 @@ async def test_bulk_delete_aborts_on_file_delete_error(monkeypatch, tmp_path):
     monkeypatch.setenv("MAJOOR_ALLOW_DELETE", "1")
 
     db = Sqlite(str(tmp_path / "test.db"))
-    _init_schema(db)
+    await _init_schema(db)
 
     f1 = tmp_path / "a.png"
     f2 = tmp_path / "b.png"
     f1.write_bytes(b"x")
     f2.write_bytes(b"y")
 
-    db.execute("INSERT INTO assets(id, filepath) VALUES (?, ?)", (1, str(f1)))
-    db.execute("INSERT INTO assets(id, filepath) VALUES (?, ?)", (2, str(f2)))
+    await db.aexecute("INSERT INTO assets(id, filepath) VALUES (?, ?)", (1, str(f1)))
+    await db.aexecute("INSERT INTO assets(id, filepath) VALUES (?, ?)", (2, str(f2)))
 
     # Patch the imported reference in the handlers module (not the core module).
     import backend.routes.handlers.assets as assets_mod
 
-    monkeypatch.setattr(assets_mod, "_require_services", lambda: ({"db": db}, None))
+    async def _mock_require_services():
+        return ({"db": db}, None)
+
+    monkeypatch.setattr(assets_mod, "_require_services", _mock_require_services)
     monkeypatch.setattr(assets_mod, "_is_path_allowed", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(assets_mod, "_is_path_allowed_custom", lambda *_args, **_kwargs: True)
 
@@ -79,9 +82,9 @@ async def test_bulk_delete_aborts_on_file_delete_error(monkeypatch, tmp_path):
         assert payload["ok"] is False
         assert payload["code"] == "DELETE_FAILED"
 
-        still = db.query("SELECT id FROM assets ORDER BY id")
+        still = await db.aquery("SELECT id FROM assets ORDER BY id")
         assert still.ok
         assert [row["id"] for row in (still.data or [])] == [1, 2]
     finally:
         await client.close()
-        db.close()
+        await db.aclose()

@@ -1,3 +1,5 @@
+import { noop, safeCall } from "../../utils/safeCall.js";
+
 export function createViewerMetadataHydrator({
     state,
     VIEWER_MODES,
@@ -5,15 +7,6 @@ export function createViewerMetadataHydrator({
     getAssetMetadata,
     getAssetsBatch,
 } = {}) {
-    const noop = () => {};
-    const safeCall = (fn) => {
-        try {
-            return fn?.();
-        } catch {
-            return undefined;
-        }
-    };
-
     // Metadata hydration cache for viewer-visible assets (so rating/tags show even if the grid
     // passed a lightweight asset object).
     const cache = new Map(); // id -> { at:number, data:any }

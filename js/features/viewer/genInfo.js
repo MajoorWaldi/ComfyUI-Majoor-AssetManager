@@ -1,13 +1,12 @@
 import { createGenerationSection } from "../../components/sidebar/sections/GenerationSection.js";
 import { createWorkflowMinimapSection } from "../../components/sidebar/sections/WorkflowMinimapSection.js";
 import { createInfoBox } from "../../components/sidebar/utils/dom.js";
+import { safeCall as baseSafeCall } from "../../utils/safeCall.js";
+import { APP_CONFIG } from "../../app/config.js";
 
 const safeCall = (fn, fallback = null) => {
-    try {
-        return fn?.();
-    } catch {
-        return fallback;
-    }
+    const res = baseSafeCall(fn);
+    return res === undefined ? fallback : res;
 };
 
 const getGenInfoStatus = (asset) => {
@@ -312,10 +311,12 @@ export function buildViewerMetadataBlocks({ title, asset, ui } = {}) {
     const block = document.createElement("div");
     block.style.cssText = "display:flex; flex-direction:column; gap:10px; margin-bottom: 14px;";
 
-    const h = document.createElement("div");
-    h.textContent = title || "Asset";
-    h.style.cssText = "font-size: 12px; font-weight: 600; letter-spacing: 0.02em; color: rgba(255,255,255,0.86);";
-    block.appendChild(h);
+    if (title) {
+        const h = document.createElement("div");
+        h.textContent = title;
+        h.style.cssText = "font-size: 12px; font-weight: 600; letter-spacing: 0.02em; color: rgba(255,255,255,0.86);";
+        block.appendChild(h);
+    }
 
     const status = getGenInfoStatus(asset);
     if (ui?.loading) {
@@ -343,7 +344,11 @@ export function buildViewerMetadataBlocks({ title, asset, ui } = {}) {
     }
 
     const gen = safeCall(() => createGenerationSection(asset), null);
-    const wf = safeCall(() => createWorkflowMinimapSection(asset), null);
+    
+    let wf = null;
+    if (APP_CONFIG.WORKFLOW_MINIMAP_ENABLED !== false) {
+        wf = safeCall(() => createWorkflowMinimapSection(asset), null);
+    }
 
     if (gen) block.appendChild(gen);
     if (wf) block.appendChild(wf);

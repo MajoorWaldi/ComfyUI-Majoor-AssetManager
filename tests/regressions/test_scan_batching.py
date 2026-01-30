@@ -1,8 +1,10 @@
+import pytest
 import contextlib
 from pathlib import Path
 
 
-def test_scan_uses_batched_transactions(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_scan_uses_batched_transactions(tmp_path: Path):
     """
     Large scans should not BEGIN/COMMIT per file.
 
@@ -12,7 +14,7 @@ def test_scan_uses_batched_transactions(tmp_path: Path):
     from backend.deps import build_services
 
     db_path = tmp_path / "batching.db"
-    services = build_services(db_path=str(db_path))
+    services = await build_services(db_path=str(db_path))
     index = services["index"]
     db = services["db"]
 
@@ -36,7 +38,7 @@ def test_scan_uses_batched_transactions(tmp_path: Path):
 
     db.transaction = counted_transaction  # type: ignore[assignment]
     try:
-        res = index.scan_directory(
+        res = await index.scan_directory(
             str(scan_dir),
             recursive=False,
             incremental=False,
@@ -54,6 +56,6 @@ def test_scan_uses_batched_transactions(tmp_path: Path):
     assert txn_calls["count"] <= 6
     assert txn_calls["count"] < len(files)
 
-    c = db.query("SELECT COUNT(*) as c FROM assets")
+    c = await db.aquery("SELECT COUNT(*) as c FROM assets")
     assert c.ok
     assert int((c.data or [{}])[0].get("c") or 0) == len(files)

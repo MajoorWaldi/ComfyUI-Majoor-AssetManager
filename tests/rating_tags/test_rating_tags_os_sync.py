@@ -1,3 +1,4 @@
+import pytest
 from pathlib import Path
 
 from backend.features.tags.sync import write_exif_rating_tags
@@ -16,7 +17,8 @@ class _ExifToolCapture:
         return Result.Ok(True)
 
 
-def test_exiftool_payload_contains_windows_and_xmp_fields(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_exiftool_payload_contains_windows_and_xmp_fields(tmp_path: Path):
     f = tmp_path / "video.mp4"
     f.write_bytes(b"x")
 
@@ -40,7 +42,8 @@ def test_exiftool_payload_contains_windows_and_xmp_fields(tmp_path: Path):
     assert "bar" in payload["Microsoft:Category"]
 
 
-def test_exiftool_payload_clears_tags_when_empty(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_exiftool_payload_clears_tags_when_empty(tmp_path: Path):
     f = tmp_path / "image.png"
     f.write_bytes(b"x")
 

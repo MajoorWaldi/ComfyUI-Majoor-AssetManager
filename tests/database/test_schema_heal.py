@@ -1,7 +1,9 @@
+import pytest
 import sqlite3
 
 
-def test_schema_self_heals_missing_columns(tmp_path):
+@pytest.mark.asyncio
+async def test_schema_self_heals_missing_columns(tmp_path):
     from backend.adapters.db.sqlite import Sqlite
     from backend.adapters.db.schema import CURRENT_SCHEMA_VERSION, migrate_schema
 
@@ -44,16 +46,16 @@ def test_schema_self_heals_missing_columns(tmp_path):
 
     db = Sqlite(str(db_path))
     try:
-        result = migrate_schema(db)
+        result = await migrate_schema(db)
         assert result.ok, result.error
 
-        assets_cols = db.query("PRAGMA table_info('assets')")
+        assets_cols = await db.aquery("PRAGMA table_info('assets')")
         assert assets_cols.ok, assets_cols.error
         assets_col_names = {row["name"] for row in (assets_cols.data or [])}
         for name in ["source", "root_id", "subfolder", "width", "height", "duration", "indexed_at"]:
             assert name in assets_col_names
 
-        meta_cols = db.query("PRAGMA table_info('asset_metadata')")
+        meta_cols = await db.aquery("PRAGMA table_info('asset_metadata')")
         assert meta_cols.ok, meta_cols.error
         meta_col_names = {row["name"] for row in (meta_cols.data or [])}
         for name in [
@@ -68,17 +70,17 @@ def test_schema_self_heals_missing_columns(tmp_path):
             assert name in meta_col_names
 
         # Ensure common queries won't crash with "no such column".
-        assert db.query("SELECT source, root_id FROM assets LIMIT 0").ok
-        assert db.query(
+        assert (await db.aquery("SELECT source, root_id FROM assets LIMIT 0")).ok
+        assert (await db.aquery(
             """
             SELECT tags, metadata_raw, has_workflow, has_generation_data, metadata_quality
             FROM asset_metadata
             LIMIT 0
             """
-        ).ok
+        )).ok
     finally:
         try:
-            db.close()
+            await db.aclose()
         except Exception:
             pass
 

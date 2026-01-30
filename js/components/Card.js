@@ -4,6 +4,7 @@
 
 import { buildAssetViewURL } from "../api/endpoints.js";
 import { createFileBadge, createRatingBadge, createTagsBadge, createWorkflowDot } from "./Badges.js";
+import { formatTimestamp, formatDuration, formatDate, formatTime } from "../utils/format.js";
 
 const VIDEO_THUMBS_KEY = "__MJR_VIDEO_THUMBS__";
 const VIDEO_THUMB_MAX_AUTOPLAY = 6;
@@ -336,6 +337,7 @@ export function createAssetCard(asset) {
     }
 
     // Helpful datasets for cross-card behaviors (selection, siblings hide, name collisions).
+    let displayName = asset?.filename || "";
     try {
         const filename = String(asset?.filename || "");
         const ext = (filename.split(".").pop() || "").toUpperCase();
@@ -343,6 +345,8 @@ export function createAssetCard(asset) {
         card.dataset.mjrFilenameKey = filename.trim().toLowerCase();
         card.dataset.mjrExt = ext;
         card.dataset.mjrStem = String(stem || "").trim().toLowerCase();
+        
+        displayName = stem;
     } catch {}
 
     const viewUrl = buildAssetViewURL(asset);
@@ -374,7 +378,7 @@ export function createAssetCard(asset) {
     filenameDiv.title = asset.filename;
 
     const filenameText = document.createElement("span");
-    filenameText.textContent = asset.filename;
+    filenameText.textContent = displayName;
     filenameText.classList.add("mjr-card-filename-text");
 
     filenameDiv.appendChild(filenameText);
@@ -384,6 +388,62 @@ export function createAssetCard(asset) {
     filenameDiv.appendChild(workflowDot);
 
     info.appendChild(filenameDiv);
+
+    // Add metadata/stats row
+    const metaRow = document.createElement("div");
+    metaRow.classList.add("mjr-card-details");
+    
+    // Size / Duration
+    const statsSpan = document.createElement("span");
+    const parts = [];
+    const addPart = (text, className) => {
+        const span = document.createElement("span");
+        span.textContent = text;
+        if (className) span.className = className;
+        statsSpan.appendChild(span);
+        
+        // Add separator if not last (handled by flex gap or pseudo-element in CSS ideally, but here we append text nodes for now)
+        // Actually, let's use a flex container for `statsSpan` or just append a separator node.
+        // The previous code used parts.join(" • "). Let's replicate that structure but with elements.
+    };
+
+    // We will clear statsSpan content first (it's empty by new formatting) but we won't use parts.join anymore.
+    // We want styles: Resolution (blue?), Time (green?), Duration (orange?)
+    
+    const items = [];
+
+    // Resolution / Duration (Video Length)
+    if (asset.duration) {
+        items.push({ text: `(${formatDuration(asset.duration)})`, class: "mjr-meta-duration" }); // Format: (19s)
+    } 
+    if (asset.width && asset.height) {
+         items.push({ text: `${asset.width}x${asset.height}`, class: "mjr-meta-res" });
+    }
+    
+    // Time
+    // Priority: Generation Time (Content) > File Creation (FS) > Modification (FS Mtime) > DB indexed time
+    const timestamp = asset.generation_time || asset.file_creation_time || asset.mtime || asset.created_at;
+    if (timestamp) {
+        // Clear color separation for date and hour
+        items.push({ text: formatDate(timestamp), class: "mjr-meta-date" });
+        items.push({ text: formatTime(timestamp), class: "mjr-meta-time" });
+    }
+
+    items.forEach((item, idx) => {
+        const span = document.createElement("span");
+        span.textContent = item.text;
+        if (item.class) span.classList.add(item.class);
+        statsSpan.appendChild(span);
+        
+        if (idx < items.length - 1) {
+            const sep = document.createTextNode(" • ");
+            statsSpan.appendChild(sep);
+        }
+    });
+    
+    metaRow.appendChild(statsSpan);
+    
+    info.appendChild(metaRow);
 
     card.appendChild(thumb);
     card.appendChild(info);

@@ -1,3 +1,4 @@
+import pytest
 import base64
 import json
 import zlib
@@ -14,7 +15,8 @@ def _prompt_graph():
     }
 
 
-def test_video_extractor_parses_double_encoded_prompt(tmp_path):
+@pytest.mark.asyncio
+async def test_video_extractor_parses_double_encoded_prompt(tmp_path):
     f = tmp_path / "x.mp4"
     f.write_bytes(b"\x00")
 
@@ -28,7 +30,8 @@ def test_video_extractor_parses_double_encoded_prompt(tmp_path):
     assert res.data["prompt"].get("3", {}).get("class_type") == "KSampler"
 
 
-def test_video_extractor_parses_base64_prompt(tmp_path):
+@pytest.mark.asyncio
+async def test_video_extractor_parses_base64_prompt(tmp_path):
     # Create a tiny dummy file so extract_video_metadata passes existence check.
     f = tmp_path / "x.mp4"
     f.write_bytes(b"\x00")
@@ -43,7 +46,8 @@ def test_video_extractor_parses_base64_prompt(tmp_path):
     assert res.data["prompt"].get("3", {}).get("class_type") == "KSampler"
 
 
-def test_video_extractor_parses_zlib_base64_prompt(tmp_path):
+@pytest.mark.asyncio
+async def test_video_extractor_parses_zlib_base64_prompt(tmp_path):
     f = tmp_path / "x.mp4"
     f.write_bytes(b"\x00")
 
@@ -58,7 +62,8 @@ def test_video_extractor_parses_zlib_base64_prompt(tmp_path):
     assert res.data["prompt"].get("4", {}).get("class_type") == "CLIPTextEncode"
 
 
-def test_video_extractor_scans_stream_tags(tmp_path):
+@pytest.mark.asyncio
+async def test_video_extractor_scans_stream_tags(tmp_path):
     f = tmp_path / "x.mp4"
     f.write_bytes(b"\x00")
 

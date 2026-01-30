@@ -6,6 +6,7 @@ import logging
 import os
 import time
 import threading
+import asyncio
 from pathlib import Path
 from typing import List, Dict, Any, Iterable, Optional
 from datetime import datetime
@@ -50,7 +51,7 @@ class IndexScanner:
     and integration with metadata extraction.
     """
 
-    def __init__(self, db: Sqlite, metadata_service: MetadataService, scan_lock: threading.Lock):
+    def __init__(self, db: Sqlite, metadata_service: MetadataService, scan_lock: asyncio.Lock):
         """
         Initialize index scanner.
 
@@ -64,7 +65,7 @@ class IndexScanner:
         self._scan_lock = scan_lock
         self._current_scan_id = None
 
-    def scan_directory(
+    async def scan_directory(
         self,
         directory: str,
         recursive: bool = True,
@@ -90,7 +91,7 @@ class IndexScanner:
             Result with scan statistics
         """
         to_enrich: List[str] = []
-        with self._scan_lock:
+        async with self._scan_lock:
             dir_path = Path(directory)
 
             if not dir_path.exists():
@@ -144,7 +145,7 @@ class IndexScanner:
                     if len(batch) < _stream_batch_target(stats["scanned"]):
                         continue
 
-                    self._scan_stream_batch(
+                    await self._scan_stream_batch(
                         batch=batch,
                         base_dir=directory,
                         incremental=incremental,
@@ -157,7 +158,7 @@ class IndexScanner:
                     batch = []
 
                 if batch:
-                    self._scan_stream_batch(
+                    await self._scan_stream_batch(
                         batch=batch,
                         base_dir=directory,
                         incremental=incremental,
@@ -172,7 +173,7 @@ class IndexScanner:
                 stats["end_time"] = datetime.now().isoformat()
                 duration = time.perf_counter() - scan_start
 
-                MetadataHelpers.set_metadata_value(self.db, "last_scan_end", stats["end_time"])
+                await MetadataHelpers.set_metadata_value(self.db, "last_scan_end", stats["end_time"])
 
                 self._log_scan_event(
                     logging.INFO,
@@ -198,7 +199,7 @@ class IndexScanner:
 
         return Result.Ok(stats)
 
-    def _scan_stream_batch(
+    async def _scan_stream_batch(
         self,
         *,
         batch: List[Path],
@@ -214,11 +215,11 @@ class IndexScanner:
             return
 
         filepaths = [str(p) for p in batch]
-        journal_map = self._get_journal_entries(filepaths) if incremental and filepaths else {}
+        journal_map = (await self._get_journal_entries(filepaths)) if incremental and filepaths else {}
         existing_map: Dict[str, Dict[str, Any]] = {}
 
         if filepaths:
-            existing_rows = self.db.query_in(
+            existing_rows = await self.db.aquery_in(
                 "SELECT filepath, id, mtime FROM assets WHERE {IN_CLAUSE}",
                 "filepath",
                 filepaths,
@@ -229,7 +230,7 @@ class IndexScanner:
                     if fp:
                         existing_map[str(fp)] = row
 
-        self._index_batch(
+        await self._index_batch(
             batch=batch,
             base_dir=base_dir,
             incremental=incremental,
@@ -242,7 +243,7 @@ class IndexScanner:
             to_enrich=to_enrich,
         )
 
-    def index_paths(
+    async def index_paths(
         self,
         paths: List[Path],
         base_dir: str,
@@ -263,7 +264,7 @@ class IndexScanner:
         Returns:
             Result with indexing statistics
         """
-        with self._scan_lock:
+        async with self._scan_lock:
             scan_id = str(uuid4())
             self._current_scan_id = scan_id
             scan_start = time.perf_counter()
@@ -291,11 +292,11 @@ class IndexScanner:
                         continue
 
                     filepaths = [str(p) for p in batch]
-                    journal_map = self._get_journal_entries(filepaths) if incremental and filepaths else {}
+                    journal_map = (await self._get_journal_entries(filepaths)) if incremental and filepaths else {}
                     existing_map: Dict[str, Dict[str, Any]] = {}
 
                     if filepaths:
-                        existing_rows = self.db.query_in(
+                        existing_rows = await self.db.aquery_in(
                             "SELECT filepath, id, mtime FROM assets WHERE {IN_CLAUSE}",
                             "filepath",
                             filepaths,
@@ -306,7 +307,7 @@ class IndexScanner:
                                 if fp:
                                     existing_map[str(fp)] = row
 
-                    self._index_batch(
+                    await self._index_batch(
                         batch=batch,
                         base_dir=base_dir,
                         incremental=incremental,
@@ -325,7 +326,7 @@ class IndexScanner:
                 # Do not update last_scan_end for targeted indexing (DnD, executed events, etc.).
                 # The UI uses last_scan_end to detect *full scans* and reload the grid; updating it
                 # for single-file indexing causes unnecessary grid reloads/flicker.
-                MetadataHelpers.set_metadata_value(self.db, "last_index_end", stats["end_time"])
+                await MetadataHelpers.set_metadata_value(self.db, "last_index_end", stats["end_time"])
 
                 self._log_scan_event(
                     logging.INFO,
@@ -341,7 +342,7 @@ class IndexScanner:
 
         return Result.Ok(stats)
 
-    def _index_batch(
+    async def _index_batch(
         self,
         batch: List[Path],
         base_dir: str,
@@ -372,7 +373,7 @@ class IndexScanner:
 
         if filepaths:
             # Prefetch metadata_cache entries
-            cache_rows = self.db.query_in(
+            cache_rows = await self.db.aquery_in(
                 "SELECT filepath, state_hash, metadata_raw FROM metadata_cache WHERE {IN_CLAUSE}",
                 "filepath",
                 filepaths,
@@ -397,7 +398,7 @@ class IndexScanner:
                         pass
 
             if asset_ids:
-                meta_rows = self.db.query_in(
+                meta_rows = await self.db.aquery_in(
                     "SELECT asset_id FROM asset_metadata WHERE {IN_CLAUSE}",
                     "asset_id",
                     asset_ids,
@@ -421,7 +422,7 @@ class IndexScanner:
                 existing_state = existing_map.get(fp)
 
             # Stat the file
-            stat_result = self._stat_with_retry(file_path)
+            stat_result = await asyncio.to_thread(self._stat_with_retry, file_path)
             if not stat_result[0]:
                 stats["errors"] += 1
                 logger.warning("Failed to stat %s: %s", str(file_path), stat_result[1])
@@ -502,7 +503,7 @@ class IndexScanner:
         # Phase 2: Batch metadata extraction
         if needs_metadata:
             paths_to_extract = [item[0] for item in needs_metadata]
-            batch_metadata = self.metadata.get_metadata_batch([str(p) for p in paths_to_extract], scan_id=self._current_scan_id)
+            batch_metadata = await self.metadata.get_metadata_batch([str(p) for p in paths_to_extract], scan_id=self._current_scan_id)
 
             for file_path, filepath, mtime, size, state_hash, existing_id in needs_metadata:
                 metadata_result = batch_metadata.get(str(file_path))
@@ -554,7 +555,7 @@ class IndexScanner:
         # If the batch fails, fall back to processing items individually
         batch_failed = False
         try:
-            with self.db.transaction(mode="immediate"):
+            async with self.db.atransaction(mode="immediate"):
                 for entry in prepared:
                     action = entry.get("action")
 
@@ -569,7 +570,7 @@ class IndexScanner:
                             stats["skipped"] += 1
                             continue
                         try:
-                            refreshed = MetadataHelpers.refresh_metadata_if_needed(
+                            refreshed = await MetadataHelpers.refresh_metadata_if_needed(
                                 self.db,
                                 int(asset_id),
                                 metadata_result,
@@ -597,7 +598,7 @@ class IndexScanner:
                         cache_store = bool(entry.get("cache_store"))
                         if cache_store:
                             try:
-                                MetadataHelpers.store_metadata_cache(
+                                await MetadataHelpers.store_metadata_cache(
                                     self.db,
                                     entry.get("filepath") or "",
                                     entry.get("state_hash") or "",
@@ -605,7 +606,7 @@ class IndexScanner:
                                 )
                             except Exception:
                                 pass
-                        res = self._update_asset(
+                        res = await self._update_asset(
                             int(asset_id),
                             entry.get("file_path"),
                             int(entry.get("mtime") or 0),
@@ -616,7 +617,7 @@ class IndexScanner:
                             write_metadata=not bool(entry.get("fast")),
                         )
                         if res.ok:
-                            self._write_scan_journal_entry(
+                            await self._write_scan_journal_entry(
                                 entry.get("filepath") or "",
                                 base_dir,
                                 entry.get("state_hash") or "",
@@ -636,7 +637,7 @@ class IndexScanner:
                             stats["errors"] += 1
                             continue
                         cache_store = bool(entry.get("cache_store"))
-                        res = self._add_asset(
+                        res = await self._add_asset(
                             entry.get("filename") or "",
                             entry.get("subfolder") or "",
                             entry.get("filepath") or "",
@@ -652,7 +653,7 @@ class IndexScanner:
                         if res.ok:
                             if cache_store:
                                 try:
-                                    MetadataHelpers.store_metadata_cache(
+                                    await MetadataHelpers.store_metadata_cache(
                                         self.db,
                                         entry.get("filepath") or "",
                                         entry.get("state_hash") or "",
@@ -660,7 +661,7 @@ class IndexScanner:
                                     )
                                 except Exception:
                                     pass
-                            self._write_scan_journal_entry(
+                            await self._write_scan_journal_entry(
                                 entry.get("filepath") or "",
                                 base_dir,
                                 entry.get("state_hash") or "",
@@ -692,7 +693,7 @@ class IndexScanner:
                     continue
 
                 try:
-                    with self.db.transaction(mode="immediate"):
+                    async with self.db.atransaction(mode="immediate"):
                         if action == "refresh":
                             asset_id = entry.get("asset_id")
                             metadata_result = entry.get("metadata_result")
@@ -701,7 +702,7 @@ class IndexScanner:
                                 stats["errors"] -= 1  # Correct the error count
                                 continue
                             try:
-                                refreshed = MetadataHelpers.refresh_metadata_if_needed(
+                                refreshed = await MetadataHelpers.refresh_metadata_if_needed(
                                     self.db,
                                     int(asset_id),
                                     metadata_result,
@@ -730,7 +731,7 @@ class IndexScanner:
                             cache_store = bool(entry.get("cache_store"))
                             if cache_store:
                                 try:
-                                    MetadataHelpers.store_metadata_cache(
+                                    await MetadataHelpers.store_metadata_cache(
                                         self.db,
                                         entry.get("filepath") or "",
                                         entry.get("state_hash") or "",
@@ -738,7 +739,7 @@ class IndexScanner:
                                     )
                                 except Exception:
                                     pass
-                            res = self._update_asset(
+                            res = await self._update_asset(
                                 int(asset_id),
                                 entry.get("file_path"),
                                 int(entry.get("mtime") or 0),
@@ -749,7 +750,7 @@ class IndexScanner:
                                 write_metadata=not bool(entry.get("fast")),
                             )
                             if res.ok:
-                                self._write_scan_journal_entry(
+                                await self._write_scan_journal_entry(
                                     entry.get("filepath") or "",
                                     base_dir,
                                     entry.get("state_hash") or "",
@@ -770,7 +771,7 @@ class IndexScanner:
                                 stats["errors"] += 1  # Keep as error
                                 continue
                             cache_store = bool(entry.get("cache_store"))
-                            res = self._add_asset(
+                            res = await self._add_asset(
                                 entry.get("filename") or "",
                                 entry.get("subfolder") or "",
                                 entry.get("filepath") or "",
@@ -786,7 +787,7 @@ class IndexScanner:
                             if res.ok:
                                 if cache_store:
                                     try:
-                                        MetadataHelpers.store_metadata_cache(
+                                        await MetadataHelpers.store_metadata_cache(
                                             self.db,
                                             entry.get("filepath") or "",
                                             entry.get("state_hash") or "",
@@ -794,7 +795,7 @@ class IndexScanner:
                                         )
                                     except Exception:
                                         pass
-                                self._write_scan_journal_entry(
+                                await self._write_scan_journal_entry(
                                     entry.get("filepath") or "",
                                     base_dir,
                                     entry.get("state_hash") or "",
@@ -817,7 +818,7 @@ class IndexScanner:
                     logger.warning("Individual processing failed for entry: %s. Error: %s", str(entry.get("filepath", "unknown")), str(individual_error))
                     # Error count is already correct
 
-    def _prepare_index_entry(
+    async def _prepare_index_entry(
         self,
         file_path: Path,
         base_dir: str,
@@ -831,7 +832,7 @@ class IndexScanner:
         Prepare indexing work for a file (stat + incremental decision + metadata extraction),
         but do not write to the DB. DB writes are applied in a batch transaction.
         """
-        stat_result = self._stat_with_retry(file_path)
+        stat_result = await asyncio.to_thread(self._stat_with_retry, file_path)
         if not stat_result[0]:
             return Result.Err("STAT_FAILED", f"Failed to stat file: {stat_result[1]}")
         stat = stat_result[1]
@@ -865,7 +866,7 @@ class IndexScanner:
 
         # If incremental and unchanged, try cached metadata first.
         if incremental and existing_id and existing_mtime == mtime:
-            cached_metadata = MetadataHelpers.retrieve_cached_metadata(self.db, filepath, state_hash)
+            cached_metadata = await MetadataHelpers.retrieve_cached_metadata(self.db, filepath, state_hash)
             if cached_metadata and cached_metadata.ok:
                 return Result.Ok(
                     {
@@ -882,7 +883,7 @@ class IndexScanner:
                     }
                 )
 
-            meta_row = self.db.query("SELECT 1 FROM asset_metadata WHERE asset_id = ? LIMIT 1", (existing_id,))
+            meta_row = await self.db.aquery("SELECT 1 FROM asset_metadata WHERE asset_id = ? LIMIT 1", (existing_id,))
             if meta_row.ok and meta_row.data:
                 return Result.Ok({"action": "skipped"})
 
@@ -891,7 +892,7 @@ class IndexScanner:
         if fast:
             metadata_result: Result[Dict[str, Any]] = Result.Ok({})
         else:
-            metadata_result = self.metadata.get_metadata(filepath, scan_id=self._current_scan_id)
+            metadata_result = await self.metadata.get_metadata(filepath, scan_id=self._current_scan_id)
             if metadata_result.ok:
                 cache_store = True
             if not metadata_result.ok:
@@ -1081,8 +1082,8 @@ class IndexScanner:
             h.update(b"\x00")
         return h.hexdigest()
 
-    def _get_journal_entry(self, filepath: str) -> Optional[Dict[str, Any]]:
-        result = self.db.query(
+    async def _get_journal_entry(self, filepath: str) -> Optional[Dict[str, Any]]:
+        result = await self.db.aquery(
             "SELECT state_hash FROM scan_journal WHERE filepath = ?",
             (filepath,)
         )
@@ -1090,7 +1091,7 @@ class IndexScanner:
             return None
         return result.data[0]
 
-    def _get_journal_entries(self, filepaths: List[str]) -> Dict[str, str]:
+    async def _get_journal_entries(self, filepaths: List[str]) -> Dict[str, str]:
         """
         Batch lookup scan_journal state_hash for a list of filepaths.
         Returns {filepath: state_hash}.
@@ -1100,7 +1101,7 @@ class IndexScanner:
             return {}
         if len(cleaned) > MAX_SCAN_JOURNAL_LOOKUP:
             cleaned = cleaned[:MAX_SCAN_JOURNAL_LOOKUP]
-        res = self.db.query_in(
+        res = await self.db.aquery_in(
             "SELECT filepath, state_hash FROM scan_journal WHERE {IN_CLAUSE}",
             "filepath",
             cleaned,
@@ -1117,7 +1118,7 @@ class IndexScanner:
                 out[str(fp)] = str(sh)
         return out
 
-    def _write_scan_journal_entry(
+    async def _write_scan_journal_entry(
         self,
         filepath: str,
         base_dir: str,
@@ -1126,7 +1127,7 @@ class IndexScanner:
         size: int
     ) -> Result[Any]:
         dir_path = str(Path(base_dir).resolve())
-        return self.db.execute(
+        return await self.db.aexecute(
             """
             INSERT OR REPLACE INTO scan_journal
             (filepath, dir_path, state_hash, mtime, size, last_seen)
@@ -1147,7 +1148,7 @@ class IndexScanner:
                 logger.warning("Failed to stat %s after retries: %s", file_path, exc)
                 return False, exc
 
-    def _index_file(
+    async def _index_file(
         self,
         file_path: Path,
         base_dir: str,
@@ -1172,7 +1173,7 @@ class IndexScanner:
         Returns:
             Result with action taken (added, updated, skipped)
         """
-        stat_result = self._stat_with_retry(file_path)
+        stat_result = await asyncio.to_thread(self._stat_with_retry, file_path)
         if not stat_result[0]:
             return Result.Err("STAT_FAILED", f"Failed to stat file: {stat_result[1]}")
         stat = stat_result[1]
@@ -1189,7 +1190,7 @@ class IndexScanner:
         if isinstance(existing_state, dict) and "journal_state_hash" in existing_state:
             journal_state_hash = existing_state.get("journal_state_hash")
         else:
-            journal_entry = self._get_journal_entry(filepath)
+            journal_entry = await self._get_journal_entry(filepath)
             journal_state_hash = journal_entry.get("state_hash") if isinstance(journal_entry, dict) else None
 
         if incremental and journal_state_hash and str(journal_state_hash) == state_hash:
@@ -1200,7 +1201,7 @@ class IndexScanner:
         if isinstance(existing_state, dict) and existing_state.get("id") is not None:
             existing_asset = existing_state
         else:
-            existing = self.db.query(
+            existing = await self.db.aquery(
                 "SELECT id, mtime FROM assets WHERE filepath = ?",
                 (filepath,)
             )
@@ -1218,11 +1219,11 @@ class IndexScanner:
 
             if incremental and existing_mtime == mtime and existing_id:
                 # Prefer cached metadata; it's cheap and avoids rerunning tools.
-                cached_metadata = MetadataHelpers.retrieve_cached_metadata(self.db, filepath, state_hash)
+                cached_metadata = await MetadataHelpers.retrieve_cached_metadata(self.db, filepath, state_hash)
                 if cached_metadata and cached_metadata.ok:
                     refreshed = False
-                    with self.db.transaction(mode="immediate"):
-                        refreshed = MetadataHelpers.refresh_metadata_if_needed(
+                    async with self.db.atransaction(mode="immediate"):
+                        refreshed = await MetadataHelpers.refresh_metadata_if_needed(
                             self.db,
                             existing_id,
                             cached_metadata,
@@ -1234,12 +1235,12 @@ class IndexScanner:
                             self._write_scan_journal_entry,
                         )
                         if refreshed:
-                            self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
+                            await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
                     action = "skipped_refresh" if refreshed else "skipped"
                     return Result.Ok({"action": action})
 
                 # If we already have a metadata row, don't rerun tools just for an incremental pass.
-                meta_row = self.db.query("SELECT 1 FROM asset_metadata WHERE asset_id = ? LIMIT 1", (existing_id,))
+                meta_row = await self.db.aquery("SELECT 1 FROM asset_metadata WHERE asset_id = ? LIMIT 1", (existing_id,))
                 if meta_row.ok and meta_row.data:
                     return Result.Ok({"action": "skipped"})
 
@@ -1247,7 +1248,7 @@ class IndexScanner:
         if fast:
             metadata_result = Result.Ok({})
         else:
-            metadata_result = self.metadata.get_metadata(filepath, scan_id=self._current_scan_id)
+            metadata_result = await self.metadata.get_metadata(filepath, scan_id=self._current_scan_id)
             if metadata_result.ok:
                 quality = metadata_result.meta.get("quality", "full")
                 if quality in ("degraded", "partial"):
@@ -1256,7 +1257,7 @@ class IndexScanner:
                         file_path,
                         quality,
                     )
-                MetadataHelpers.store_metadata_cache(self.db, filepath, state_hash, metadata_result)
+                await MetadataHelpers.store_metadata_cache(self.db, filepath, state_hash, metadata_result)
 
         if not metadata_result.ok:
             if metadata_result.code == ErrorCode.FFPROBE_ERROR:
@@ -1296,8 +1297,8 @@ class IndexScanner:
             if incremental and existing_mtime == mtime and existing_id:
                 refreshed = False
                 # Keep write transactions short: metadata extraction is already done.
-                with self.db.transaction(mode="immediate"):
-                    refreshed = MetadataHelpers.refresh_metadata_if_needed(
+                async with self.db.atransaction(mode="immediate"):
+                    refreshed = await MetadataHelpers.refresh_metadata_if_needed(
                         self.db,
                         existing_id,
                         metadata_result,
@@ -1309,14 +1310,14 @@ class IndexScanner:
                         self._write_scan_journal_entry,
                     )
                     if refreshed:
-                        self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
+                        await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
                 action = "skipped_refresh" if refreshed else "skipped"
                 return Result.Ok({"action": action})
 
             # Update existing asset
             if existing_id:
-                with self.db.transaction(mode="immediate"):
-                    result = self._update_asset(
+                async with self.db.atransaction(mode="immediate"):
+                    result = await self._update_asset(
                         existing_id,
                         file_path,
                         mtime,
@@ -1327,12 +1328,12 @@ class IndexScanner:
                         write_metadata=(not fast),
                     )
                     if result.ok:
-                        self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
+                        await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
                 return result
 
         # Add new asset
-        with self.db.transaction(mode="immediate"):
-            result = self._add_asset(
+        async with self.db.atransaction(mode="immediate"):
+            result = await self._add_asset(
                 filename,
                 subfolder,
                 filepath,
@@ -1346,10 +1347,10 @@ class IndexScanner:
                 write_metadata=True,
             )
             if result.ok:
-                self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
+                await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
         return result
 
-    def _add_asset(
+    async def _add_asset(
         self,
         filename: str,
         subfolder: str,
@@ -1377,7 +1378,7 @@ class IndexScanner:
             duration = meta.get("duration")
 
         # Insert into assets table (NO workflow fields here)
-        insert_result = self.db.execute(
+        insert_result = await self.db.aexecute(
             """
             INSERT INTO assets
             (filename, subfolder, filepath, source, root_id, kind, ext, width, height, duration, size, mtime)
@@ -1406,7 +1407,7 @@ class IndexScanner:
         if not asset_id:
             return Result.Err("INSERT_FAILED", "Failed to get inserted asset ID")
         if write_metadata:
-            metadata_write = MetadataHelpers.write_asset_metadata_row(self.db, asset_id, metadata_result)
+            metadata_write = await MetadataHelpers.write_asset_metadata_row(self.db, asset_id, metadata_result)
             if not metadata_write.ok:
                 self._log_scan_event(
                     logging.WARNING,
@@ -1418,7 +1419,7 @@ class IndexScanner:
 
         return Result.Ok({"action": "added"})
 
-    def _update_asset(
+    async def _update_asset(
         self,
         asset_id: int,
         file_path: Path,
@@ -1443,7 +1444,7 @@ class IndexScanner:
             duration = meta.get("duration")
 
         # Update assets table (NO workflow fields)
-        update_result = self.db.execute(
+        update_result = await self.db.aexecute(
             """
             UPDATE assets
             SET width = COALESCE(?, width),
@@ -1461,7 +1462,7 @@ class IndexScanner:
             return Result.Err("UPDATE_FAILED", update_result.error)
 
         if write_metadata:
-            metadata_write = MetadataHelpers.write_asset_metadata_row(self.db, asset_id, metadata_result)
+            metadata_write = await MetadataHelpers.write_asset_metadata_row(self.db, asset_id, metadata_result)
             if not metadata_write.ok:
                 self._log_scan_event(
                     logging.WARNING,

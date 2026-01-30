@@ -4,7 +4,8 @@ import pytest
 from backend.features.geninfo.parser import parse_geninfo_from_prompt
 
 
-def test_geninfo_parser_extracts_basic_fields():
+@pytest.mark.asyncio
+async def test_geninfo_parser_extracts_basic_fields():
     # Minimal Comfy prompt graph: Checkpoint -> CLIPTextEncode -> KSampler -> SaveImage
     prompt = {
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "sdxl.safetensors"}},
@@ -47,14 +48,16 @@ def test_geninfo_parser_extracts_basic_fields():
     assert gi["size"]["height"] == 1024
 
 
-def test_geninfo_parser_returns_none_when_no_sink():
+@pytest.mark.asyncio
+async def test_geninfo_parser_returns_none_when_no_sink():
     prompt = {"1": {"class_type": "KSampler", "inputs": {"seed": 1}}}
     res = parse_geninfo_from_prompt(prompt)
     assert res.ok
     assert res.data is None
 
 
-def test_geninfo_parser_video_sink_and_sdxl_text_fields():
+@pytest.mark.asyncio
+async def test_geninfo_parser_video_sink_and_sdxl_text_fields():
     # Typical video pipelines use VHS_* sinks and SDXL text encode nodes.
     prompt = {
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "video_model.safetensors"}},
@@ -92,7 +95,8 @@ def test_geninfo_parser_video_sink_and_sdxl_text_fields():
     assert gi["size"]["width"] == 768
 
 
-def test_geninfo_parser_collects_prompts_through_conditioning_nodes():
+@pytest.mark.asyncio
+async def test_geninfo_parser_collects_prompts_through_conditioning_nodes():
     # Positive/negative passed through Conditioning* composition nodes should still extract texts.
     prompt = {
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "sdxl.safetensors"}},
@@ -131,7 +135,8 @@ def test_geninfo_parser_collects_prompts_through_conditioning_nodes():
     assert gi["positive"]["value"].strip() != gi["negative"]["value"].strip()
 
 
-def test_geninfo_parser_keeps_positive_negative_separate_through_passthrough_nodes():
+@pytest.mark.asyncio
+async def test_geninfo_parser_keeps_positive_negative_separate_through_passthrough_nodes():
     # Some video pipelines route conditioning through non-Conditioning nodes that expose
     # `positive`/`negative` inputs (ex: Wan/VHS helper nodes). We must not mix branches.
     prompt = {
@@ -165,7 +170,8 @@ def test_geninfo_parser_keeps_positive_negative_separate_through_passthrough_nod
     assert gi["negative"]["value"].strip() == "NEG ONLY"
 
 
-def test_geninfo_parser_prefers_savevideo_over_previewimage():
+@pytest.mark.asyncio
+async def test_geninfo_parser_prefers_savevideo_over_previewimage():
     # Some video graphs include both PreviewImage and SaveVideo sinks; prefer SaveVideo.
     prompt = {
         "10": {"class_type": "CLIPLoader", "inputs": {"clip_name": "clip.safetensors"}},
@@ -200,7 +206,8 @@ def test_geninfo_parser_prefers_savevideo_over_previewimage():
     assert res.data.get("negative", {}).get("value") == "NEG"
 
 
-def test_geninfo_parser_handles_wan_video_text_embeds_and_sampler():
+@pytest.mark.asyncio
+async def test_geninfo_parser_handles_wan_video_text_embeds_and_sampler():
     # Wan stacks: sampler is WanVideoSampler; prompts live in WanVideoTextEncode and flow via `text_embeds`.
     prompt = {
         "10": {"class_type": "WanVideoModelLoader", "inputs": {"model_name": "WanVideo\\Wan2_1-T2V-14B-Phantom_fp8_e4m3fn_scaled_KJ.safetensors"}},
@@ -222,7 +229,8 @@ def test_geninfo_parser_handles_wan_video_text_embeds_and_sampler():
     assert gi["seed"]["value"] == 1234
 
 
-def test_geninfo_parser_follows_rgthree_switch_nodes_for_model_chain_and_power_lora_loader():
+@pytest.mark.asyncio
+async def test_geninfo_parser_follows_rgthree_switch_nodes_for_model_chain_and_power_lora_loader():
     # Some real graphs (rgthree) insert switch/select nodes between the sampler model input
     # and the actual model loader. Ensure we traverse these to recover a checkpoint/unet name.
     prompt = {
@@ -265,7 +273,8 @@ def test_geninfo_parser_follows_rgthree_switch_nodes_for_model_chain_and_power_l
     assert gi["loras"][0]["name"] == "my_lora_v1"
 
 
-def test_geninfo_parser_supports_non_numeric_node_ids_in_links():
+@pytest.mark.asyncio
+async def test_geninfo_parser_supports_non_numeric_node_ids_in_links():
     # Some exporters encode prompt node ids like "57:35". Links should still resolve.
     prompt = {
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "sdxl.safetensors"}},
@@ -297,7 +306,8 @@ def test_geninfo_parser_supports_non_numeric_node_ids_in_links():
     assert res.data.get("negative", {}).get("value") == "NEG"
 
 
-def test_geninfo_parser_resolves_linked_text_inputs_for_clip_text_encode():
+@pytest.mark.asyncio
+async def test_geninfo_parser_resolves_linked_text_inputs_for_clip_text_encode():
     # Some nodes provide the prompt text through a linked "string" node.
     prompt = {
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "model.safetensors"}},
@@ -328,7 +338,8 @@ def test_geninfo_parser_resolves_linked_text_inputs_for_clip_text_encode():
     assert res.data is not None
     assert "prompt from link" in res.data.get("positive", {}).get("value", "")
 
-def test_geninfo_parser_handles_sampler_custom_advanced_flux_pipeline():
+@pytest.mark.asyncio
+async def test_geninfo_parser_handles_sampler_custom_advanced_flux_pipeline():
     # Flux pipelines can use SamplerCustomAdvanced + BasicScheduler + KSamplerSelect + RandomNoise.
     prompt = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux1-dev.safetensors"}},
@@ -363,7 +374,8 @@ def test_geninfo_parser_handles_sampler_custom_advanced_flux_pipeline():
     assert "clip_l" in gi["models"]["clip"]["name"]
 
 
-def test_geninfo_parser_falls_back_to_global_sampler_when_sink_unlinked():
+@pytest.mark.asyncio
+async def test_geninfo_parser_falls_back_to_global_sampler_when_sink_unlinked():
     # Some graphs embed a full prompt graph but the saved output branch may be a different node chain.
     # We still want a best-effort extraction from the sampler node present in the graph.
     prompt = {
@@ -397,7 +409,8 @@ def test_geninfo_parser_falls_back_to_global_sampler_when_sink_unlinked():
     assert res.data["checkpoint"]["name"] == "model"
 
 
-def test_geninfo_parser_extracts_prompts_from_conditioning_text_nodes():
+@pytest.mark.asyncio
+async def test_geninfo_parser_extracts_prompts_from_conditioning_text_nodes():
     # Custom nodes can output CONDITIONING directly with a `text` field but no `clip` link.
     prompt = {
         "10": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "m.safetensors"}},
@@ -425,7 +438,8 @@ def test_geninfo_parser_extracts_prompts_from_conditioning_text_nodes():
     assert res.data["negative"]["value"] == "NEG PROMPT"
 
 
-def test_geninfo_parser_extracts_prompts_from_sampler_string_inputs():
+@pytest.mark.asyncio
+async def test_geninfo_parser_extracts_prompts_from_sampler_string_inputs():
     # Some custom sampler nodes keep prompts as direct string fields.
     prompt = {
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "m.safetensors"}},
@@ -450,7 +464,8 @@ def test_geninfo_parser_extracts_prompts_from_sampler_string_inputs():
     assert "low quality" in res.data["negative"]["value"]
 
 
-def test_geninfo_parser_handles_loadcheckpoint_nodes():
+@pytest.mark.asyncio
+async def test_geninfo_parser_handles_loadcheckpoint_nodes():
     # Some graphs use "LoadCheckpoint" naming rather than CheckpointLoaderSimple.
     prompt = {
         "1": {"class_type": "LoadCheckpoint", "inputs": {"ckpt_name": "my_ckpt.safetensors"}},
@@ -479,7 +494,8 @@ def test_geninfo_parser_handles_loadcheckpoint_nodes():
     assert gi["checkpoint"]["name"] == "my_ckpt"
 
 
-def test_geninfo_parser_traces_checkpoint_through_model_sampling_nodes():
+@pytest.mark.asyncio
+async def test_geninfo_parser_traces_checkpoint_through_model_sampling_nodes():
     # Video stacks often insert ModelSampling* nodes between LoRA and the sampler.
     prompt = {
         "1": {"class_type": "LoadCheckpoint", "inputs": {"ckpt_name": "base_model.safetensors"}},

@@ -32,7 +32,7 @@ class HealthService:
         self.exiftool = exiftool
         self.ffprobe = ffprobe
 
-    def status(self) -> Result[dict]:
+    async def status(self) -> Result[dict]:
         """
         Get system health status.
 
@@ -56,7 +56,7 @@ class HealthService:
             }
 
             # Check database
-            db_status = self._check_database()
+            db_status = await self._check_database()
 
             # Determine overall health
             overall = self._determine_health(tools, db_status)
@@ -73,10 +73,10 @@ class HealthService:
             logger.error(f"Health check failed: {e}")
             return Result.Err("HEALTH_CHECK_ERROR", str(e))
 
-    def _check_database(self) -> dict:
+    async def _check_database(self) -> dict:
         """Check database status."""
         try:
-            if not self.db.has_table("metadata"):
+            if not await self.db.ahas_table("metadata"):
                 return {
                     "available": False,
                     "schema_version": 0,
@@ -84,12 +84,12 @@ class HealthService:
                 }
 
             # Try a simple query
-            result = self.db.execute("SELECT COUNT(*) as count FROM metadata", fetch=True)
+            result = await self.db.aexecute("SELECT COUNT(*) as count FROM metadata", fetch=True)
 
             if result.ok:
                 return {
                     "available": True,
-                    "schema_version": self.db.get_schema_version(),
+                    "schema_version": await self.db.aget_schema_version(),
                     "error": None
                 }
             else:
@@ -153,7 +153,7 @@ class HealthService:
             return "1=1", []
         return "(" + " OR ".join(clauses) + ")", params
 
-    def get_counters(self, roots: Optional[Sequence[str]] = None) -> Result[dict]:
+    async def get_counters(self, roots: Optional[Sequence[str]] = None) -> Result[dict]:
         """
         Get database counters.
 
@@ -164,21 +164,21 @@ class HealthService:
             if roots:
                 where_sql, where_params = self._roots_where(roots)
                 # Count total assets
-                total_result = self.db.execute(
+                total_result = await self.db.aexecute(
                     f"SELECT COUNT(*) as count FROM assets a WHERE {where_sql}",
                     tuple(where_params),
                     fetch=True
                 )
 
                 # Count by kind
-                kind_result = self.db.execute(
+                kind_result = await self.db.aexecute(
                     f"SELECT a.kind, COUNT(*) as count FROM assets a WHERE {where_sql} GROUP BY a.kind",
                     tuple(where_params),
                     fetch=True
                 )
 
                 # Count with ratings
-                rated_result = self.db.execute(
+                rated_result = await self.db.aexecute(
                     f"""
                     SELECT COUNT(*) as count
                     FROM asset_metadata m
@@ -190,7 +190,7 @@ class HealthService:
                 )
 
                 # Count with workflows
-                workflow_result = self.db.execute(
+                workflow_result = await self.db.aexecute(
                     f"""
                     SELECT COUNT(*) as count
                     FROM asset_metadata m
@@ -202,7 +202,7 @@ class HealthService:
                 )
 
                 # Count with generation data
-                generation_result = self.db.execute(
+                generation_result = await self.db.aexecute(
                     f"""
                     SELECT COUNT(*) as count
                     FROM asset_metadata m
@@ -214,36 +214,36 @@ class HealthService:
                 )
             else:
                 # Count total assets
-                total_result = self.db.execute(
+                total_result = await self.db.aexecute(
                     "SELECT COUNT(*) as count FROM assets",
                     fetch=True
                 )
 
                 # Count by kind
-                kind_result = self.db.execute(
+                kind_result = await self.db.aexecute(
                     "SELECT kind, COUNT(*) as count FROM assets GROUP BY kind",
                     fetch=True
                 )
 
                 # Count with ratings
-                rated_result = self.db.execute(
+                rated_result = await self.db.aexecute(
                     "SELECT COUNT(*) as count FROM asset_metadata WHERE rating > 0",
                     fetch=True
                 )
 
                 # Count with workflows
-                workflow_result = self.db.execute(
+                workflow_result = await self.db.aexecute(
                     "SELECT COUNT(*) as count FROM asset_metadata WHERE has_workflow = 1",
                     fetch=True
                 )
 
                 # Count with generation data
-                generation_result = self.db.execute(
+                generation_result = await self.db.aexecute(
                     "SELECT COUNT(*) as count FROM asset_metadata WHERE has_generation_data = 1",
                     fetch=True
                 )
 
-            last_scan_result = self.db.execute(
+            last_scan_result = await self.db.aexecute(
                 "SELECT value FROM metadata WHERE key = 'last_scan_end'",
                 fetch=True
             )

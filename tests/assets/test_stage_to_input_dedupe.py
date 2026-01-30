@@ -1,7 +1,9 @@
+import pytest
 from pathlib import Path
 
 
-def test_files_equal_content(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_files_equal_content(tmp_path: Path):
     from backend.routes.handlers.scan import _files_equal_content
 
     a = tmp_path / "a.bin"
@@ -16,7 +18,8 @@ def test_files_equal_content(tmp_path: Path):
     assert _files_equal_content(a, c) is False
 
 
-def test_resolve_stage_destination_reuses_identical_file(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_resolve_stage_destination_reuses_identical_file(tmp_path: Path):
     from backend.routes.handlers.scan import _resolve_stage_destination
 
     src = tmp_path / "src.bin"
@@ -33,7 +36,8 @@ def test_resolve_stage_destination_reuses_identical_file(tmp_path: Path):
     assert resolved.path == existing
 
 
-def test_resolve_stage_destination_increments_on_conflict(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_resolve_stage_destination_increments_on_conflict(tmp_path: Path):
     from backend.routes.handlers.scan import _resolve_stage_destination
 
     src = tmp_path / "src.bin"

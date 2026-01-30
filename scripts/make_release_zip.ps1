@@ -21,7 +21,12 @@ $excludeDirs = @(
 $excludeFiles = @(
   "node.zip",
   "nul",
-  ".gitmodules"
+  ".gitmodules",
+  "clean_pycache.bat",
+  "check_sync_await_backend.py",
+  "check_sync_await_refined.py",
+  "fix_async_defs.py",
+  "update_filesystem_handlers.py"
 )
 
 function Should-ExcludePath([string]$fullPath) {

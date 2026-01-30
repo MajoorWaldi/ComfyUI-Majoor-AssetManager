@@ -1,9 +1,11 @@
+import pytest
 import json
 
 from backend.features.metadata.extractors import extract_video_metadata
 
 
-def test_video_extractor_parses_itemlist_comment_wrapper(tmp_path):
+@pytest.mark.asyncio
+async def test_video_extractor_parses_itemlist_comment_wrapper(tmp_path):
     video = tmp_path / "phantom_00001.mp4"
     video.write_bytes(b"\x00")
 

@@ -1,6 +1,7 @@
 """
 Test the index service with real files.
 """
+import pytest
 import os
 import sys
 from pathlib import Path
@@ -15,7 +16,8 @@ from backend.deps import build_services
 
 logger = get_logger(__name__)
 
-def test_index_service(tmp_path):
+@pytest.mark.asyncio
+async def test_index_service(tmp_path):
     """Test index service with real directories."""
     logger.info("=" * 60)
     logger.info("Testing Index Service")
@@ -24,14 +26,12 @@ def test_index_service(tmp_path):
     # Build services
     db_path = tmp_path / "test_index.db"
 
-    services = build_services(str(db_path))
+    services = await build_services(str(db_path))
     index_service = services["index"]
-
-    # Test 1: Scan parser directory (contains sample files)
     parser_dir = Path(__file__).parent.parent / "parser"
     logger.info(f"\nTest 1: Scanning {parser_dir}")
 
-    result = index_service.scan_directory(
+    result = await index_service.scan_directory(
         directory=str(parser_dir),
         recursive=True,
         incremental=False
@@ -52,14 +52,12 @@ def test_index_service(tmp_path):
     # Test 2: Search for PNG files
     logger.info("\nTest 2: Search for PNG files")
 
-    result = asyncio.run(index_service.search(
+    result = await index_service.search(
         query="png",
         limit=10,
         filters={"kind": "image"}
-    ))
-
+    )
     if result.ok:
-        log_success(logger, "Search completed!")
         data = result.data
         logger.info(f"  Total results: {data['total']}")
         logger.info(f"  Returned: {len(data['assets'])} assets")
@@ -78,10 +76,10 @@ def test_index_service(tmp_path):
     # Test 3: Search by filename
     logger.info("\nTest 3: Search by filename pattern")
 
-    result = asyncio.run(index_service.search(
+    result = await index_service.search(
         query="test",
         limit=10
-    ))
+    )
 
     if result.ok:
         log_success(logger, "Filename search completed!")
@@ -96,7 +94,7 @@ def test_index_service(tmp_path):
     # Test 4: Get single asset
     logger.info("\nTest 4: Get single asset by ID")
 
-    result = asyncio.run(index_service.get_asset(1))
+    result = await index_service.get_asset(1)
 
     if result.ok:
         asset = result.data
@@ -114,7 +112,7 @@ def test_index_service(tmp_path):
     # Test 5: Incremental scan (should skip unchanged files)
     logger.info("\nTest 5: Incremental scan (should skip unchanged)")
 
-    result = index_service.scan_directory(
+    result = await index_service.scan_directory(
         directory=str(parser_dir),
         recursive=True,
         incremental=True

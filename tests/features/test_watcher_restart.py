@@ -1,7 +1,9 @@
+import pytest
 import time
 
 
-def test_directory_watcher_can_restart_same_instance():
+@pytest.mark.asyncio
+async def test_directory_watcher_can_restart_same_instance():
     from backend.features.index.watcher import DirectoryWatcher
     from backend.shared import Result
 

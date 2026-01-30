@@ -43,11 +43,11 @@ class IndexService:
     for each area of functionality.
     """
 
-    def __init__(self, db: Sqlite, metadata_service: MetadataService):
+    def __init__(self, db: Sqlite, metadata_service: MetadataService, has_tags_text_column: bool = False):
         self.db = db
         self.metadata = metadata_service
-        self._scan_lock = threading.Lock()
-        self._has_tags_text_column = table_has_column(self.db, "asset_metadata", "tags_text")
+        self._scan_lock = asyncio.Lock()
+        self._has_tags_text_column = has_tags_text_column
         logger.debug("asset_metadata.tags_text column available: %s", self._has_tags_text_column)
 
         # Initialize specialized components
@@ -65,7 +65,7 @@ class IndexService:
 
     # ==================== Scanning Operations ====================
 
-    def scan_directory(
+    async def scan_directory(
         self,
         directory: str,
         recursive: bool = True,
@@ -90,7 +90,7 @@ class IndexService:
         Returns:
             Result with scan statistics
         """
-        result = self._scanner.scan_directory(
+        result = await self._scanner.scan_directory(
             directory,
             recursive,
             incremental,
@@ -105,7 +105,7 @@ class IndexService:
             to_enrich = result.data.get("to_enrich", [])
             if to_enrich:
                 try:
-                    self._enricher.start_enrichment(to_enrich)
+                    await self._enricher.start_enrichment(to_enrich)
                 except Exception as exc:
                     logger.debug("Background enrichment start skipped: %s", exc)
                 # Remove from stats as it's internal
@@ -113,7 +113,7 @@ class IndexService:
 
         return result
 
-    def index_paths(
+    async def index_paths(
         self,
         paths: List[Path],
         base_dir: str,
@@ -134,7 +134,7 @@ class IndexService:
         Returns:
             Result with indexing statistics
         """
-        return self._scanner.index_paths(paths, base_dir, incremental, source, root_id)
+        return await self._scanner.index_paths(paths, base_dir, incremental, source, root_id)
 
     # ==================== Search Operations ====================
 

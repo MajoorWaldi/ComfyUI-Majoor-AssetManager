@@ -1,3 +1,7 @@
+"""
+Tests for extracting generation info from A1111 parameters using MetadataService.
+"""
+import pytest
 from pathlib import Path
 
 from backend.features.metadata.service import MetadataService
@@ -5,7 +9,7 @@ from backend.shared import Result
 
 
 class _SettingsStub:
-    def get_probe_backend(self) -> str:  # pragma: no cover
+    async def get_probe_backend(self) -> str:  # pragma: no cover
         return "auto"
 
 
@@ -22,7 +26,8 @@ class _StubFFProbe:
         return Result.Err("FFPROBE_MISSING", "ffprobe not used in this test")
 
 
-def test_metadata_service_builds_geninfo_from_a1111_parameters(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_metadata_service_builds_geninfo_from_a1111_parameters(tmp_path: Path):
     img = tmp_path / "a1111.png"
     img.write_bytes(b"")
 
@@ -35,7 +40,7 @@ def test_metadata_service_builds_geninfo_from_a1111_parameters(tmp_path: Path):
     exif = {"PNG:Parameters": params}
     svc = MetadataService(exiftool=_StubExifTool(exif), ffprobe=_StubFFProbe(), settings=_SettingsStub())
 
-    res = svc.get_metadata(str(img))
+    res = await svc.get_metadata(str(img))
     assert res.ok, res.error
     data = res.data or {}
 

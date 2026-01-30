@@ -1,7 +1,9 @@
+import pytest
 from tests.repo_root import REPO_ROOT
 
 
-def test_viewer_grid_format_mask_supports_multi_rect() -> None:
+@pytest.mark.asyncio
+async def test_viewer_grid_format_mask_supports_multi_rect() -> None:
     """
     Regression guard: the viewer's "format mask" must work in multi-media modes
     (side-by-side, A/B) and not assume a single rect/media element.
@@ -18,7 +20,8 @@ def test_viewer_grid_format_mask_supports_multi_rect() -> None:
     assert "_drawMaskOutside(ctx," in s
 
 
-def test_viewer_grid_format_mask_can_fallback_per_asset_size() -> None:
+@pytest.mark.asyncio
+async def test_viewer_grid_format_mask_can_fallback_per_asset_size() -> None:
     """
     Regression guard: ensure the mask rect computation can use per-image asset dims
     (important in multi-image modes while processors are still loading).
@@ -35,7 +38,8 @@ def test_viewer_grid_format_mask_can_fallback_per_asset_size() -> None:
     assert "assetHint?.width" in grid_s
 
 
-def test_viewer_close_button_triggers_full_dispose() -> None:
+@pytest.mark.asyncio
+async def test_viewer_close_button_triggers_full_dispose() -> None:
     """
     Regression guard: the top-right close button should fully dispose the viewer
     (not just hide the overlay), to avoid ghost listeners / stuck fixed elements.
@@ -48,7 +52,8 @@ def test_viewer_close_button_triggers_full_dispose() -> None:
     assert "_requestCloseFromButton = () => api.dispose()" in s
 
 
-def test_viewer_default_fit_is_height() -> None:
+@pytest.mark.asyncio
+async def test_viewer_default_fit_is_height() -> None:
     """
     Regression guard: viewer default sizing should be fit-by-height (no tiny images).
     """
@@ -60,7 +65,8 @@ def test_viewer_default_fit_is_height() -> None:
     assert "return { w: Vh * aspect, h: Vh };" in s
 
 
-def test_viewer_hud_is_bbox_only() -> None:
+@pytest.mark.asyncio
+async def test_viewer_hud_is_bbox_only() -> None:
     """
     Regression guard: the viewer HUD should avoid filename overlays, and render the bbox + image WxH
     via the grid overlay (so it follows zoom/pan consistently).
@@ -78,14 +84,16 @@ def test_viewer_hud_is_bbox_only() -> None:
     assert "return `${hw}x${hh}`" in grid_s
 
 
-def test_toolbar_help_popup_avoids_innerhtml() -> None:
+@pytest.mark.asyncio
+async def test_toolbar_help_popup_avoids_innerhtml() -> None:
     toolbar_js = REPO_ROOT / "js" / "features" / "viewer" / "toolbar.js"
     s = toolbar_js.read_text(encoding="utf-8", errors="replace")
 
     assert "helpPop.innerHTML" not in s
 
 
-def test_context_menu_core_hides_on_pointerdown() -> None:
+@pytest.mark.asyncio
+async def test_context_menu_core_hides_on_pointerdown() -> None:
     """
     Regression guard: viewer pan/zoom handlers can preventDefault() and suppress "click";
     menu dismissal must also listen to pointerdown to avoid stuck menus.
@@ -97,14 +105,16 @@ def test_context_menu_core_hides_on_pointerdown() -> None:
     assert 'document.addEventListener(\n        "pointerdown"' in s or 'document.addEventListener("pointerdown"' in s
 
 
-def test_viewer_probe_is_disabled_by_default() -> None:
+@pytest.mark.asyncio
+async def test_viewer_probe_is_disabled_by_default() -> None:
     state_js = REPO_ROOT / "js" / "features" / "viewer" / "state.js"
     s = state_js.read_text(encoding="utf-8", errors="replace")
 
     assert "probeEnabled: false" in s
 
 
-def test_video_sync_extracted_to_shared_module() -> None:
+@pytest.mark.asyncio
+async def test_video_sync_extracted_to_shared_module() -> None:
     viewer_js = REPO_ROOT / "js" / "components" / "Viewer.js"
     sync_js = REPO_ROOT / "js" / "features" / "viewer" / "videoSync.js"
 
@@ -116,7 +126,8 @@ def test_video_sync_extracted_to_shared_module() -> None:
     assert "installFollowerVideoSync" in viewer_js.read_text(encoding="utf-8", errors="replace")
 
 
-def test_viewer_constants_and_processor_utils_exist() -> None:
+@pytest.mark.asyncio
+async def test_viewer_constants_and_processor_utils_exist() -> None:
     const_js = REPO_ROOT / "js" / "features" / "viewer" / "constants.js"
     proc_js = REPO_ROOT / "js" / "features" / "viewer" / "processorUtils.js"
 
@@ -124,7 +135,8 @@ def test_viewer_constants_and_processor_utils_exist() -> None:
     assert proc_js.exists()
 
 
-def test_media_factory_seeds_canvas_natural_size_from_asset() -> None:
+@pytest.mark.asyncio
+async def test_media_factory_seeds_canvas_natural_size_from_asset() -> None:
     mf_js = REPO_ROOT / "js" / "features" / "viewer" / "mediaFactory.js"
     s = mf_js.read_text(encoding="utf-8", errors="replace")
 
@@ -133,7 +145,8 @@ def test_media_factory_seeds_canvas_natural_size_from_asset() -> None:
     assert "canvas._mjrNaturalH" in s
 
 
-def test_listener_audit_fixes_present() -> None:
+@pytest.mark.asyncio
+async def test_listener_audit_fixes_present() -> None:
     toolbar_js = REPO_ROOT / "js" / "features" / "viewer" / "toolbar.js"
     viewer_js = REPO_ROOT / "js" / "components" / "Viewer.js"
     ab_js = REPO_ROOT / "js" / "features" / "viewer" / "abCompare.js"
@@ -160,7 +173,8 @@ def test_listener_audit_fixes_present() -> None:
     assert "_ratingDebounceTimers.clear" in ctx_s
 
 
-def test_codebase_listeners_audit_fixes_present() -> None:
+@pytest.mark.asyncio
+async def test_codebase_listeners_audit_fixes_present() -> None:
     sidebar_js = REPO_ROOT / "js" / "components" / "sidebar" / "SidebarView.js"
     rating_js = REPO_ROOT / "js" / "components" / "RatingEditor.js"
     tags_js = REPO_ROOT / "js" / "components" / "TagsEditor.js"

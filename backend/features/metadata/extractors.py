@@ -351,6 +351,37 @@ def _extract_rating_tags(exif_data: Optional[Dict]) -> tuple[Optional[int], list
     return (rating, deduped)
 
 
+def _extract_date_created(exif_data: Optional[Dict[str, Any]]) -> Optional[str]:
+    """
+    Extract the best candidate for 'Generation Time' (Content Creation) from Exif.
+    """
+    if not exif_data:
+        return None
+    
+    # Priority list for "Date Taken" / "Content Created"
+    candidates = [
+        "ExifIFD:DateTimeOriginal",
+        "ExifIFD:CreateDate",
+        "DateTimeOriginal",
+        "CreateDate",
+        "QuickTime:CreateDate",
+        "QuickTime:CreationDate",
+        "RIFF:DateTimeOriginal",
+        "IPTC:DateCreated",
+        "XMP-photoshop:DateCreated",
+        "Composite:DateTimeCreated"
+    ]
+    
+    for key in candidates:
+        val = exif_data.get(key)
+        if val and isinstance(val, str):
+            # Basic validation/cleaning could happen here
+            # ExifTool usually returns "YYYY:MM:DD HH:MM:SS" or similar
+            return val
+    
+    return None
+
+
 def extract_rating_tags_from_exif(exif_data: Optional[Dict]) -> tuple[Optional[int], list[str]]:
     """
     Public wrapper for rating/tags extraction from ExifTool metadata dict.
@@ -415,6 +446,10 @@ def _apply_common_exif_fields(
         metadata["rating"] = rating
     if tags:
         metadata["tags"] = tags
+
+    date_created = _extract_date_created(exif_data)
+    if date_created:
+        metadata["generation_time"] = date_created
 
 
 def extract_png_metadata(file_path: str, exif_data: Optional[Dict] = None) -> Result[Dict[str, Any]]:

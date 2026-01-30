@@ -5,6 +5,7 @@ from aiohttp import web
 import asyncio
 import json
 import os
+import re
 import subprocess
 import mimetypes
 from pathlib import Path
@@ -47,13 +48,57 @@ MAX_TAG_LENGTH = 100
 MAX_RENAME_LENGTH = 255
 _DEBUG_MODE = os.environ.get("MJR_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
 
+_WINDOWS_RESERVED = {
+    'CON', 'PRN', 'AUX', 'NUL',
+    'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+    'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
+}
+
+def _validate_filename(name: str) -> tuple[bool, str]:
+    """Validate a filename for safety."""
+    if not name or not name.strip():
+        return False, "Filename cannot be empty"
+    
+    name = name.strip()
+    
+    # Check for path separators
+    if "/" in name or "\\" in name:
+        return False, "Filename cannot contain path separators"
+    
+    # Check for null bytes
+    if "\x00" in name:
+        return False, "Filename cannot contain null bytes"
+        
+    # Check for control characters
+    for char in name:
+        if ord(char) < 32:
+            return False, "Filename cannot contain control characters"
+
+    # Check for leading/trailing dots or spaces (Windows)
+    if name.startswith('.') or name.startswith(' '):
+        return False, "Filename cannot start with dot or space"
+    if name.endswith('.') or name.endswith(' '):
+        return False, "Filename cannot end with dot or space"
+            
+    # Check for reserved names (Windows)
+    base = name.split('.')[0].upper()
+    if base in _WINDOWS_RESERVED:
+        return False, "Filename uses a reserved Windows name"
+        
+    return True, ""
+
+
 
 def _safe_error_message(exc: Exception, generic_message: str) -> str:
     if _DEBUG_MODE:
-        try:
-            return f"{generic_message}: {exc}"
-        except Exception:
-            return generic_message
+        # Log full details server-side
+        logger.debug("Debug error details: %s", exc, exc_info=True)
+        # Still sanitize - remove file paths and internal details
+        msg = str(exc)
+        # Remove potential path information (basic heuristic)
+        msg = re.sub(r'[A-Za-z]:\\[^\s]+', '[path]', msg)
+        msg = re.sub(r'/[^\s]+', '[path]', msg)
+        return f"{generic_message}: {msg[:200]}"
     return generic_message
 
 
@@ -175,8 +220,7 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         # Index the file (best-effort) so it gets a stable asset_id.
         try:
             await asyncio.wait_for(
-                asyncio.to_thread(
-                    services["index"].index_paths,
+                services["index"].index_paths(
                     [Path(resolved)],
                     str(base_dir),
                     True,  # incremental
@@ -192,8 +236,7 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
 
         try:
             q = await asyncio.wait_for(
-                asyncio.to_thread(
-                    services["db"].query,
+                services["db"].aquery(
                     "SELECT id FROM assets WHERE filepath = ?",
                     (str(resolved),),
                 ),
@@ -224,7 +267,7 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
             return raw
         return "off"
 
-    def _enqueue_rating_tags_sync(
+    async def _enqueue_rating_tags_sync(
         request: web.Request,
         services: dict,
         asset_id: int,
@@ -239,7 +282,7 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
             return
 
         try:
-            fp_res = db.query("SELECT filepath FROM assets WHERE id = ?", (asset_id,))
+            fp_res = await db.aquery("SELECT filepath FROM assets WHERE id = ?", (asset_id,))
             if not fp_res.ok or not fp_res.data:
                 return
             filepath = fp_res.data[0].get("filepath")
@@ -251,7 +294,7 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         rating = 0
         tags = []
         try:
-            meta_res = db.query("SELECT rating, tags FROM asset_metadata WHERE asset_id = ?", (asset_id,))
+            meta_res = await db.aquery("SELECT rating, tags FROM asset_metadata WHERE asset_id = ?", (asset_id,))
             if meta_res.ok and meta_res.data:
                 row = meta_res.data[0] or {}
                 rating = int(row.get("rating") or 0)
@@ -282,7 +325,7 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         if csrf:
             return _json_response(Result.Err("CSRF", csrf))
 
-        services = _build_services(force=True)
+        services = await _build_services(force=True)
         if services:
             return _json_response(Result.Ok({"reinitialized": True}))
 
@@ -302,11 +345,11 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         if csrf:
             return _json_response(Result.Err("CSRF", csrf))
 
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
-        prefs = _resolve_security_prefs(svc)
+        prefs = await _resolve_security_prefs(svc)
         op = _require_operation_enabled("asset_rating", prefs=prefs)
         if not op.ok:
             return _json_response(op)
@@ -351,7 +394,7 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         except Exception as exc:
             result = Result.Err("UPDATE_FAILED", _safe_error_message(exc, "Failed to update rating"))
         if result.ok:
-            _enqueue_rating_tags_sync(request, svc, asset_id)
+            await _enqueue_rating_tags_sync(request, svc, asset_id)
         return _json_response(result)
 
     @routes.post("/mjr/am/asset/tags")
@@ -367,11 +410,11 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         if csrf:
             return _json_response(Result.Err("CSRF", csrf))
 
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
-        prefs = _resolve_security_prefs(svc)
+        prefs = await _resolve_security_prefs(svc)
         op = _require_operation_enabled("asset_tags", prefs=prefs)
         if not op.ok:
             return _json_response(op)
@@ -432,7 +475,7 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         except Exception as exc:
             result = Result.Err("UPDATE_FAILED", _safe_error_message(exc, "Failed to update tags"))
         if result.ok:
-            _enqueue_rating_tags_sync(request, svc, asset_id)
+            await _enqueue_rating_tags_sync(request, svc, asset_id)
         return _json_response(result)
 
     @routes.post("/mjr/am/open-in-folder")
@@ -446,11 +489,11 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         if csrf:
             return _json_response(Result.Err("CSRF", csrf))
 
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
-        prefs = _resolve_security_prefs(svc)
+        prefs = await _resolve_security_prefs(svc)
         op = _require_operation_enabled("open_in_folder", prefs=prefs)
         if not op.ok:
             return _json_response(op)
@@ -482,7 +525,7 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
             return _json_response(Result.Err("SERVICE_UNAVAILABLE", "Database service unavailable"))
 
         try:
-            res = db.query("SELECT filepath FROM assets WHERE id = ?", (asset_id,))
+            res = await db.aquery("SELECT filepath FROM assets WHERE id = ?", (asset_id,))
             if not res.ok or not res.data:
                 return _json_response(Result.Err("NOT_FOUND", "Asset not found"))
             raw_path = (res.data[0] or {}).get("filepath")
@@ -548,7 +591,7 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
 
         Returns: {"ok": true, "data": ["tag1", "tag2", ...]}
         """
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
@@ -598,11 +641,11 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         if csrf:
             return _json_response(Result.Err("CSRF", csrf))
 
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
-        prefs = _resolve_security_prefs(svc)
+        prefs = await _resolve_security_prefs(svc)
         op = _require_operation_enabled("asset_delete", prefs=prefs)
         if not op.ok:
             return _json_response(op)
@@ -700,11 +743,11 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         if csrf:
             return _json_response(Result.Err("CSRF", csrf))
 
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
-        prefs = _resolve_security_prefs(svc)
+        prefs = await _resolve_security_prefs(svc)
         op = _require_operation_enabled("asset_rename", prefs=prefs)
         if not op.ok:
             return _json_response(op)
@@ -731,14 +774,11 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         except (ValueError, TypeError):
             return _json_response(Result.Err("INVALID_INPUT", "Invalid asset_id"))
 
-        # Sanitize new_name
+        # Sanitize and validate new_name
         new_name = str(new_name).strip()
-        if not new_name:
-            return _json_response(Result.Err("INVALID_INPUT", "New name cannot be empty"))
-
-        # Validate new_name doesn't contain dangerous characters
-        if "/" in new_name or "\\" in new_name:
-            return _json_response(Result.Err("INVALID_INPUT", "New name cannot contain path separators"))
+        valid, msg = _validate_filename(new_name)
+        if not valid:
+            return _json_response(Result.Err("INVALID_INPUT", msg))
 
         if len(new_name) > MAX_RENAME_LENGTH:
             return _json_response(Result.Err("INVALID_INPUT", f"New name is too long (max {MAX_RENAME_LENGTH} chars)"))
@@ -828,11 +868,11 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         if csrf:
             return _json_response(Result.Err("CSRF", csrf))
 
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
-        prefs = _resolve_security_prefs(svc)
+        prefs = await _resolve_security_prefs(svc)
         op = _require_operation_enabled("assets_delete", prefs=prefs)
         if not op.ok:
             return _json_response(op)
@@ -966,42 +1006,65 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
 
 async def download_asset(request: web.Request) -> web.StreamResponse:
     """
-    Télécharger un asset brut (fichier image/vidéo).
-    Query param: filepath (chemin absolu ou relatif validé)
-    """
-    filepath = request.query.get("filepath")
+    Download an asset file by filepath.
 
+    Query param: filepath (absolute path, must be within allowed roots)
+    """
+    # Rate limiting
+    allowed, retry_after = _check_rate_limit(request, "download_asset", max_requests=30, window_seconds=60)
+    if not allowed:
+        return web.Response(status=429, text=f"Rate limit exceeded. Retry after {retry_after}s")
+
+    filepath = request.query.get("filepath")
     if not filepath:
         return web.Response(status=400, text="Missing 'filepath' parameter")
 
-    # Sécurité basique : s'assurer que le fichier existe
-    if not os.path.exists(filepath) or not os.path.isfile(filepath):
+    # Normalize and validate path
+    candidate = _normalize_path(filepath)
+    if not candidate:
+        return web.Response(status=400, text="Invalid filepath")
+
+    # Check path is within allowed roots
+    if not (_is_path_allowed(candidate) or _is_path_allowed_custom(candidate)):
+        return web.Response(status=403, text="Path not within allowed directories")
+
+    # Strict resolution to prevent symlink escapes
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
         return web.Response(status=404, text="File not found")
 
-    # Deviner le type MIME
-    mime_type, _ = mimetypes.guess_type(filepath)
+    if not resolved.is_file():
+        return web.Response(status=404, text="File not found")
+
+    # Re-validate after resolution (symlink could escape)
+    if not (_is_path_allowed(resolved) or _is_path_allowed_custom(resolved)):
+        return web.Response(status=403, text="Path escapes allowed directories")
+
+    # Determine content type
+    mime_type, _ = mimetypes.guess_type(str(resolved))
     if mime_type is None:
         mime_type = "application/octet-stream"
 
-    filename = os.path.basename(filepath)
+    # Sanitize filename for Content-Disposition header
+    filename = resolved.name.replace('"', '').replace('\r', '').replace('\n', '')[:255]
 
-    # Préparer la réponse en streaming
     response = web.StreamResponse()
     response.headers["Content-Type"] = mime_type
     response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
 
-    await response.prepare(request)
-
     try:
-        with open(filepath, "rb") as f:
+        await response.prepare(request)
+        with open(resolved, "rb") as f:
             while True:
-                chunk = f.read(8192) # Lire par blocs de 8KB
+                chunk = f.read(8192)
                 if not chunk:
                     break
                 await response.write(chunk)
     except Exception as e:
-        get_logger(__name__).error(f"Error streaming file {filepath}: {e}")
-        return web.Response(status=500, text="Error streaming file")
+        logger.error(f"Error streaming file {filepath}: {e}")
+        # Cannot return a new response after prepare()
+        return response
 
     return response
 

@@ -20,8 +20,14 @@ async def test_list_output_falls_back_to_filesystem_when_db_empty(monkeypatch, t
     import backend.routes.handlers.search as mod
 
     monkeypatch.setattr(mod, "OUTPUT_ROOT", str(out_root), raising=True)
-    monkeypatch.setattr(mod, "_require_services", lambda: ({"index": _FakeIndex()}, None), raising=True)
-    monkeypatch.setattr(mod, "_kickoff_background_scan", lambda *_a, **_k: None, raising=True)
+    
+    async def _mock_require_services():
+        return ({"index": _FakeIndex()}, None)
+        
+    monkeypatch.setattr(mod, "_require_services", _mock_require_services, raising=True)
+    async def _mock_kickoff(*a, **k):
+        return None
+    monkeypatch.setattr(mod, "_kickoff_background_scan", _mock_kickoff, raising=True)
 
     routes = web.RouteTableDef()
     register_search_routes(routes)

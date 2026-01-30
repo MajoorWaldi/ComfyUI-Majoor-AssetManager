@@ -82,6 +82,13 @@ input/
 
 # Local utility scripts
 clean_pycache.bat
+check_sync_await_backend.py
+check_sync_await_refined.py
+fix_async_defs.py
+update_filesystem_handlers.py
+
+# Jupyter Notebooks (scratchpads)
+*.ipynb
 
 # Build artifacts
 node.zip

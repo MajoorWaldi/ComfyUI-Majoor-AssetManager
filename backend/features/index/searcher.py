@@ -10,15 +10,22 @@ from typing import Optional, List, Dict, Any, Tuple
 
 from ...shared import get_logger, Result
 from ...adapters.db.sqlite import Sqlite
+from ...config import (
+    SEARCH_MAX_QUERY_LENGTH,
+    SEARCH_MAX_TOKENS,
+    SEARCH_MAX_TOKEN_LENGTH,
+    SEARCH_MAX_BATCH_IDS,
+    SEARCH_MAX_FILEPATH_LOOKUP
+)
 
 
 logger = get_logger(__name__)
 
-MAX_SEARCH_QUERY_LENGTH = 512
-MAX_SEARCH_TOKENS = 16
-MAX_TOKEN_LENGTH = 64
-MAX_ASSET_BATCH_IDS = 200
-MAX_FILEPATH_LOOKUP = 5000
+MAX_SEARCH_QUERY_LENGTH = SEARCH_MAX_QUERY_LENGTH
+MAX_SEARCH_TOKENS = SEARCH_MAX_TOKENS
+MAX_TOKEN_LENGTH = SEARCH_MAX_TOKEN_LENGTH
+MAX_ASSET_BATCH_IDS = SEARCH_MAX_BATCH_IDS
+MAX_FILEPATH_LOOKUP = SEARCH_MAX_FILEPATH_LOOKUP
 
 
 def _build_filter_clauses(filters: Optional[Dict[str, Any]], alias: str = "a") -> Tuple[List[str], List[Any]]:
@@ -108,7 +115,10 @@ class IndexSearcher:
                     COALESCE(m.rating, 0) as rating,
                     COALESCE(m.tags, '[]') as tags,
  {metadata_tags_text_clause}                    COALESCE(m.has_workflow, 0) as has_workflow,
-                    COALESCE(m.has_generation_data, 0) as has_generation_metadata
+                    COALESCE(m.has_generation_data, 0) as has_generation_metadata,
+                    json_extract(m.metadata_raw, '$.generation_time') as generation_time,
+                    json_extract(m.metadata_raw, '$.file_info.ctime') as file_creation_time,
+                    json_extract(m.metadata_raw, '$.file_info.birthtime') as file_birth_time
                 FROM assets a
                 LEFT JOIN asset_metadata m ON a.id = m.asset_id
                 WHERE 1=1
@@ -176,6 +186,9 @@ class IndexSearcher:
                     COALESCE(m.tags, '[]') as tags,
  {metadata_tags_text_clause}                    COALESCE(m.has_workflow, 0) as has_workflow,
                     COALESCE(m.has_generation_data, 0) as has_generation_metadata,
+                    json_extract(m.metadata_raw, '$.generation_time') as generation_time,
+                    json_extract(m.metadata_raw, '$.file_info.ctime') as file_creation_time,
+                    json_extract(m.metadata_raw, '$.file_info.birthtime') as file_birth_time,
                     best.rank as rank
                 FROM best
                 JOIN assets a ON best.asset_id = a.id
@@ -321,7 +334,10 @@ class IndexSearcher:
                     COALESCE(m.rating, 0) as rating,
                     COALESCE(m.tags, '[]') as tags,
 {metadata_tags_text_clause}                    COALESCE(m.has_workflow, 0) as has_workflow,
-                    COALESCE(m.has_generation_data, 0) as has_generation_metadata
+                    COALESCE(m.has_generation_data, 0) as has_generation_metadata,
+                    json_extract(m.metadata_raw, '$.generation_time') as generation_time,
+                    json_extract(m.metadata_raw, '$.file_info.ctime') as file_creation_time,
+                    json_extract(m.metadata_raw, '$.file_info.birthtime') as file_birth_time
                 FROM assets a
                 LEFT JOIN asset_metadata m ON a.id = m.asset_id
                 WHERE {roots_clause}
@@ -388,8 +404,9 @@ class IndexSearcher:
                     COALESCE(m.rating, 0) as rating,
                     COALESCE(m.tags, '[]') as tags,
 {metadata_tags_text_clause}                    COALESCE(m.has_workflow, 0) as has_workflow,
-                    COALESCE(m.has_generation_data, 0) as has_generation_metadata,
-                    best.rank as rank
+                    COALESCE(m.has_generation_data, 0) as has_generation_metadata,                    json_extract(m.metadata_raw, '$.generation_time') as generation_time,
+                    json_extract(m.metadata_raw, '$.file_info.ctime') as file_creation_time,
+                    json_extract(m.metadata_raw, '$.file_info.birthtime') as file_birth_time,                    best.rank as rank
                 FROM best
                 JOIN assets a ON best.asset_id = a.id
                 LEFT JOIN asset_metadata m ON a.id = m.asset_id

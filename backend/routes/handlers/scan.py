@@ -275,7 +275,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
             recursive: Scan subdirectories (default: true)
             incremental: Only update changed files (default: true)
         """
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
@@ -329,8 +329,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                 background_metadata = bool(body.get("background_metadata") or body.get("enrich_metadata") or body.get("enqueue_metadata"))
                 try:
                     out_res = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            svc["index"].scan_directory,
+                        svc['index'].scan_directory(
                             str(Path(OUTPUT_ROOT).resolve()),
                             recursive,
                             incremental,
@@ -342,8 +341,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                         timeout=TO_THREAD_TIMEOUT_S,
                     )
                     in_res = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            svc["index"].scan_directory,
+                        svc['index'].scan_directory(
                             str(Path(folder_paths.get_input_directory()).resolve()),
                             recursive,
                             incremental,
@@ -434,8 +432,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
         try:
             try:
                 result = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        svc["index"].scan_directory,
+                    svc['index'].scan_directory(
                         str(normalized_dir),
                         recursive,
                         incremental,
@@ -481,7 +478,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
             files: [{ filename, subfolder?, type? }]
             incremental: Only update changed files (default: true)
         """
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
@@ -567,8 +564,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
             try:
                 try:
                     result = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            svc["index"].index_paths,
+                        svc['index'].index_paths(
                             paths,
                             base_dir,
                             incremental,
@@ -628,11 +624,11 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
         if csrf:
             return _json_response(Result.Err("CSRF", csrf))
 
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
-        prefs = _resolve_security_prefs(svc)
+        prefs = await _resolve_security_prefs(svc)
         op = _require_operation_enabled("reset_index", prefs=prefs)
         if not op.ok:
             return _json_response(op)
@@ -749,8 +745,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
             for target in target_roots:
                 try:
                     result = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            svc["index"].scan_directory,
+                        svc['index'].scan_directory(
                             target["path"],
                             True,
                             incremental,
@@ -816,7 +811,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
             index: bool (optional, default true) - whether to index staged files into the DB
             purpose: string (optional) - purpose of staging (e.g. "node_drop" for fast path)
         """
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
@@ -1032,8 +1027,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                 # Index in the background so staging returns quickly (DnD UX),
                 # and avoid blocking the aiohttp event loop on ExifTool/FFprobe.
                 _schedule_index_task(
-                    lambda: asyncio.to_thread(
-                        svc["index"].index_paths,
+                    lambda: svc['index'].index_paths(
                         staged_paths,
                         str(input_root),
                         True,  # incremental
@@ -1091,12 +1085,11 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
             # Optionally index the file (skip for fast path)
             if not skip_index:
                 try:
-                    svc, error_result = _require_services()
+                    svc, error_result = await _require_services()
                     if svc and svc.get("index"):
                         # Index in the background so upload returns quickly
                         _schedule_index_task(
-                            lambda: asyncio.to_thread(
-                                svc["index"].index_paths,
+                            lambda: svc['index'].index_paths(
                                 [dest_path],
                                 str(input_dir),
                                 True,  # incremental
@@ -1116,106 +1109,4 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
             logger.error(f"Upload failed: {e}")
             return _json_response(Result.Err("UPLOAD_FAILED", "Upload failed"))
 
-    @routes.get("/mjr/am/download")
-    async def download_asset(request):
-        """
-        Download an asset file by asset ID or path.
 
-        Query params:
-            - asset_id: integer asset ID (optional)
-            - path: relative path (optional)
-            - type: asset type (output, input, custom) - default: output
-            - filename: filename for Content-Disposition header
-        """
-        from aiohttp import web, StreamResponse
-        import mimetypes
-        from pathlib import Path
-
-        # Get parameters
-        asset_id = request.query.get("asset_id")
-        path = request.query.get("path")
-        asset_type = request.query.get("type", "output").lower()
-        filename = request.query.get("filename")
-
-        # Validate inputs
-        if not asset_id and not path:
-            return _json_response(Result.Err("INVALID_INPUT", "Either asset_id or path must be provided"))
-
-        # Get file path based on asset_id or path
-        file_path = None
-
-        if asset_id:
-            try:
-                asset_id = int(asset_id)
-            except ValueError:
-                return _json_response(Result.Err("INVALID_INPUT", "Invalid asset_id"))
-
-            # Get asset from database
-            svc, error_result = _require_services()
-            if error_result:
-                return _json_response(error_result)
-
-            try:
-                asset_result = await svc["index"].get_asset(asset_id)
-                if not asset_result.ok or not asset_result.data:
-                    return _json_response(Result.Err("NOT_FOUND", "Asset not found"))
-
-                asset_data = asset_result.data
-                file_path = Path(asset_data.get("filepath", ""))
-
-                if not filename:
-                    filename = asset_data.get("filename", "download")
-            except Exception as e:
-                return _json_response(Result.Err("QUERY_ERROR", f"Error fetching asset: {str(e)}"))
-        else:
-            # Use path directly
-            if asset_type == "input":
-                try:
-                    import folder_paths
-                    base_dir = Path(folder_paths.get_input_directory())
-                except Exception:
-                    base_dir = Path(__file__).parent.parent.parent.parent / "input"
-            elif asset_type == "custom":
-                # For custom paths, we need to validate carefully
-                return _json_response(Result.Err("INVALID_INPUT", "Path-based download not supported for custom assets"))
-            else:  # output
-                from backend.config import OUTPUT_ROOT
-                base_dir = Path(OUTPUT_ROOT)
-
-            # Validate path is within allowed directory
-            try:
-                file_path = (base_dir / path).resolve()
-                if not _is_within_root(file_path, base_dir):
-                    return _json_response(Result.Err("INVALID_INPUT", "Path outside allowed directory"))
-            except Exception:
-                return _json_response(Result.Err("INVALID_INPUT", "Invalid path"))
-
-        # Validate file exists
-        if not file_path or not file_path.exists() or not file_path.is_file():
-            return _json_response(Result.Err("NOT_FOUND", "File not found"))
-
-        # Validate file is allowed to be accessed
-        if not _is_path_allowed(file_path):
-            return _json_response(Result.Err("FORBIDDEN", "File access not allowed"))
-
-        # Sanitize filename to prevent header injection
-        safe_filename = (filename or file_path.name).replace('"', '').replace('\r', '').replace('\n', '')
-        safe_filename = safe_filename[:_MAX_FILENAME_LEN]  # Limit length
-
-        # Determine content type
-        content_type, _ = mimetypes.guess_type(str(file_path))
-        if not content_type:
-            content_type = "application/octet-stream"
-
-        # Use FileResponse for better performance with large files
-        from aiohttp import FileResponse
-        return FileResponse(
-            file_path,
-            headers={
-                "Content-Type": content_type,
-                "Content-Disposition": f'attachment; filename="{safe_filename}"',
-                "Cache-Control": "no-cache",
-                "Content-Security-Policy": "default-src 'none'",
-                "X-Content-Type-Options": "nosniff",
-            }
-        )

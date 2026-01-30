@@ -147,7 +147,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
         if scope == "input":
             subfolder = request.query.get("subfolder", "")
             root_dir = Path(folder_paths.get_input_directory())
-            svc, _ = _require_services()
+            svc, _ = await _require_services()
 
             # If index service is available, try DB-first approach
             if svc and svc.get("index"):
@@ -177,7 +177,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
             # Fallback to filesystem if DB approach fails or is unavailable
             if query == "*" and offset == 0 and not filters:
                 # Avoid scanning entire input trees just by opening the tab; only scan the current folder.
-                _kickoff_background_scan(str(root_dir), source="input", recursive=False, incremental=True)
+                await _kickoff_background_scan(str(root_dir), source="input", recursive=False, incremental=True)
             result = await _list_filesystem_assets(
                 root_dir,
                 subfolder,
@@ -197,7 +197,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
             if not root_result.ok:
                 return _json_response(root_result)
             root_dir = root_result.data
-            svc, _ = _require_services()
+            svc, _ = await _require_services()
 
             # If index service is available, try DB-first approach
             if svc and svc.get("index"):
@@ -229,7 +229,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
             # Fallback to filesystem if DB approach fails or is unavailable
             if query == "*" and offset == 0 and not filters:
                 # Avoid scanning entire custom trees just by opening the tab; only scan the current folder.
-                _kickoff_background_scan(str(root_dir), source="custom", root_id=str(root_id), recursive=False, incremental=True)
+                await _kickoff_background_scan(str(root_dir), source="custom", root_id=str(root_id), recursive=False, incremental=True)
             result = await _list_filesystem_assets(
                 root_dir,
                 subfolder,
@@ -243,7 +243,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
             )
             return _json_response(result)
 
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
@@ -265,7 +265,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
 
             if not input_indexed and query == "*" and offset == 0 and not filters:
                 # Opportunistically index the input root so `scope=all` can become DB-only on later requests.
-                _kickoff_background_scan(str(Path(input_root)), source="input", recursive=False, incremental=True)
+                await _kickoff_background_scan(str(Path(input_root)), source="input", recursive=False, incremental=True)
 
             if input_indexed:
                 scoped = await svc["index"].search_scoped(
@@ -499,7 +499,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
             is_initial = query == "*" and offset == 0 and not (filters or None)
             total = int((out_res.data or {}).get("total") or 0) if out_res.ok else 0
             if is_initial and out_res.ok and total == 0:
-                _kickoff_background_scan(
+                await _kickoff_background_scan(
                     str(Path(output_root)),
                     source="output",
                     recursive=True,
@@ -546,7 +546,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
             min_rating: Filter by minimum rating (0-5)
             has_workflow: Filter by workflow presence (true/false)
         """
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
@@ -606,7 +606,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
         JSON body:
             asset_ids: [1, 2, 3, ...]
         """
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
@@ -648,7 +648,12 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
         Returns just the workflow JSON if available, or null.
         Designed for drag & drop operations where speed is critical.
         """
-        svc, error_result = _require_services()
+        # Rate limit to prevent DB spam
+        allowed, retry_after = _check_rate_limit(request, "workflow_quick", max_requests=60, window_seconds=60)
+        if not allowed:
+            return _json_response(Result.Err("RATE_LIMITED", "Rate limit exceeded", retry_after=retry_after))
+
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
@@ -711,7 +716,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
         Path params:
             asset_id: Asset database ID
         """
-        svc, error_result = _require_services()
+        svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
 
@@ -752,8 +757,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
                             if meta_res and meta_res.ok and meta_res.data:
                                 try:
                                     await asyncio.wait_for(
-                                        asyncio.to_thread(
-                                            MetadataHelpers.write_asset_metadata_row,
+                                        MetadataHelpers.write_asset_metadata_row(
                                             db,
                                             asset_id,
                                             Result.Ok(

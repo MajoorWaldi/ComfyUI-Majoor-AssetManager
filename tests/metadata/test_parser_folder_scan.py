@@ -16,7 +16,8 @@ from tests.repo_root import REPO_ROOT
 from shared.types import classify_file
 
 
-def test_metadata_extraction_scans_tests_parser_tree(services):
+@pytest.mark.asyncio
+async def test_metadata_extraction_scans_tests_parser_tree(services):
     metadata_service = services["metadata"]
 
     # Target folder resolution:
@@ -43,7 +44,7 @@ def test_metadata_extraction_scans_tests_parser_tree(services):
     failures: list[tuple[Path, str, str]] = []
     for path in files:
         kind = classify_file(str(path))
-        result = metadata_service.get_metadata(str(path))
+        result = await metadata_service.get_metadata(str(path))
 
         # Unknown file types should be rejected cleanly.
         if kind == "unknown":

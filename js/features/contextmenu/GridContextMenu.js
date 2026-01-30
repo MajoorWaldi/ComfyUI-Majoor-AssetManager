@@ -424,7 +424,7 @@ export function bindGridContextMenu({
                 document.body.appendChild(link);
                 link.click();
                 document.body.removeChild(link);
-            }, { disabled: (asset) => !asset?.filepath })
+            }, { disabled: !asset?.filepath })
         );
 
         // Add to collection (single or multi)

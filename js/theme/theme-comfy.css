@@ -298,6 +298,29 @@
     margin-bottom: 6px;
 }
 
+/* Card Metadata Colors */
+.mjr-assets-manager .mjr-meta-duration {
+    color: #ffa726; /* Orange for duration */
+    font-weight: 500;
+}
+
+.mjr-assets-manager .mjr-meta-res {
+    color: #4fc3f7; /* Light Blue for resolution */
+    font-weight: 500;
+}
+
+.mjr-assets-manager .mjr-meta-date {
+    color: #b9f6ca; /* Pale Green for date */
+    font-size: 0.9em;
+    font-weight: 500;
+}
+
+.mjr-assets-manager .mjr-meta-time {
+    color: var(--mjr-muted, rgba(255, 255, 255, 0.65));
+    font-size: 0.9em;
+}
+
+
 .mjr-assets-manager .mjr-am-summary {
     display: flex;
     align-items: center;
@@ -866,6 +889,16 @@
     align-items: center;
     gap: 8px;
     min-width: 0;
+    margin-bottom: 2px;
+}
+
+.mjr-assets-manager .mjr-card-details {
+    color: var(--mjr-muted);
+    font-size: 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    opacity: 0.8;
 }
 
 .mjr-assets-manager .mjr-card-filename-text {

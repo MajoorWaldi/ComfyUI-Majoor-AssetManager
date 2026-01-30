@@ -428,11 +428,9 @@ export function createViewer() {
     overlayLayer.appendChild(loupeWrap);
     content.appendChild(overlayLayer);
 
-    // Sidebar: generation info (prompt/model/etc). Must never throw.
-    // This panel spans the full overlay height and we reserve space for it by adding
-    // `padding-right` to the overlay while open (true side-by-side layout).
+    // Sidebar: generation info (Right).
     const genInfoOverlay = document.createElement("div");
-    genInfoOverlay.className = "mjr-viewer-geninfo";
+    genInfoOverlay.className = "mjr-viewer-geninfo mjr-viewer-geninfo--right";
     genInfoOverlay.style.cssText = `
         position: absolute;
         top: 0;
@@ -471,6 +469,40 @@ export function createViewer() {
     `;
     genInfoOverlay.appendChild(genInfoHeader);
     genInfoOverlay.appendChild(genInfoBody);
+
+    // Sidebar: generation info (Left).
+    const genInfoOverlayLeft = document.createElement("div");
+    genInfoOverlayLeft.className = "mjr-viewer-geninfo mjr-viewer-geninfo--left";
+    genInfoOverlayLeft.style.cssText = `
+        position: absolute;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        width: min(420px, 48vw);
+        display: none;
+        flex-direction: column;
+        overflow: hidden;
+        background: rgba(0, 0, 0, 0.88);
+        border-right: 1px solid rgba(255,255,255,0.12);
+        pointer-events: auto;
+        backdrop-filter: blur(10px);
+        z-index: 10001;
+    `;
+    const genInfoHeaderLeft = genInfoHeader.cloneNode(true); // Shallow clone structure
+    genInfoHeaderLeft.innerHTML = ""; // Clear content
+    const genInfoTitleLeft = document.createElement("div");
+    genInfoTitleLeft.textContent = "Generation Info (A)";
+    genInfoTitleLeft.style.cssText = "font-size: 13px; font-weight: 600;";
+    genInfoHeaderLeft.appendChild(genInfoTitleLeft);
+    const genInfoBodyLeft = document.createElement("div");
+    genInfoBodyLeft.style.cssText = `
+        flex: 1;
+        overflow: auto;
+        padding: 12px;
+        color: rgba(255,255,255,0.92);
+    `;
+    genInfoOverlayLeft.appendChild(genInfoHeaderLeft);
+    genInfoOverlayLeft.appendChild(genInfoBodyLeft);
 
     // Mount the row (stage)
     try {
@@ -518,6 +550,47 @@ export function createViewer() {
     overlay.appendChild(contentRow);
     overlay.appendChild(footer);
     overlay.appendChild(genInfoOverlay);
+    overlay.appendChild(genInfoOverlayLeft);
+
+    // Light Dismiss: Close on background click (smart drag detection)
+    try {
+        let _ptrDown = null;
+        // Capture pointerdown to track start pos, even if children stop propagation
+        overlay.addEventListener("pointerdown", (e) => {
+            if (e.isPrimary === false) return;
+            _ptrDown = { x: e.clientX, y: e.clientY, t: Date.now() };
+        }, { capture: true, passive: true });
+
+        overlay.addEventListener("click", (e) => {
+            try {
+                if (e.defaultPrevented || e.button !== 0) return;
+
+                // Drag/Selection check
+                if (_ptrDown) {
+                    const dx = e.clientX - _ptrDown.x;
+                    const dy = e.clientY - _ptrDown.y;
+                    const dist = Math.hypot(dx, dy);
+                    // If moved more than 6px or held longer than 600ms (selection/drag), ignore.
+                    if (dist > 6 || (Date.now() - _ptrDown.t > 600)) return;
+                }
+
+                const t = e.target;
+                if (t.closest(".mjr-viewer-header") ||
+                    t.closest(".mjr-viewer-footer") ||
+                    t.closest(".mjr-viewer-geninfo") ||
+                    t.closest(".mjr-video-controls") ||
+                    t.closest(".mjr-context-menu") ||
+                    t.closest(".mjr-ab-slider") ||
+                    t.closest(".mjr-viewer-loupe") ||
+                    t.closest(".mjr-viewer-probe") ||
+                    t.closest(".mjr-viewer-media") ||
+                    t.tagName === "IMG" || t.tagName === "VIDEO" || t.tagName === "CANVAS") {
+                    return;
+                }
+                _requestCloseFromButton();
+            } catch {}
+        });
+    } catch {}
 
     const metadataHydrator = createViewerMetadataHydrator({
         state,
@@ -744,98 +817,98 @@ export function createViewer() {
     };
 
     const renderGenInfoPanel = async () => {
+        const canAB = state.assets.length === 2;
+        const canSide = state.assets.length >= 2;
+        const mode = state.mode;
+        const open = Boolean(state?.genInfoOpen);
+
+        // Determine if we should show split panels
+        const isDual = open && (
+            (mode === VIEWER_MODES.AB_COMPARE && canAB) ||
+            (mode === VIEWER_MODES.SIDE_BY_SIDE && canSide)
+        );
+
         try {
-            const open = Boolean(state?.genInfoOpen);
             genInfoOverlay.style.display = open ? "flex" : "none";
-            // Reserve space so the viewer shrinks and the panel sits side-by-side (not overlayed).
-            try {
-                overlay.style.paddingRight = open ? "min(420px, 48vw)" : "0px";
-            } catch {}
+            genInfoOverlayLeft.style.display = isDual ? "flex" : "none";
+            // Reserve space so the viewer shrinks.
+            overlay.style.paddingRight = open ? "min(420px, 48vw)" : "0px";
+            overlay.style.paddingLeft = isDual ? "min(420px, 48vw)" : "0px";
+
             if (!open) {
                 stopGenInfoFetch();
-                try {
-                    genInfoBody.innerHTML = "";
-                } catch {}
+                try { genInfoBody.innerHTML = ""; } catch {}
+                try { genInfoBodyLeft.innerHTML = ""; } catch {}
                 return;
             }
         } catch {
             return;
         }
 
-        // Abort any previous in-flight work, then mint a fresh request id for this render.
-        // (Ordering matters: `stopGenInfoFetch()` bumps `_genInfoReqId`.)
         stopGenInfoFetch();
         const reqId = (Number(state?._genInfoReqId) || 0) + 1;
-        try {
-            state._genInfoReqId = reqId;
-        } catch {}
+        try { state._genInfoReqId = reqId; } catch {}
         const ac = new AbortController();
         state._genInfoAbort = ac;
 
-        const renderNow = (payload) => {
-            try {
-                genInfoBody.innerHTML = "";
-            } catch {}
+        const renderNow = ({ left, right, single }) => {
+            try { genInfoBody.innerHTML = ""; } catch {}
+            try { genInfoBodyLeft.innerHTML = ""; } catch {}
 
             const onRetry = () => {
                 try {
                     if (!state?.genInfoOpen) state.genInfoOpen = true;
-                } catch {}
-                try {
                     void renderGenInfoPanel();
                 } catch {}
             };
 
-            const addBlock = (title, assetObj) => {
+            const addBlockTo = (targetBody, title, assetObj, loading) => {
+                if (!targetBody) return;
                 try {
                     try {
-                        genInfoBody.appendChild(
+                        targetBody.appendChild(
                             buildViewerMetadataBlocks({
                                 title,
                                 asset: assetObj,
-                                ui: { loading: Boolean(payload?.loading), onRetry },
+                                ui: { loading: Boolean(loading), onRetry },
                             })
                         );
                         return;
                     } catch {}
+                    
+                    // Fallback manual rendering
                     const block = document.createElement("div");
                     block.style.cssText = "display:flex; flex-direction:column; gap:10px; margin-bottom: 14px;";
-                    const h = document.createElement("div");
-                    h.textContent = title || "Asset";
-                    h.style.cssText =
-                        "font-size: 12px; font-weight: 600; letter-spacing: 0.02em; color: rgba(255,255,255,0.86);";
-                    block.appendChild(h);
+                    
+                    if (title) {
+                        const h = document.createElement("div");
+                        h.textContent = title;
+                        h.style.cssText = "font-size: 12px; font-weight: 600; letter-spacing: 0.02em; color: rgba(255,255,255,0.86);";
+                        block.appendChild(h);
+                    }
 
                     const section = (() => {
-                        try {
-                            return createGenerationSection(assetObj);
-                        } catch {
-                            return null;
-                        }
+                        try { return createGenerationSection(assetObj); } catch { return null; }
                     })();
                     if (section) {
                         block.appendChild(section);
                     } else {
                         const empty = document.createElement("div");
-                        empty.style.cssText =
-                            "padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.72);";
+                        empty.style.cssText = "padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.72);";
                         empty.textContent = "No generation data found for this file.";
                         block.appendChild(empty);
                     }
-
+                    
                     try {
                         const raw = assetObj?.metadata_raw;
                         if (raw != null) {
                             const details = document.createElement("details");
-                            details.style.cssText =
-                                "border: 1px solid rgba(255,255,255,0.10); border-radius: 10px; background: rgba(255,255,255,0.04); overflow: hidden;";
+                            details.style.cssText = "border: 1px solid rgba(255,255,255,0.10); border-radius: 10px; background: rgba(255,255,255,0.04); overflow: hidden;";
                             const summary = document.createElement("summary");
                             summary.textContent = "Raw metadata";
-                            summary.style.cssText =
-                                "cursor: pointer; padding: 10px 12px; color: rgba(255,255,255,0.78); user-select: none;";
+                            summary.style.cssText = "cursor: pointer; padding: 10px 12px; color: rgba(255,255,255,0.78); user-select: none;";
                             const pre = document.createElement("pre");
-                            pre.style.cssText =
-                                "margin:0; padding: 10px 12px; max-height: 280px; overflow:auto; font-size: 11px; line-height: 1.35; color: rgba(255,255,255,0.86);";
+                            pre.style.cssText = "margin:0; padding: 10px 12px; max-height: 280px; overflow:auto; font-size: 11px; line-height: 1.35; color: rgba(255,255,255,0.86);";
                             let txt = "";
                             try {
                                 if (typeof raw === "string") txt = raw;
@@ -850,91 +923,112 @@ export function createViewer() {
                             block.appendChild(details);
                         }
                     } catch {}
-
-                    genInfoBody.appendChild(block);
+                    targetBody.appendChild(block);
                 } catch {}
             };
 
-            try {
-                if (payload?.mode === VIEWER_MODES.AB_COMPARE && payload?.a && payload?.b) {
-                    addBlock(`A: ${payload?.aLabel || "Current"}`, payload.a);
-                    addBlock(`B: ${payload?.bLabel || "Compare"}`, payload.b);
-                    return;
-                }
-            } catch {}
-            try {
-                addBlock(payload?.title || "Current", payload?.asset || null);
-            } catch {}
+            if (isDual) {
+                 if (left) {
+                     genInfoTitleLeft.textContent = left.title || "Asset A";
+                     addBlockTo(genInfoBodyLeft, "", left.asset, left.loading);
+                 }
+                 if (right) {
+                     genInfoTitle.textContent = right.title || "Asset B";
+                     addBlockTo(genInfoBody, "", right.asset, right.loading);
+                 }
+            } else {
+                 // Single mode
+                 if (single) {
+                     genInfoTitle.textContent = single.title || "Generation Info";
+                     addBlockTo(genInfoBody, "", single.asset, single.loading);
+                 }
+            }
         };
 
-        // Initial pass (cached/light).
+        // Resolve assets and perform initial render
         try {
             const current = state?.assets?.[state?.currentIndex] || null;
             if (!current) {
-                renderNow({ title: "Current", asset: null });
+                renderNow({});
                 return;
             }
-            if (state?.mode === VIEWER_MODES.AB_COMPARE) {
-                const other =
-                    state?.compareAsset ||
-                    (Array.isArray(state.assets) && state.assets.length === 2
-                        ? state.assets[1 - (state.currentIndex || 0)]
-                        : null) ||
-                    null;
-                const a0 = metadataHydrator?.getCached?.(current?.id)?.data || current;
-                const b0 = other ? metadataHydrator?.getCached?.(other?.id)?.data || other : null;
+
+            let assetLeft = null;
+            let assetRight = null;
+            let assetSingle = null;
+
+            if (isDual) {
+                // Determine A and B
+                if (mode === VIEWER_MODES.SIDE_BY_SIDE) {
+                    // Fixed order: Left=[0], Right=[1] 
+                    // (Assuming 2 items for text comparison logic, or just first two)
+                    assetLeft = state.assets[0];
+                    assetRight = state.assets[1];
+                } else {
+                    // AB_COMPARE: Swappable roles (Current vs Other)
+                    assetLeft = current;
+                    const other = state?.compareAsset || 
+                        (state.assets.length === 2 ? state.assets[1 - state.currentIndex] : null);
+                    assetRight = other;
+                }
+            } else {
+                assetSingle = current;
+            }
+
+            // Initial render (cache)
+            const getCached = (a) => a ? (metadataHydrator?.getCached?.(a.id)?.data || a) : null;
+            
+            renderNow({
+                left: isDual ? {
+                    title: "Asset A",
+                    asset: getCached(assetLeft),
+                    loading: shouldShowGenInfoLoading(getCached(assetLeft))
+                } : null,
+                right: isDual ? {
+                    title: "Asset B",
+                    asset: getCached(assetRight),
+                    loading: shouldShowGenInfoLoading(getCached(assetRight))
+                } : null,
+                single: !isDual ? {
+                    title: "Generation Info",
+                    asset: getCached(assetSingle),
+                    loading: shouldShowGenInfoLoading(getCached(assetSingle))
+                } : null
+            });
+
+            // Hydrate logic
+            if (state._genInfoReqId !== reqId) return;
+            
+            if (isDual) {
+                const lFull = assetLeft ? await ensureGenInfoAsset(assetLeft, { signal: ac.signal }) : null;
+                const rFull = assetRight ? await ensureGenInfoAsset(assetRight, { signal: ac.signal }) : null;
+                if (state._genInfoReqId !== reqId) return;
+                
                 renderNow({
-                    mode: VIEWER_MODES.AB_COMPARE,
-                    a: a0,
-                    b: b0,
-                    aLabel: current?.filename || current?.name || "",
-                    bLabel: other?.filename || other?.name || "",
-                    loading: shouldShowGenInfoLoading(a0) || shouldShowGenInfoLoading(b0),
+                    left: {
+                        title: "Asset A",
+                        asset: lFull,
+                        loading: false
+                    },
+                    right: {
+                         title: "Asset B",
+                         asset: rFull,
+                         loading: false
+                    }
                 });
             } else {
-                const a0 = metadataHydrator?.getCached?.(current?.id)?.data || current;
-                renderNow({
-                    title: current?.filename || current?.name || "Current",
-                    asset: a0,
-                    loading: shouldShowGenInfoLoading(a0),
-                });
-            }
-        } catch {}
-
-        // Fetch full metadata if needed, then re-render.
-        try {
-            const current = state?.assets?.[state?.currentIndex] || null;
-            if (!current) return;
-            if (state._genInfoReqId !== reqId) return;
-
-            if (state?.mode === VIEWER_MODES.AB_COMPARE) {
-                const other =
-                    state?.compareAsset ||
-                    (Array.isArray(state.assets) && state.assets.length === 2
-                        ? state.assets[1 - (state.currentIndex || 0)]
-                        : null) ||
-                    null;
-                const aFull = await ensureGenInfoAsset(current, { signal: ac.signal });
-                const bFull = other ? await ensureGenInfoAsset(other, { signal: ac.signal }) : null;
+                const sFull = assetSingle ? await ensureGenInfoAsset(assetSingle, { signal: ac.signal }) : null;
                 if (state._genInfoReqId !== reqId) return;
+                
                 renderNow({
-                    mode: VIEWER_MODES.AB_COMPARE,
-                    a: aFull,
-                    b: bFull,
-                    aLabel: current?.filename || current?.name || "",
-                    bLabel: other?.filename || other?.name || "",
-                    loading: false,
+                    single: {
+                        title: "Generation Info",
+                        asset: sFull,
+                        loading: false
+                    }
                 });
-                return;
             }
 
-            const full = await ensureGenInfoAsset(current, { signal: ac.signal });
-            if (state._genInfoReqId !== reqId) return;
-            renderNow({
-                title: current?.filename || current?.name || "Current",
-                asset: full,
-                loading: false,
-            });
         } catch {}
     };
 
@@ -2075,6 +2169,10 @@ export function createViewer() {
         try {
             genInfoOverlay.style.display = "none";
             genInfoBody.innerHTML = "";
+        } catch {}
+        try {
+            genInfoOverlayLeft.style.display = "none";
+            genInfoBodyLeft.innerHTML = "";
         } catch {}
 
         overlay.style.display = 'none';

@@ -191,21 +191,21 @@ def _is_safe_identifier(value: str) -> bool:
     return bool(value and isinstance(value, str) and _SAFE_IDENT_RE.match(value))
 
 
-def _get_table_columns(db, table_name: str) -> Result[List[str]]:
+async def _get_table_columns(db, table_name: str) -> Result[List[str]]:
     if not _is_safe_identifier(table_name):
         return Result.Err("INVALID_INPUT", f"Invalid table name: {table_name}")
-    result = db.query(f"PRAGMA table_info('{table_name}')")
+    result = await db.aquery(f"PRAGMA table_info('{table_name}')")
     if not result.ok:
         return Result.Err("PRAGMA_FAILED", f"Unable to inspect {table_name}: {result.error}")
     return Result.Ok([row["name"] for row in result.data or []])
 
 
-def table_has_column(db, table_name: str, column_name: str) -> bool:
+async def table_has_column(db, table_name: str, column_name: str) -> bool:
     """Return True if `table_name` has `column_name` (best-effort)."""
     if not _is_safe_identifier(table_name) or not _is_safe_identifier(column_name):
         logger.warning("Invalid identifier in table_has_column: %s.%s", table_name, column_name)
         return False
-    columns_result = _get_table_columns(db, table_name)
+    columns_result = await _get_table_columns(db, table_name)
     if not columns_result.ok:
         logger.warning(
             "Unable to determine columns for %s.%s: %s",
@@ -218,8 +218,8 @@ def table_has_column(db, table_name: str, column_name: str) -> bool:
     return column_name in columns_result.data
 
 
-def _ensure_column(db, table_name: str, column_name: str, definition: str) -> Result[bool]:
-    columns_result = _get_table_columns(db, table_name)
+async def _ensure_column(db, table_name: str, column_name: str, definition: str) -> Result[bool]:
+    columns_result = await _get_table_columns(db, table_name)
     if not columns_result.ok:
         return columns_result
 
@@ -227,49 +227,49 @@ def _ensure_column(db, table_name: str, column_name: str, definition: str) -> Re
         return Result.Ok(True)
 
     logger.info("Adding missing column %s.%s", table_name, column_name)
-    alter_result = db.execute(
+    alter_result = await db.aexecute(
         f"ALTER TABLE {table_name} ADD COLUMN {definition}"
     )
     return alter_result
 
 
-def ensure_columns_exist(db) -> Result[bool]:
+async def ensure_columns_exist(db) -> Result[bool]:
     """Ensure required columns exist in existing tables (best-effort)."""
     for table, columns in COLUMN_DEFINITIONS.items():
         for column_name, definition in columns:
-            result = _ensure_column(db, table, column_name, definition)
+            result = await _ensure_column(db, table, column_name, definition)
             if not result.ok:
                 logger.error("Failed to ensure column %s.%s: %s", table, column_name, result.error)
                 return result
     return Result.Ok(True)
 
 
-def ensure_tables_exist(db) -> Result[bool]:
+async def ensure_tables_exist(db) -> Result[bool]:
     """Ensure base schema tables exist (idempotent)."""
     logger.info("Ensuring tables exist...")
-    result = db.executescript(SCHEMA_V1)
+    result = await db.aexecutescript(SCHEMA_V1)
     if not result.ok:
         logger.error("Failed to ensure base tables: %s", result.error)
     return result
 
 
-def ensure_indexes_and_triggers(db) -> Result[bool]:
+async def ensure_indexes_and_triggers(db) -> Result[bool]:
     """Ensure indexes/triggers exist and repair FTS metadata (best-effort)."""
     logger.info("Ensuring indexes/triggers exist...")
-    result = db.executescript(INDEXES_AND_TRIGGERS)
+    result = await db.aexecutescript(INDEXES_AND_TRIGGERS)
     if not result.ok:
         logger.error("Failed to ensure indexes/triggers: %s", result.error)
         return result
-    repair_result = _repair_asset_metadata_fts(db)
+    repair_result = await _repair_asset_metadata_fts(db)
     if repair_result and not repair_result.ok:
         logger.warning("Failed to repair asset_metadata_fts: %s", repair_result.error)
     return result
 
 
-def _fts_has_column(db, table: str, col: str) -> bool:
+async def _fts_has_column(db, table: str, col: str) -> bool:
     """Check if an FTS table has a specific column."""
     try:
-        r = db.query(f"PRAGMA table_info({table})")
+        r = await db.aquery(f"PRAGMA table_info({table})")
         if not r.ok or not r.data:
             return False
         return any((row.get("name") == col) for row in r.data)
@@ -277,7 +277,7 @@ def _fts_has_column(db, table: str, col: str) -> bool:
         return False
 
 
-def _repair_asset_metadata_fts(db) -> Result[bool]:
+async def _repair_asset_metadata_fts(db) -> Result[bool]:
     """
     Repair legacy/incorrect FTS definition for asset metadata.
 
@@ -286,13 +286,13 @@ def _repair_asset_metadata_fts(db) -> Result[bool]:
     Also check for missing `tags_text` column in existing FTS tables.
     """
     try:
-        table_row = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='asset_metadata_fts' LIMIT 1")
+        table_row = await db.aquery("SELECT sql FROM sqlite_master WHERE type='table' AND name='asset_metadata_fts' LIMIT 1")
         ddl = ""
         if table_row.ok and table_row.data:
             ddl = str(table_row.data[0].get("sql") or "")
         ddl_lower = ddl.lower()
 
-        trig_row = db.query("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='asset_metadata_fts_update' LIMIT 1")
+        trig_row = await db.aquery("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='asset_metadata_fts_update' LIMIT 1")
         trig_sql = ""
         if trig_row.ok and trig_row.data:
             trig_sql = str(trig_row.data[0].get("sql") or "")
@@ -300,7 +300,7 @@ def _repair_asset_metadata_fts(db) -> Result[bool]:
 
         needs_table_rebuild = ("content_rowid" in ddl_lower and "asset_id" in ddl_lower)
         needs_trigger_rebuild = ("update asset_metadata_fts" in trig_lower)
-        missing_tags_text = not _fts_has_column(db, "asset_metadata_fts", "tags_text")
+        missing_tags_text = not await _fts_has_column(db, "asset_metadata_fts", "tags_text")
 
         if missing_tags_text:
             needs_table_rebuild = True
@@ -315,7 +315,7 @@ def _repair_asset_metadata_fts(db) -> Result[bool]:
     try:
         with db.transaction(mode="immediate"):
             if needs_table_rebuild:
-                db.executescript(
+                await db.aexecutescript(
                     """
                     DROP TRIGGER IF EXISTS asset_metadata_fts_insert;
                     DROP TRIGGER IF EXISTS asset_metadata_fts_delete;
@@ -323,7 +323,7 @@ def _repair_asset_metadata_fts(db) -> Result[bool]:
                     DROP TABLE IF EXISTS asset_metadata_fts;
                     """
                 )
-                db.executescript(
+                await db.aexecutescript(
                     """
                     CREATE VIRTUAL TABLE IF NOT EXISTS asset_metadata_fts USING fts5(
                         tags,
@@ -333,7 +333,7 @@ def _repair_asset_metadata_fts(db) -> Result[bool]:
                     """
                 )
             else:
-                db.executescript(
+                await db.aexecutescript(
                     """
                     DROP TRIGGER IF EXISTS asset_metadata_fts_insert;
                     DROP TRIGGER IF EXISTS asset_metadata_fts_delete;
@@ -341,7 +341,7 @@ def _repair_asset_metadata_fts(db) -> Result[bool]:
                     """
                 )
 
-            db.executescript(
+            await db.aexecutescript(
                 """
                 CREATE TRIGGER IF NOT EXISTS asset_metadata_fts_insert AFTER INSERT ON asset_metadata BEGIN
                     INSERT INTO asset_metadata_fts(rowid, tags, tags_text)
@@ -360,7 +360,7 @@ def _repair_asset_metadata_fts(db) -> Result[bool]:
                 """
             )
 
-            db.executescript(
+            await db.aexecutescript(
                 """
                 DELETE FROM asset_metadata_fts;
                 INSERT INTO asset_metadata_fts(rowid, tags, tags_text)
@@ -384,7 +384,7 @@ def _schema_fingerprint() -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def _ensure_schema_fingerprint(db) -> Result[bool]:
+async def _ensure_schema_fingerprint(db) -> Result[bool]:
     if not db.has_table("metadata"):
         return Result.Ok(True)
 
@@ -394,7 +394,7 @@ def _ensure_schema_fingerprint(db) -> Result[bool]:
         logger.warning("Unable to compute schema fingerprint: %s", exc)
         return Result.Ok(True)
 
-    existing = db.execute(
+    existing = await db.aexecute(
         "SELECT value FROM metadata WHERE key = 'schema_ddl_hash'",
         fetch=True
     )
@@ -408,31 +408,31 @@ def _ensure_schema_fingerprint(db) -> Result[bool]:
                 "Database schema fingerprint differs from expected (will self-heal columns anyway)"
             )
 
-    return db.execute(
+    return await db.aexecute(
         "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_ddl_hash', ?)",
         (fingerprint,)
     )
 
 
-def _ensure_schema(db) -> Result[bool]:
-    result = ensure_tables_exist(db)
+async def _ensure_schema(db) -> Result[bool]:
+    result = await ensure_tables_exist(db)
     if not result.ok:
         return result
 
-    result = ensure_columns_exist(db)
+    result = await ensure_columns_exist(db)
     if not result.ok:
         return result
 
-    result = ensure_indexes_and_triggers(db)
+    result = await ensure_indexes_and_triggers(db)
     if not result.ok:
         return result
 
-    version_result = db.set_schema_version(CURRENT_SCHEMA_VERSION)
+    version_result = await db.aset_schema_version(CURRENT_SCHEMA_VERSION)
     if not version_result.ok:
         logger.error("Failed to set schema version: %s", version_result.error)
         return version_result
 
-    fp_result = _ensure_schema_fingerprint(db)
+    fp_result = await _ensure_schema_fingerprint(db)
     if not fp_result.ok:
         logger.warning("Failed to store schema fingerprint: %s", fp_result.error)
 
@@ -440,13 +440,13 @@ def _ensure_schema(db) -> Result[bool]:
     return Result.Ok(True)
 
 
-def init_schema(db) -> Result[bool]:
+async def init_schema(db) -> Result[bool]:
     """
     Initialize the schema (useful for tests or first-time installs).
     """
-    return _ensure_schema(db)
+    return await _ensure_schema(db)
 
-def migrate_schema(db) -> Result[bool]:
+async def migrate_schema(db) -> Result[bool]:
     """
     Repair schema to current version by ensuring expected tables, columns,
     indexes, and triggers exist.
@@ -457,14 +457,14 @@ def migrate_schema(db) -> Result[bool]:
     Returns:
         Result with success boolean
     """
-    current_version = db.get_schema_version()
+    current_version = await db.aget_schema_version()
     logger.info("Ensuring schema (current version %s -> target %s)", current_version, CURRENT_SCHEMA_VERSION)
 
-    repair_result = _ensure_schema(db)
+    repair_result = await _ensure_schema(db)
     if not repair_result.ok:
         return repair_result
 
-    final_version = db.get_schema_version()
+    final_version = await db.aget_schema_version()
 
     if current_version == final_version:
         logger.info("Schema already reported up to date (%s)", final_version)
@@ -473,7 +473,7 @@ def migrate_schema(db) -> Result[bool]:
 
     return Result.Ok(True)
 
-def rebuild_fts(db) -> Result[bool]:
+async def rebuild_fts(db) -> Result[bool]:
     """
     Rebuild full-text search index.
 
@@ -485,12 +485,12 @@ def rebuild_fts(db) -> Result[bool]:
     """
     logger.info("Rebuilding FTS index...")
 
-    result = db.execute("INSERT INTO assets_fts(assets_fts) VALUES('rebuild')")
+    result = await db.aexecute("INSERT INTO assets_fts(assets_fts) VALUES('rebuild')")
     if not result.ok:
         logger.error(f"Failed to rebuild assets_fts: {result.error}")
         return result
 
-    repair_result = _repair_asset_metadata_fts(db)
+    repair_result = await _repair_asset_metadata_fts(db)
     if repair_result is not None and not repair_result.ok:
         logger.error(f"Failed to rebuild asset_metadata_fts: {repair_result.error}")
         return repair_result

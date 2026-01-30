@@ -1,3 +1,4 @@
+import pytest
 from backend.routes.core.security import _require_operation_enabled
 
 
@@ -12,28 +13,32 @@ def _clear_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
-def test_safe_mode_blocks_write_by_default(monkeypatch):
+@pytest.mark.asyncio
+async def test_safe_mode_blocks_write_by_default(monkeypatch):
     _clear_env(monkeypatch)
     res = _require_operation_enabled("asset_rating")
     assert not res.ok
     assert res.code == "FORBIDDEN"
 
 
-def test_safe_mode_allows_write_with_allow_write(monkeypatch):
+@pytest.mark.asyncio
+async def test_safe_mode_allows_write_with_allow_write(monkeypatch):
     _clear_env(monkeypatch)
     monkeypatch.setenv("MAJOOR_ALLOW_WRITE", "1")
     res = _require_operation_enabled("asset_tags")
     assert res.ok, res.error
 
 
-def test_disable_safe_mode_allows_write(monkeypatch):
+@pytest.mark.asyncio
+async def test_disable_safe_mode_allows_write(monkeypatch):
     _clear_env(monkeypatch)
     monkeypatch.setenv("MAJOOR_SAFE_MODE", "0")
     res = _require_operation_enabled("asset_tags")
     assert res.ok, res.error
 
 
-def test_delete_requires_explicit_opt_in_even_if_safe_mode_off(monkeypatch):
+@pytest.mark.asyncio
+async def test_delete_requires_explicit_opt_in_even_if_safe_mode_off(monkeypatch):
     _clear_env(monkeypatch)
     monkeypatch.setenv("MAJOOR_SAFE_MODE", "0")
     res = _require_operation_enabled("asset_delete")
@@ -45,14 +50,16 @@ def test_delete_requires_explicit_opt_in_even_if_safe_mode_off(monkeypatch):
     assert res2.ok, res2.error
 
 
-def test_rename_requires_explicit_opt_in(monkeypatch):
+@pytest.mark.asyncio
+async def test_rename_requires_explicit_opt_in(monkeypatch):
     _clear_env(monkeypatch)
     monkeypatch.setenv("MAJOOR_ALLOW_RENAME", "1")
     res = _require_operation_enabled("asset_rename")
     assert res.ok, res.error
 
 
-def test_open_in_folder_requires_explicit_opt_in(monkeypatch):
+@pytest.mark.asyncio
+async def test_open_in_folder_requires_explicit_opt_in(monkeypatch):
     _clear_env(monkeypatch)
     res = _require_operation_enabled("open_in_folder")
     assert not res.ok

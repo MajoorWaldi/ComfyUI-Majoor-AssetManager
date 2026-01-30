@@ -82,7 +82,10 @@ export const APP_DEFAULTS = Object.freeze({
 
     // Viewer metadata cache
     VIEWER_META_TTL_MS: 30_000,
-    VIEWER_META_MAX_ENTRIES: 500
+    VIEWER_META_MAX_ENTRIES: 500,
+
+    // Workflow Minimap
+    WORKFLOW_MINIMAP_ENABLED: true,
 });
 
 // Runtime config (some values are user-tunable via settings).

@@ -4,9 +4,9 @@ Filesystem operations: background scanning and file listing.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import time
-import threading
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -14,25 +14,26 @@ from typing import Any, Mapping, Optional
 from backend.shared import Result, classify_file, get_logger
 from backend.adapters.fs.list_cache_watcher import ensure_fs_list_cache_watching, get_fs_list_cache_token
 from backend.config import FS_LIST_CACHE_MAX, FS_LIST_CACHE_TTL_SECONDS, FS_LIST_CACHE_WATCHDOG, BG_SCAN_FAILURE_HISTORY_MAX, SCAN_PENDING_MAX
-from ..core import _safe_rel_path, _is_within_root
+from ..core import _safe_rel_path, _is_within_root, _require_services
 
 logger = get_logger(__name__)
 
-_BACKGROUND_SCAN_LOCK = threading.Lock()
+# Locks for async concurrency safety
+_BACKGROUND_SCAN_LOCK = asyncio.Lock()
 _BACKGROUND_SCAN_LAST: dict[str, float] = {}
 _BACKGROUND_SCAN_FAILURES: list[dict[str, Any]] = []
 _MAX_FAILURE_HISTORY = int(BG_SCAN_FAILURE_HISTORY_MAX)
 
-_SCAN_PENDING_LOCK = threading.Lock()
+_SCAN_PENDING_LOCK = asyncio.Lock()
 _SCAN_PENDING: OrderedDict[str, dict[str, Any]] = OrderedDict()
-_SCAN_WORKER: Optional[threading.Thread] = None
+_SCAN_TASK: Optional[asyncio.Task] = None
 _SCAN_PENDING_MAX = int(SCAN_PENDING_MAX)
 
-_FS_LIST_CACHE_LOCK = threading.Lock()
+_FS_LIST_CACHE_LOCK = asyncio.Lock()
 _FS_LIST_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
 
-def _kickoff_background_scan(
+async def _kickoff_background_scan(
     directory: str,
     *,
     source: str = "output",
@@ -51,133 +52,136 @@ def _kickoff_background_scan(
     try:
         key = f"{source}|{str(root_id or '')}|{str(directory)}"
         now = time.time()
-    except Exception:
-        return
-
-    job = {
-        "directory": str(directory),
-        "source": str(source),
-        "root_id": str(root_id) if root_id is not None else None,
-        "recursive": bool(recursive),
-        "incremental": bool(incremental),
-        "fast": bool(fast),
-        "background_metadata": bool(background_metadata),
-    }
-
-    def _ensure_worker() -> None:
-        global _SCAN_WORKER
-        with _SCAN_PENDING_LOCK:
-            if _SCAN_WORKER and _SCAN_WORKER.is_alive():
-                return
-
-        def _worker_loop() -> None:
-            while True:
-                task = None
-                with _SCAN_PENDING_LOCK:
-                    if _SCAN_PENDING:
-                        _, task = _SCAN_PENDING.popitem(last=False)
-                    else:
-                        task = None
-                if not task:
-                    try:
-                        time.sleep(0.25)
-                    except Exception:
-                        pass
-                    continue
-
-                try:
-                    from ..core import _require_services
-                    svc, error_result = _require_services()  # type: ignore[no-untyped-call]
-                    if error_result:
-                        _record_scan_failure(str(task.get("directory")), str(task.get("source")), "SERVICE_UNAVAILABLE", str(error_result.error or ""))
-                        continue
-
-                    try:
-                        try:
-                            svc["index"].scan_directory(
-                                str(task.get("directory")),
-                                bool(task.get("recursive")),
-                                bool(task.get("incremental")),
-                                source=str(task.get("source") or "output"),
-                                root_id=task.get("root_id"),
-                                fast=bool(task.get("fast")),
-                                background_metadata=bool(task.get("background_metadata")),
-                            )
-                        except TypeError:
-                            svc["index"].scan_directory(
-                                str(task.get("directory")),
-                                bool(task.get("recursive")),
-                                bool(task.get("incremental")),
-                                source=str(task.get("source") or "output"),
-                                root_id=task.get("root_id"),
-                            )
-                    except Exception as exc:
-                        _record_scan_failure(str(task.get("directory")), str(task.get("source")), "SCAN_FAILED", str(exc))
-                        logger.warning("Background scan failed: %s", exc)
-                except Exception:
-                    try:
-                        _record_scan_failure(str(task.get("directory")), str(task.get("source")), "EXCEPTION", "Unhandled exception")
-                    except Exception:
-                        pass
-
-        try:
-            worker = threading.Thread(target=_worker_loop, name="mjr-bg-scan-worker", daemon=True)
-        except Exception:
-            with _SCAN_PENDING_LOCK:
-                _SCAN_WORKER = None
+        
+        # Quick check (optimization)
+        last = _BACKGROUND_SCAN_LAST.get(key, 0)
+        if now - last < min_interval_seconds:
             return
 
-        with _SCAN_PENDING_LOCK:
-            _SCAN_WORKER = worker
-        try:
-            worker.start()
-        except Exception:
-            with _SCAN_PENDING_LOCK:
-                if _SCAN_WORKER is worker:
-                    _SCAN_WORKER = None
-
-    try:
-        _ensure_worker()
-        with _BACKGROUND_SCAN_LOCK:
-            last = _BACKGROUND_SCAN_LAST.get(key, 0.0)
-            if now - last < float(min_interval_seconds):
+        async with _BACKGROUND_SCAN_LOCK:
+             # Double-check under lock
+            last = _BACKGROUND_SCAN_LAST.get(key, 0)
+            if now - last < min_interval_seconds:
                 return
 
-            with _SCAN_PENDING_LOCK:
+            job = {
+                "directory": str(directory),
+                "source": str(source),
+                "root_id": str(root_id) if root_id is not None else None,
+                "recursive": bool(recursive),
+                "incremental": bool(incremental),
+                "fast": bool(fast),
+                "background_metadata": bool(background_metadata),
+            }
+
+            _ensure_worker()
+
+            async with _SCAN_PENDING_LOCK:
+                # Move to end if exists (refresh priority)
+                if key in _SCAN_PENDING:
+                    del _SCAN_PENDING[key]
                 _SCAN_PENDING[key] = job
-                _SCAN_PENDING.move_to_end(key)
+                
+                # Enforce max pending size
                 while len(_SCAN_PENDING) > _SCAN_PENDING_MAX:
                     _SCAN_PENDING.popitem(last=False)
-
-            # Race fix: only update the throttle marker once the job is enqueued.
+            
+            # Only update throttle if enqueue succeeded
             _BACKGROUND_SCAN_LAST[key] = now
+
     except Exception:
         return
+
+
+
+def _ensure_worker() -> None:
+    global _SCAN_TASK
+    if _SCAN_TASK and not _SCAN_TASK.done():
+        return
+    
+    _SCAN_TASK = asyncio.create_task(_worker_loop())
+
+
+async def _worker_loop() -> None:
+    while True:
+        task = None
+        async with _SCAN_PENDING_LOCK:
+            if _SCAN_PENDING:
+                _, task = _SCAN_PENDING.popitem(last=False)
+            else:
+                task = None
+        
+        if not task:
+            await asyncio.sleep(0.5)
+            # Check exit condition or sleep again
+            # We keep running to allow new tasks to arrive
+            continue
+
+        try:
+            # Import strictly locally or use the core helper to avoid circular imports if possible
+            # But here we are effectively inside backend.routes.handlers
+            # We can use the helper from core.
+            svc, error_result = await _require_services()
+            if error_result:
+                _record_scan_failure(str(task.get("directory")), str(task.get("source")), "SERVICE_UNAVAILABLE", str(error_result.error or ""))
+                await asyncio.sleep(2) # Backoff if services unavailable
+                continue
+
+            try:
+                try:
+                    await svc["index"].scan_directory(
+                        str(task.get("directory")),
+                        bool(task.get("recursive")),
+                        bool(task.get("incremental")),
+                        source=str(task.get("source") or "output"),
+                        root_id=task.get("root_id"),
+                        fast=bool(task.get("fast")),
+                        background_metadata=bool(task.get("background_metadata")),
+                    )
+                except TypeError:
+                     # Fallback in case of call signature mismatch
+                    await svc["index"].scan_directory(
+                        str(task.get("directory")),
+                        bool(task.get("recursive")),
+                        bool(task.get("incremental")),
+                        source=str(task.get("source") or "output"),
+                        root_id=task.get("root_id"),
+                    )
+            except Exception as exc:
+                _record_scan_failure(str(task.get("directory")), str(task.get("source")), "SCAN_FAILED", str(exc))
+                logger.warning("Background scan failed: %s", exc)
+                
+        except Exception:
+            try:
+                _record_scan_failure(str(task.get("directory")), str(task.get("source")), "EXCEPTION", "Unhandled exception")
+            except Exception:
+                pass
+        
+        # Yield to event loop
+        await asyncio.sleep(0)
 
 
 def _record_scan_failure(directory: str, source: str, code: str, error: str) -> None:
-    global _BACKGROUND_SCAN_FAILURES
-    try:
-        entry = {
-            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "directory": str(directory),
-            "source": str(source),
-            "code": str(code),
-            "error": str(error)[:500],
-        }
-        _BACKGROUND_SCAN_FAILURES.append(entry)
-        if len(_BACKGROUND_SCAN_FAILURES) > _MAX_FAILURE_HISTORY:
-            _BACKGROUND_SCAN_FAILURES = _BACKGROUND_SCAN_FAILURES[-_MAX_FAILURE_HISTORY:]
-    except Exception:
-        return
+    # No async lock needed for simple append/pop in main thread
+    _BACKGROUND_SCAN_FAILURES.insert(0, {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "directory": directory,
+        "source": source,
+        "code": code,
+        "error": error
+    })
+    # Trim
+    while len(_BACKGROUND_SCAN_FAILURES) > _MAX_FAILURE_HISTORY:
+        _BACKGROUND_SCAN_FAILURES.pop()
 
 
-def _fs_cache_get_or_build(
+async def _fs_cache_get_or_build(
     base: Path,
     target_dir_resolved: Path,
     asset_type: str,
     root_id: Optional[str],
 ) -> Result[dict[str, Any]]:
+    # Made async to allow async locking if needed, though mostly sync logic
     try:
         if FS_LIST_CACHE_WATCHDOG:
             ensure_fs_list_cache_watching(str(base))
@@ -195,7 +199,8 @@ def _fs_cache_get_or_build(
         watch_token = 0
 
     cache_key = f"{str(base)}|{str(target_dir_resolved)}|{asset_type}|{str(root_id or '')}"
-    with _FS_LIST_CACHE_LOCK:
+    
+    async with _FS_LIST_CACHE_LOCK:
         cached = _FS_LIST_CACHE.get(cache_key)
         if (
             cached
@@ -212,11 +217,12 @@ def _fs_cache_get_or_build(
             except Exception:
                 pass
             _FS_LIST_CACHE.move_to_end(cache_key)
-            # If TTL expired, rebuild even if directory mtime did not change. Some filesystems
-            # do not bump dir mtime when file contents change, which would otherwise cause stale listings.
 
     entries: list[dict[str, Any]] = []
     try:
+        # Note: os.scandir/iterdir is synchronous I/O. 
+        # For large directories, this will block the loop.
+        # Ideally this should run in a thread executor, but for now we keep it simple.
         for entry in target_dir_resolved.iterdir():
             if not entry.is_file():
                 continue
@@ -229,8 +235,12 @@ def _fs_cache_get_or_build(
             except OSError:
                 continue
 
-            rel_to_root = entry.parent.relative_to(base)
-            sub = "" if str(rel_to_root) == "." else str(rel_to_root).replace("\\", "/")
+            try:
+                rel_to_root = entry.parent.relative_to(base)
+                sub = "" if str(rel_to_root) == "." else str(rel_to_root).replace("\\", "/")
+            except ValueError:
+                sub = ""
+                
             entries.append(
                 {
                     "id": None,
@@ -247,7 +257,6 @@ def _fs_cache_get_or_build(
                     "rating": 0,
                     "tags": [],
                     "has_workflow": 0,
-                    # Keep both keys for backward compatibility; the DB column is `has_generation_data`.
                     "has_generation_data": 0,
                     "has_generation_metadata": 0,
                     "type": asset_type,
@@ -257,7 +266,7 @@ def _fs_cache_get_or_build(
     except OSError as exc:
         return Result.Err("LIST_FAILED", f"Failed to list directory: {exc}")
 
-    with _FS_LIST_CACHE_LOCK:
+    async with _FS_LIST_CACHE_LOCK:
         _FS_LIST_CACHE[cache_key] = {
             "dir_mtime_ns": dir_mtime_ns,
             "watch_token": watch_token,
@@ -313,10 +322,8 @@ async def _list_filesystem_assets(
     filter_mtime_start = int(mtime_start_raw) if mtime_start_raw is not None else None
     filter_mtime_end = int(mtime_end_raw) if mtime_end_raw is not None else None
 
-    # Removed the early return that was causing filters to return empty results
-    # The filtering will now be handled properly below after metadata enrichment
-
-    cache_result = _fs_cache_get_or_build(base, target_dir_resolved, asset_type, root_id)
+    # Changed to await the async cache builder
+    cache_result = await _fs_cache_get_or_build(base, target_dir_resolved, asset_type, root_id)
     if not cache_result.ok:
         return cache_result
     all_entries = cache_result.data.get("entries") if isinstance(cache_result.data, dict) else None
@@ -373,11 +380,11 @@ async def _list_filesystem_assets(
         logger.debug("Filesystem DB enrichment skipped: %s", exc)
 
     # Apply filters after enrichment.
-    # Keep memory predictable by building only the requested page while still computing `total`.
     total = 0
     paged: list[dict[str, Any]] = []
     start = max(0, int(offset or 0))
-    end = start + int(limit or 0) if int(limit or 0) > 0 else None
+    limit_int = int(limit or 0)
+    end = start + limit_int if limit_int > 0 else None
 
     for item in entries:
         if filter_kind and item.get("kind") != filter_kind:

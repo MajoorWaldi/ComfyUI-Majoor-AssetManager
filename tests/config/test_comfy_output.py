@@ -16,7 +16,8 @@ from backend.deps import build_services
 
 logger = get_logger(__name__)
 
-def test_comfy_output(tmp_path):
+@pytest.mark.asyncio
+async def test_comfy_output(tmp_path):
     """Test with ComfyUI's actual output directory."""
     logger.info("=" * 60)
     logger.info("Testing ComfyUI Output Directory Scanning")
@@ -24,9 +25,8 @@ def test_comfy_output(tmp_path):
 
     # Build services
     db_path = tmp_path / "comfy_output_test.db"
-    services = build_services(str(db_path))
+    services = await build_services(str(db_path))
     index_service = services["index"]
-
     # ComfyUI output directory.
     # Prefer explicit env override to avoid depending on local ComfyUI install.
     output_dir_env = os.environ.get("MJR_TEST_COMFY_OUTPUT_DIR") or os.environ.get("COMFYUI_OUTPUT_DIR")
@@ -52,7 +52,7 @@ def test_comfy_output(tmp_path):
     # Test 1: Scan ComfyUI output directory
     logger.info("\nTest 1: Full scan of output directory")
 
-    result = index_service.scan_directory(
+    result = await index_service.scan_directory(
         directory=str(output_dir),
         recursive=True,
         incremental=False
@@ -74,11 +74,11 @@ def test_comfy_output(tmp_path):
     # Test 2: Search for images with workflows
     logger.info("\nTest 2: Search for images with ComfyUI workflows")
 
-    result = asyncio.run(index_service.search(
+    result = await index_service.search(
         query="ComfyUI OR AnimateDiff",
         limit=20,
         filters={"has_workflow": True}
-    ))
+    )
 
     if result.ok:
         log_success(logger, "Search completed!")
@@ -104,11 +104,11 @@ def test_comfy_output(tmp_path):
     # Test 3: Search for videos
     logger.info("\nTest 3: Search for video files")
 
-    result = asyncio.run(index_service.search(
+    result = await index_service.search(
         query="mp4 OR video",
         limit=10,
         filters={"kind": "video"}
-    ))
+    )
 
     if result.ok:
         log_success(logger, "Video search completed!")
@@ -125,10 +125,10 @@ def test_comfy_output(tmp_path):
     # Test 4: Search by subfolder
     logger.info("\nTest 4: Search files in 'test' subfolder")
 
-    result = asyncio.run(index_service.search(
+    result = await index_service.search(
         query="test",
         limit=50
-    ))
+    )
 
     if result.ok:
         log_success(logger, "Subfolder search completed!")
@@ -150,7 +150,7 @@ def test_comfy_output(tmp_path):
     # Test 5: Get database statistics
     logger.info("\nTest 5: Database statistics")
 
-    health_result = services["health"].get_counters()
+    health_result = await services["health"].get_counters()
 
     if health_result.ok:
         log_success(logger, "Database stats retrieved!")
