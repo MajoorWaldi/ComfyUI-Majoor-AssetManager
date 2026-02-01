@@ -35,6 +35,7 @@ export function createContextController({
         clearQuery: async () => {
             try {
                 _safeSetValue(searchInputEl, "");
+                state.searchQuery = "";
             } catch {}
             try {
                 await reloadGrid?.();
@@ -69,6 +70,8 @@ export function createContextController({
         },
         clearFolder: async () => {
             try {
+                // Ensure state is cleared so it doesn't get restored
+                state.subfolder = ""; 
                 delete gridContainer?.dataset?.mjrSubfolder;
             } catch {}
             try {

@@ -14,25 +14,73 @@ import { safeDispatchCustomEvent } from "../../utils/events.js";
 import { pickRootId } from "../../utils/ids.js";
 import { bindAssetDragStart } from "../dnd/DragDrop.js";
 import { loadMajoorSettings } from "../../app/settings.js";
+import { VirtualGrid } from "./VirtualGrid.js";
 
+/** 
+ * Strict typing for State management 
+ * @typedef {Object} GridState
+ * @property {string} query Current search string
+ * @property {number} offset Pagination offset
+ * @property {number|null} total Total items on server
+ * @property {boolean} loading Is fetch in progress
+ * @property {boolean} done Is pagination exhausted
+ * @property {Set<string>} seenKeys Identifiers to prevent duplicates
+ * @property {Array<Object>} assets Array of Asset objects (Data Store)
+ * @property {Map<string, number>} filenameCounts Collision detection map
+ * @property {Set<string>} nonImageStems Logic for hiding PNG siblings
+ * @property {Map<string, Array<Object>>} stemMap Logic for hiding PNG siblings
+ * @property {Map<string, Array<HTMLElement>>} renderedFilenameMap Live DOM references
+ * @property {VirtualGrid|null} virtualGrid The virtual renderer instance
+ * @property {HTMLElement|null} sentinel Infinite scroll trigger
+ * @property {IntersectionObserver|null} observer Infinite scroll observer
+ */
+/** @type {WeakMap<HTMLElement, GridState>} */
 const GRID_STATE = new WeakMap();
 
 const RT_HYDRATE_CONCURRENCY = APP_CONFIG.RT_HYDRATE_CONCURRENCY ?? 2;
 const RT_HYDRATE_QUEUE_MAX = APP_CONFIG.RT_HYDRATE_QUEUE_MAX ?? 100;
-const RT_HYDRATE_SEEN = new Set();
+// Globals removed to prevent cross-grid contamination
 const RT_HYDRATE_SEEN_MAX = APP_CONFIG.RT_HYDRATE_SEEN_MAX ?? 20000;
 const RT_HYDRATE_SEEN_TTL_MS = APP_CONFIG.RT_HYDRATE_SEEN_TTL_MS ?? (10 * 60 * 1000);
 let rtHydrateSeenPruneBudget = 0;
-let rtHydrateSeenLastPruneAt = 0;
-const RT_HYDRATE_STATE = new WeakMap(); // gridContainer -> { queue: [], inflight: 0 }
-const RT_HYDRATE_ACTIVE = new Set(); // ids currently queued/in-flight across grids (best-effort)
+// RT_HYDRATE_STATE remains as the per-grid state map
+const RT_HYDRATE_STATE = new WeakMap(); // gridContainer -> { queue, inflight, seen, active, lastPruneAt }
 
+// Temporary debug logging for grid + infinite scroll.
+// Enable at runtime from the browser console:
+//   globalThis._mjrDebugGrid = true
+const _gridDebugEnabled = () => {
+    try {
+        return !!globalThis?._mjrDebugGrid;
+    } catch {
+        return false;
+    }
+};
+
+const gridDebug = (...args) => {
+    try {
+        if (!_gridDebugEnabled()) return;
+        console.log("[Majoor][Grid]", ...args);
+    } catch {}
+};
+
+/**
+ * Get hydration state for a grid.
+ * @param {HTMLElement} gridContainer 
+ * @returns {{queue: any[], inflight: number, seen: Set<string>, active: Set<string>, lastPruneAt: number}|null}
+ */
 function _getRtHydrateState(gridContainer) {
     try {
         if (!gridContainer) return null;
         let s = RT_HYDRATE_STATE.get(gridContainer);
         if (!s) {
-            s = { queue: [], inflight: 0 };
+            s = { 
+                queue: [], 
+                inflight: 0,
+                seen: new Set(),
+                active: new Set(),
+                lastPruneAt: 0
+            };
             RT_HYDRATE_STATE.set(gridContainer, s);
         }
         return s;
@@ -41,40 +89,26 @@ function _getRtHydrateState(gridContainer) {
     }
 }
 
-function pruneRatingTagsHydrateSeen() {
-    // Avoid unbounded growth on large libraries; prune occasionally to keep perf predictable.
+function pruneRatingTagsHydrateSeen(st) {
+    if (!st || !st.seen) return;
     const now = Date.now();
-    const needsSizePrune = RT_HYDRATE_SEEN.size > RT_HYDRATE_SEEN_MAX;
+    const needsSizePrune = st.seen.size > RT_HYDRATE_SEEN_MAX;
     const needsTimePrune =
-        rtHydrateSeenLastPruneAt > 0
-        && (now - rtHydrateSeenLastPruneAt) > RT_HYDRATE_SEEN_TTL_MS
-        && RT_HYDRATE_SEEN.size > Math.max(1000, Math.floor(RT_HYDRATE_SEEN_MAX / 4));
+        st.lastPruneAt > 0
+        && (now - st.lastPruneAt) > RT_HYDRATE_SEEN_TTL_MS
+        && st.seen.size > Math.max(1000, Math.floor(RT_HYDRATE_SEEN_MAX / 4));
 
     if (!needsSizePrune && !needsTimePrune) return;
     if (rtHydrateSeenPruneBudget > 0) {
         rtHydrateSeenPruneBudget -= 1;
         return;
     }
-    rtHydrateSeenPruneBudget = APP_CONFIG.RT_HYDRATE_PRUNE_BUDGET ?? 250;
-    rtHydrateSeenLastPruneAt = now;
-
-    try {
-        const keep = new Set();
-        // Keep items that are still queued/in-flight first.
-        try {
-            for (const id of RT_HYDRATE_ACTIVE) keep.add(String(id));
-        } catch {}
-        // Keep up to half of the max from the existing set (in insertion order).
-        const target = Math.max(1000, Math.floor(RT_HYDRATE_SEEN_MAX / 2));
-        if (keep.size < target) {
-            for (const id of RT_HYDRATE_SEEN) {
-                keep.add(id);
-                if (keep.size >= target) break;
-            }
-        }
-        RT_HYDRATE_SEEN.clear();
-        for (const id of keep) RT_HYDRATE_SEEN.add(id);
-    } catch {}
+    
+    // Simple prune: clear all if oversize (easiest logic for set) -> actually Set doesn't sort by time.
+    // If we want LRU we need Map. But here we just clear or we accept unbounded growth until hard reset.
+    // Logic: if too big or too old, clear it.
+    st.seen.clear();
+    st.lastPruneAt = now;
 }
 
 function _updateCardRatingTagsBadges(card, rating, tags) {
@@ -103,7 +137,7 @@ function _updateCardRatingTagsBadges(card, rating, tags) {
                 for (let i = 0; i < ratingValue; i++) {
                     const star = document.createElement("span");
                     star.textContent = "★";
-                    star.style.color = "#FFD45A";
+                    star.style.color = "var(--mjr-star-active, #FFD45A)";
                     star.style.marginRight = i < ratingValue - 1 ? "2px" : "0";
                     stars.push(star);
                 }
@@ -164,7 +198,7 @@ function _pumpRatingTagsHydration(gridContainer) {
             .catch(() => null)
             .finally(() => {
                 try {
-                    RT_HYDRATE_ACTIVE.delete(String(job.id));
+                    st.active.delete(String(job.id));
                 } catch {}
                 st.inflight -= 1;
                 _pumpRatingTagsHydration(gridContainer);
@@ -175,21 +209,22 @@ function _pumpRatingTagsHydration(gridContainer) {
 function enqueueRatingTagsHydration(gridContainer, card, asset) {
     const id = asset?.id != null ? String(asset.id) : "";
     if (!id) return;
-    if (RT_HYDRATE_SEEN.has(id)) return;
     const st = _getRtHydrateState(gridContainer);
     if (!st) return;
+
+    if (st.seen.has(id)) return;
 
     const rating = Number(asset?.rating || 0) || 0;
     const tags = asset?.tags;
     const tagsEmpty = !(Array.isArray(tags) && tags.length);
     if (rating > 0 && !tagsEmpty) {
-        RT_HYDRATE_SEEN.add(id);
+        st.seen.add(id);
         return;
     }
 
     // Hydrate only when both are missing in DB (avoid extra IO).
     if (rating > 0 || !tagsEmpty) {
-        RT_HYDRATE_SEEN.add(id);
+        st.seen.add(id);
         return;
     }
 
@@ -198,18 +233,18 @@ function enqueueRatingTagsHydration(gridContainer, card, asset) {
         while (st.queue.length >= RT_HYDRATE_QUEUE_MAX) {
             const dropped = st.queue.shift();
             try {
-                if (dropped?.id) RT_HYDRATE_ACTIVE.delete(String(dropped.id));
+                if (dropped?.id) st.active.delete(String(dropped.id));
             } catch {}
             try {
-                if (dropped?.id) RT_HYDRATE_SEEN.delete(String(dropped.id));
+                if (dropped?.id) st.seen.delete(String(dropped.id));
             } catch {}
         }
     } catch {}
 
-    RT_HYDRATE_SEEN.add(id);
-    pruneRatingTagsHydrateSeen();
+    st.seen.add(id);
+    pruneRatingTagsHydrateSeen(st);
     try {
-        RT_HYDRATE_ACTIVE.add(id);
+        st.active.add(id);
     } catch {}
     st.queue.push({ id, card, asset });
     _pumpRatingTagsHydration(gridContainer);
@@ -217,6 +252,7 @@ function enqueueRatingTagsHydration(gridContainer, card, asset) {
 
 /**
  * Create grid container
+ * @returns {HTMLElement} The configured grid container
  */
 export function createGridContainer() {
     const container = document.createElement("div");
@@ -232,16 +268,31 @@ export function createGridContainer() {
 
     // Bind double-click to open viewer
     container.addEventListener('dblclick', (e) => {
+        /** @type {HTMLElement} */
+        // @ts-ignore
         const card = e.target.closest('.mjr-asset-card');
         if (!card) return;
 
+        /** @type {Object} */
+        // @ts-ignore
         const asset = card._mjrAsset;
         if (!asset) return;
 
         // Get all assets in current grid for navigation
-        const allCards = Array.from(container.querySelectorAll('.mjr-asset-card'));
-        const allAssets = allCards.map(c => c._mjrAsset).filter(Boolean);
-        const currentIndex = allAssets.findIndex(a => a.id === asset.id);
+        let allAssets, currentIndex;
+        
+        // Use state.assets if available (VirtualGrid support)
+        const state = GRID_STATE.get(container);
+        if (state && state.assets && state.assets.length > 0) {
+             allAssets = state.assets;
+             currentIndex = allAssets.findIndex(a => a.id === asset.id);
+        } else {
+             // Fallback to DOM (legacy)
+             const allCards = Array.from(container.querySelectorAll('.mjr-asset-card'));
+             // @ts-ignore
+             allAssets = allCards.map(c => c._mjrAsset).filter(Boolean);
+             currentIndex = allAssets.findIndex(a => a.id === asset.id);
+        }
 
         // Open viewer
         const viewer = getViewerInstance();
@@ -306,6 +357,11 @@ function sanitizeQuery(query) {
     return cleaned.trim() || query;
 }
 
+/**
+ * Retrieve current grid state or initialize default.
+ * @param {HTMLElement} gridContainer 
+ * @returns {GridState}
+ */
 function getOrCreateState(gridContainer) {
     let state = GRID_STATE.get(gridContainer);
     if (!state) {
@@ -319,6 +375,14 @@ function getOrCreateState(gridContainer) {
             assets: [],
             filenameCounts: new Map(),
             nonImageStems: new Set(),
+            // Virtual Grid mappings
+            stemMap: new Map(), // stem -> [Asset]
+            renderedFilenameMap: new Map(), // filenameKey -> [DOMElement] (only currently rendered)
+            
+            // Legacy / unused in virtual mode but kept for safety if referenced elsewhere
+            cardStemMap: new Map(),
+            cardFilenameMap: new Map(),
+            
             sentinel: null,
             observer: null,
             scrollRoot: null,
@@ -327,11 +391,158 @@ function getOrCreateState(gridContainer) {
             userScrolled: false,
             allowUntilFilled: true,
             requestId: 0,
-            abortController: null
+            abortController: null,
+            virtualGrid: null
         };
         GRID_STATE.set(gridContainer, state);
     }
     return state;
+}
+
+function _isPotentialScrollContainer(el) {
+    if (!el || el === window) return false;
+    // In this project we want a dedicated scroll container (not window scrolling).
+    if (el === document.body || el === document.documentElement) return false;
+    try {
+        const style = window.getComputedStyle(el);
+        const overflowY = String(style?.overflowY || "");
+        if (!/(auto|scroll|overlay)/.test(overflowY)) return false;
+        const clientH = Number(el.clientHeight) || 0;
+        if (clientH <= 0) return false;
+
+        // IMPORTANT: At initial load the container may not overflow yet.
+        // If CSS already declares it scrollable and it has a height, it is a valid scroll root.
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function _detectScrollRoot(gridContainer) {
+    // Prefer an explicit browse container if present.
+    // This is the intended scroll root for the grid UI.
+    try {
+        const browse = gridContainer?.closest?.(".mjr-am-browse") || null;
+        if (browse && _isPotentialScrollContainer(browse)) return browse;
+    } catch {}
+
+    // Prefer the nearest *actually usable* scroll container.
+    try {
+        let cur = gridContainer?.parentElement;
+        while (cur && cur !== document.body && cur !== document.documentElement) {
+            if (_isPotentialScrollContainer(cur)) return cur;
+            cur = cur.parentElement;
+        }
+    } catch {}
+
+    // Fallback: the immediate parent, even if it isn't scrollable yet.
+    // (Still better than silently switching to window scroll.)
+    return gridContainer?.parentElement || null;
+}
+
+function _getScrollContainer(gridContainer, state) {
+    try {
+        const cur = state?.scrollRoot;
+        if (cur && cur instanceof HTMLElement) return cur;
+    } catch {}
+
+    const detected = _detectScrollRoot(gridContainer);
+    if (detected && state) state.scrollRoot = detected;
+    return detected;
+}
+
+/**
+ * Initializes the VirtualGrid renderer for this container.
+ * @param {HTMLElement} gridContainer 
+ * @param {GridState} state 
+ * @returns {VirtualGrid}
+ */
+function ensureVirtualGrid(gridContainer, state) {
+    if (state.virtualGrid) return state.virtualGrid;
+    
+    const scrollRoot = _getScrollContainer(gridContainer, state);
+
+    try {
+        gridDebug("virtualGrid:scrollRoot", {
+            scrollRoot: scrollRoot === document.body ? "document.body" : scrollRoot === document.documentElement ? "document.documentElement" : scrollRoot?.className || scrollRoot?.tagName || null,
+        });
+    } catch {}
+
+    state.virtualGrid = new VirtualGrid(gridContainer, scrollRoot, {
+        minItemWidth: APP_CONFIG.GRID_MIN_SIZE || 120,
+        gap: APP_CONFIG.GRID_GAP || 10,
+        bufferRows: 3, 
+        createItem: (asset, index) => {
+            const card = createAssetCard(asset);
+            const selectedIds = getSelectedIdSet(gridContainer);
+            // Handle selection
+            if (asset && asset.id != null && selectedIds.has(String(asset.id))) {
+                card.classList.add("is-selected");
+                card.setAttribute("aria-selected", "true");
+            }
+            // Handle collision badge if already known
+            if (asset?._mjrNameCollision) {
+                 const badge = card.querySelector?.(".mjr-file-badge");
+                 setFileBadgeCollision(badge, true);
+                 _setCollisionTooltip(card, asset?.filename, asset?._mjrNameCollisionCount || 2);
+            }
+            return card;
+        },
+        onItemRendered: (asset, card) => {
+            // Hydrate ratings
+            enqueueRatingTagsHydration(gridContainer, card, asset);
+            
+            // Track rendered card for live updates (collisions)
+            const fnKey = _getFilenameKey(asset?.filename);
+            if (fnKey) {
+                let list = state.renderedFilenameMap.get(fnKey);
+                if (!list) {
+                    list = [];
+                    state.renderedFilenameMap.set(fnKey, list);
+                }
+                list.push(card);
+            }
+        },
+        onItemUpdated: (asset, card) => {
+            if (card) {
+                card._mjrAsset = asset;
+                _updateCardRatingTagsBadges(card, asset.rating, asset.tags);
+                
+                const selectedIds = getSelectedIdSet(gridContainer);
+                if (selectedIds && asset.id != null) {
+                    if (selectedIds.has(String(asset.id))) {
+                         card.classList.add("is-selected");
+                         card.setAttribute("aria-selected", "true");
+                    } else {
+                         card.classList.remove("is-selected");
+                         card.setAttribute("aria-selected", "false");
+                    }
+                }
+            }
+        },
+        onItemRecycled: (card) => {
+            // Cleanup map
+            try {
+                const asset = card._mjrAsset;
+                const fnKey = _getFilenameKey(asset?.filename);
+                if (fnKey) {
+                    const list = state.renderedFilenameMap.get(fnKey);
+                    if (list) {
+                        const idx = list.indexOf(card);
+                        if (idx > -1) list.splice(idx, 1);
+                    }
+                }
+            } catch {}
+            
+            // Cleanup video thumbs
+            try {
+                 // Use the exported cleanup if available or implement inline
+                 cleanupVideoThumbsIn(card);
+            } catch {}
+        }
+    });
+    
+    return state.virtualGrid;
 }
 
 function assetKey(asset) {
@@ -432,18 +643,24 @@ function _setCollisionTooltip(card, filename, count) {
 
 function appendAssets(gridContainer, assets, state) {
     const hidePngSiblings = _isHidePngSiblingsEnabled();
-    const selectedIds = getSelectedIdSet(gridContainer);
-    const frag = document.createDocumentFragment();
-    const newAssets = [];
-    let added = 0;
-
-    if (state.hiddenPngSiblings == null) state.hiddenPngSiblings = 0;
-    if (!hidePngSiblings) state.hiddenPngSiblings = 0;
-
     const filenameCounts = state.filenameCounts || new Map();
     state.filenameCounts = filenameCounts;
     const nonImageStems = state.nonImageStems || new Set();
     state.nonImageStems = nonImageStems;
+
+    // Use VirtualGrid
+    const vg = ensureVirtualGrid(gridContainer, state);
+    if (!vg) return 0;
+
+    if (state.hiddenPngSiblings == null) state.hiddenPngSiblings = 0;
+    if (!hidePngSiblings) state.hiddenPngSiblings = 0;
+
+    const stemMap = state.stemMap || new Map();
+    state.stemMap = stemMap;
+    
+    let addedCount = 0;
+    let needsUpdate = false;
+    const validNewAssets = [];
 
     for (const asset of assets || []) {
         const filename = String(asset?.filename || "");
@@ -451,135 +668,130 @@ function appendAssets(gridContainer, assets, state) {
         const stemLower = _getStemLower(filename);
         const kind = _detectKind(asset, extUpper);
 
-        // Hide PNG siblings for videos: if a non-image exists with the same stem, hide the PNG.
+        // Hide PNG Siblings Logic
         if (hidePngSiblings && stemLower) {
             if (kind !== "image") {
-                try {
-                    nonImageStems.add(stemLower);
-                } catch {}
-
-                // If the PNG was already rendered, remove it now (best-effort).
-                try {
-                    const stemSel = CSS.escape ? CSS.escape(stemLower) : stemLower;
-                    const sibCards = Array.from(
-                        gridContainer.querySelectorAll(`.mjr-asset-card[data-mjr-stem="${stemSel}"][data-mjr-ext="PNG"]`)
-                    );
-                    try {
-                        state.hiddenPngSiblings += Number(sibCards.length || 0) || 0;
-                    } catch {}
-                    for (const c of sibCards) {
-                        try {
-                            const sibAsset = c?._mjrAsset;
-                            const sibKey = assetKey(sibAsset);
-                            if (sibKey) {
-                                try {
-                                    state.assets = (state.assets || []).filter((a) => assetKey(a) !== sibKey);
-                                } catch {}
-                            }
-                        } catch {}
-                        try {
-                            c.remove?.();
-                        } catch {}
+                nonImageStems.add(stemLower);
+                
+                // Remove existing PNG siblings from STATE
+                const list = stemMap.get(stemLower);
+                if (list) {
+                    const toRemove = [];
+                    for (let i = list.length - 1; i >= 0; i--) {
+                        if (_getExtUpper(list[i].filename) === "PNG") {
+                            toRemove.push(list[i]);
+                            list.splice(i, 1);
+                        }
                     }
-                } catch {}
+                    if (toRemove.length) {
+                        state.hiddenPngSiblings += toRemove.length;
+                        const removeSet = new Set(toRemove);
+                        state.assets = state.assets.filter(a => !removeSet.has(a));
+                        needsUpdate = true;
+                    }
+                }
             } else if (extUpper === "PNG" && nonImageStems.has(stemLower)) {
-                try {
-                    state.hiddenPngSiblings += 1;
-                } catch {}
-                continue;
+                state.hiddenPngSiblings += 1;
+                continue; // Skip adding this PNG
             }
         }
 
-        // Name collisions: same filename appears multiple times (different folders/roots).
+        // Name Collisions Logic
         const fnKey = _getFilenameKey(filename);
         if (fnKey) {
             const prev = Number(filenameCounts.get(fnKey) || 0) || 0;
             const next = prev + 1;
             filenameCounts.set(fnKey, next);
+            
             if (next >= 2) {
-                asset._mjrNameCollision = true;
-                asset._mjrNameCollisionCount = next;
-
-                // Update already-tracked assets and rendered cards to show "+" and update tooltips.
-                try {
-                    for (const a of state.assets || []) {
-                        if (_getFilenameKey(a?.filename) === fnKey) {
-                            a._mjrNameCollision = true;
-                            a._mjrNameCollisionCount = next;
-                        }
-                    }
-                } catch {}
-                try {
-                    const sel = CSS.escape ? CSS.escape(fnKey) : fnKey;
-                    const cards = Array.from(gridContainer.querySelectorAll(`.mjr-asset-card[data-mjr-filename-key="${sel}"]`));
-                    for (const c of cards) {
-                        try {
-                            const badge = c.querySelector?.(".mjr-file-badge");
-                            setFileBadgeCollision(badge, true);
-                        } catch {}
-                        try {
-                            const a = c?._mjrAsset;
-                            _setCollisionTooltip(c, a?.filename, next);
-                        } catch {}
-                    }
-                } catch {}
+                 asset._mjrNameCollision = true;
+                 asset._mjrNameCollisionCount = next;
+                 
+                 // Update other assets in state (data)
+                 for (const a of state.assets) {
+                     if (_getFilenameKey(a.filename) === fnKey) {
+                         a._mjrNameCollision = true;
+                         a._mjrNameCollisionCount = next;
+                     }
+                 }
+                 
+                 // Update rendered items (view)
+                 const renderedList = state.renderedFilenameMap.get(fnKey);
+                 if (renderedList) {
+                     for (const c of renderedList) {
+                         const badge = c.querySelector?.(".mjr-file-badge");
+                         setFileBadgeCollision(badge, true);
+                         const a = c._mjrAsset;
+                         _setCollisionTooltip(c, a?.filename, next);
+                     }
+                 }
             }
         }
-
+        
         const key = assetKey(asset);
         if (!key) continue;
         if (state.seenKeys.has(key)) continue;
         state.seenKeys.add(key);
-        newAssets.push(asset);
-        const card = createAssetCard(asset);
-        try {
-            if (asset?._mjrNameCollision) {
-                const badge = card.querySelector?.(".mjr-file-badge");
-                setFileBadgeCollision(badge, true);
-                _setCollisionTooltip(card, asset?.filename, asset?._mjrNameCollisionCount || 2);
+        
+        validNewAssets.push(asset);
+        
+        // Update stemMap
+        if (stemLower) {
+            let list = stemMap.get(stemLower);
+            if (!list) {
+                list = [];
+                stemMap.set(stemLower, list);
             }
-        } catch {}
-        try {
-            const id = asset?.id != null ? String(asset.id) : "";
-            if (id && selectedIds.has(id)) {
-                card.classList.add("is-selected");
-                card.setAttribute?.("aria-selected", "true");
-            }
-        } catch {}
-        frag.appendChild(card);
-        // Best-effort: hydrate existing OS rating/tags (if DB empty) without requiring a full rescan.
-        enqueueRatingTagsHydration(gridContainer, card, asset);
-        added += 1;
+            list.push(asset);
+        }
+        
+        addedCount++;
     }
-    if (added > 0) {
-        try {
-            state.assets.push(...newAssets);
-        } catch {}
-        gridContainer.appendChild(frag);
-        // Update context menu asset list (bind is idempotent).
-        // Context menus are bound by the panel.
+
+    if (validNewAssets.length > 0) {
+        state.assets.push(...validNewAssets);
+        needsUpdate = true;
+    }
+
+    if (needsUpdate) {
+        // Update the virtual grid
+        vg.setItems(state.assets);
+        
+        // Ensure sentinel is at the bottom
+        if (state.sentinel) {
+            gridContainer.appendChild(state.sentinel);
+        }
     }
 
     try {
         gridContainer.dataset.mjrHidePngSiblingsEnabled = hidePngSiblings ? "1" : "0";
         gridContainer.dataset.mjrHiddenPngSiblings = String(Number(state.hiddenPngSiblings || 0) || 0);
     } catch {}
-    return added;
+    
+    return addedCount;
 }
 
 function ensureSentinel(gridContainer, state) {
     let sentinel = state.sentinel;
-    if (sentinel && sentinel.isConnected) return sentinel;
-    sentinel = document.createElement("div");
-    sentinel.className = SENTINEL_CLASS;
-    // Ensure it's always placed at the end of the grid and spans all columns.
-    // This stabilizes IntersectionObserver triggering as the panel resizes.
-    sentinel.style.cssText = "height: 1px; width: 100%; grid-column: 1 / -1;";
-    state.sentinel = sentinel;
+    // Fix: Force ensure it is last child
+    if (sentinel && sentinel.isConnected && sentinel.parentNode === gridContainer && !sentinel.nextSibling) return sentinel;
+    
+    if (sentinel) {
+        sentinel.remove();
+    } else {
+        sentinel = document.createElement("div");
+        sentinel.className = SENTINEL_CLASS;
+        // z-index -10 to prevent interference
+        sentinel.style.cssText = "height: 1px; width: 100%; position: absolute; bottom: 0; left: 0; pointer-events: none; z-index: -10;";
+        state.sentinel = sentinel;
+    }
     gridContainer.appendChild(sentinel);
+    
+    if (state.observer) {
+        try { state.observer.observe(sentinel); } catch {}
+    }
     return sentinel;
 }
-
 function stopObserver(state) {
     try {
         if (state.observer) state.observer.disconnect();
@@ -591,11 +803,12 @@ function stopObserver(state) {
     state.sentinel = null;
 
     try {
-        if (state.scrollRoot && state.scrollHandler) {
-            state.scrollRoot.removeEventListener("scroll", state.scrollHandler, { passive: true });
+        if (state.scrollTarget && state.scrollHandler) {
+            state.scrollTarget.removeEventListener("scroll", state.scrollHandler);
         }
     } catch {}
     state.scrollRoot = null;
+    state.scrollTarget = null;
     state.scrollHandler = null;
     state.ignoreNextScroll = false;
     state.userScrolled = false;
@@ -605,27 +818,33 @@ function stopObserver(state) {
 function captureScrollMetrics(state) {
     const root = state?.scrollRoot;
     if (!root) return null;
+    
+    // Dedicated scroll container only
     const clientHeight = Number(root.clientHeight) || 0;
     const scrollHeight = Number(root.scrollHeight) || 0;
     const scrollTop = Number(root.scrollTop) || 0;
+
     const bottomGap = scrollHeight - (scrollTop + clientHeight);
     return { clientHeight, scrollHeight, scrollTop, bottomGap };
 }
 
 function maybeKeepPinnedToBottom(state, before) {
-    const root = state?.scrollRoot;
-    if (!root || !before) return;
-
-    // If the user was effectively at the bottom before we appended, keep them pinned
-    // to avoid the scrollbar "jumping up" when new content increases scrollHeight.
-    if (before.bottomGap <= 2) {
-        try {
-            state.ignoreNextScroll = true;
-            root.scrollTop = root.scrollHeight - root.clientHeight;
-        } catch {}
-    }
+    // Disabled: Standard infinite scroll should not force pin to bottom on append.
+    // This logic is problematic for grids where we want to seeing new content naturally.
+    return; 
 }
 
+/**
+ * Fetch a page of assets from the backend.
+ * @param {HTMLElement} gridContainer 
+ * @param {string} query Search query
+ * @param {number} limit Page size
+ * @param {number} offset Offset
+ * @param {Object} options 
+ * @param {number} [options.requestId]
+ * @param {AbortSignal} [options.signal]
+ * @returns {Promise<{ok: boolean, assets?: any[], total?: number, count?: number, error?: string, aborted?: boolean, stale?: boolean, sortKey?: string, safeQuery?: string}>}
+ */
 async function fetchPage(gridContainer, query, limit, offset, { requestId = 0, signal = null } = {}) {
     const scope = gridContainer?.dataset?.mjrScope || "output";
     const customRootId = gridContainer?.dataset?.mjrCustomRootId || "";
@@ -714,10 +933,28 @@ async function loadNextPage(gridContainer, state) {
     const limit = Math.max(1, Math.min(APP_CONFIG.MAX_PAGE_SIZE, APP_CONFIG.DEFAULT_PAGE_SIZE));
     state.loading = true;
     const before = captureScrollMetrics(state);
+    gridDebug("loadNextPage:start", {
+        q: String(state?.query || ""),
+        limit,
+        offset: Number(state?.offset || 0) || 0,
+        done: !!state?.done,
+        loading: !!state?.loading,
+        assetsLen: Array.isArray(state?.assets) ? state.assets.length : -1,
+        scroll: before,
+    });
     try {
         const page = await fetchPage(gridContainer, state.query, limit, state.offset, {
             requestId: Number(state.requestId) || 0,
             signal: state.abortController?.signal || null
+        });
+        gridDebug("loadNextPage:response", {
+            ok: !!page?.ok,
+            aborted: !!page?.aborted,
+            stale: !!page?.stale,
+            error: page?.error || null,
+            count: Number(page?.count || 0) || 0,
+            total: page?.total ?? null,
+            offsetBefore: Number(state?.offset || 0) || 0,
         });
         const dateExact = String(gridContainer?.dataset?.mjrFilterDateExact || "").trim();
         emitAgendaStatus(dateExact, page.ok && Array.isArray(page.assets) && page.assets.length > 0);
@@ -739,15 +976,31 @@ async function loadNextPage(gridContainer, state) {
         const added = appendAssets(gridContainer, page.assets || [], state);
         state.offset += (page.count || 0);
 
+        gridDebug("loadNextPage:append", {
+            added,
+            pageCount: Number(page?.count || 0) || 0,
+            newOffset: Number(state?.offset || 0) || 0,
+            assetsLen: Array.isArray(state?.assets) ? state.assets.length : -1,
+            total: state.total ?? null,
+        });
+
         maybeKeepPinnedToBottom(state, before);
 
         const hasTotal = state.total != null && Number(state.total) > 0;
-        if ((page.count || 0) === 0 || (hasTotal && state.offset >= Number(state.total))) {
+        
+        // Fix: Conservative stop condition.
+        // We ignore state.total because it might be approximate.
+        // We only stop if we received 0 items. 
+        // Note: We could also stop if count < limit, but relying on 0 is safer against 
+        // backends that might return partial pages due to filtering/timeouts.
+        if ((page.count || 0) === 0) {
             state.done = true;
             stopObserver(state);
+            gridDebug("loadNextPage:done", { reason: "page.count==0", offset: Number(state?.offset || 0) || 0 });
         }
     } finally {
         state.loading = false;
+        gridDebug("loadNextPage:finally", { loading: false, done: !!state?.done });
     }
 }
 
@@ -755,25 +1008,55 @@ function startInfiniteScroll(gridContainer, state) {
     if (!APP_CONFIG.INFINITE_SCROLL_ENABLED) return;
     stopObserver(state);
     const sentinel = ensureSentinel(gridContainer, state);
-    const rootEl = gridContainer.closest(".mjr-am-browse") || gridContainer.parentElement || null;
+
+    // IMPORTANT: Use the same scroll root as VirtualGrid.
+    // If we re-detect incorrectly, the IntersectionObserver never fires on scroll and we
+    // remain stuck on the first page (often ~30 items depending on backend caps).
+    let rootEl = null;
+    try {
+        rootEl = state?.virtualGrid?.scrollElement || null;
+    } catch {
+        rootEl = null;
+    }
+
+    // Fallback: detect a scroll root consistently.
+    if (!rootEl) rootEl = _getScrollContainer(gridContainer, state);
+
+    // Enforce dedicated scroll container mode.
+    if (!rootEl || !(rootEl instanceof HTMLElement)) {
+        gridDebug("infiniteScroll:disabled", { reason: "no scroll container" });
+        return;
+    }
 
     state.scrollRoot = rootEl;
     state.userScrolled = false;
-    state.allowUntilFilled = true;
-    state.ignoreNextScroll = false;
 
-    if (rootEl && !state.scrollHandler) {
+    const scrollTarget = rootEl;
+    state.scrollTarget = scrollTarget;
+
+    gridDebug("infiniteScroll:setup", {
+        rootEl: rootEl?.className || rootEl?.tagName || null,
+        scrollTarget: scrollTarget?.className || scrollTarget?.tagName || null,
+        rootMargin: APP_CONFIG.INFINITE_SCROLL_ROOT_MARGIN || "800px",
+        threshold: APP_CONFIG.INFINITE_SCROLL_THRESHOLD ?? 0.01,
+        offset: Number(state?.offset || 0) || 0,
+        done: !!state?.done,
+    });
+
+    if (scrollTarget && !state.scrollHandler) {
         state.scrollHandler = () => {
-            if (state.ignoreNextScroll) {
-                state.ignoreNextScroll = false;
-                return;
-            }
-            state.userScrolled = true;
+             if (state.ignoreNextScroll) {
+                 state.ignoreNextScroll = false;
+                 return;
+             }
+             state.userScrolled = true;
         };
         try {
-            rootEl.addEventListener("scroll", state.scrollHandler, { passive: true });
+            scrollTarget.addEventListener("scroll", state.scrollHandler, { passive: true });
         } catch {}
     }
+
+    const observerRoot = rootEl;
 
     state.observer = new IntersectionObserver(
         (entries) => {
@@ -781,14 +1064,36 @@ function startInfiniteScroll(gridContainer, state) {
                 if (!entry.isIntersecting) continue;
                 if (state.loading || state.done) return;
 
+                gridDebug("infiniteScroll:intersect", {
+                    offset: Number(state?.offset || 0) || 0,
+                    total: state?.total ?? null,
+                    loading: !!state?.loading,
+                    done: !!state?.done,
+                    metrics: captureScrollMetrics(state),
+                    targetConnected: !!sentinel?.isConnected,
+                });
+
                 // Prevent repeated auto-loads when new content is appended while the user
                 // stays pinned at the bottom. Require a user scroll between loads unless
                 // the grid doesn't fill the viewport yet (initial fill).
                 const metrics = captureScrollMetrics(state);
-                const fillsViewport = metrics ? metrics.scrollHeight > metrics.clientHeight + 40 : true;
-                if (!state.userScrolled && fillsViewport && !state.allowUntilFilled) {
-                    return;
-                }
+                const fillsViewport = metrics ? metrics.scrollHeight > metrics.clientHeight + 40 : false;
+                
+                // Fix: Force load if not filled, regardless of user scroll state.
+                // If it fills viewport but userScrolled is false, we might still want to load
+                // if the sentinel is stubbornly visible (e.g. big screens).
+                // So we relax the check: ONLY block if fillsViewport AND allowUntilFilled is false AND !userScrolled.
+                /* 
+                   CRITICAL FIX: We cannot block inside the IntersectionObserver callback based on state.userScrolled.
+                   Observer only fires on STATE CHANGE. If we block now, and the user scrolls (keeping sentinel intersecting),
+                   the observer will NOT fire again, and the user will hit the bottom with no load.
+                   
+                   We rely on rootMargin ("800px") to naturally stop the loading once we have enough buffer.
+                   As long as items are adding height (pushing sentinel down), this will terminate.
+                */
+                // if (!state.userScrolled && fillsViewport && !state.allowUntilFilled) {
+                //    return;
+                // }
                 try {
                     state.observer?.unobserve?.(sentinel);
                 } catch {}
@@ -808,7 +1113,7 @@ function startInfiniteScroll(gridContainer, state) {
             }
         },
         {
-            root: rootEl,
+            root: observerRoot,
             rootMargin: APP_CONFIG.INFINITE_SCROLL_ROOT_MARGIN || "800px",
             threshold: APP_CONFIG.INFINITE_SCROLL_THRESHOLD ?? 0.01
         }
@@ -843,15 +1148,27 @@ export async function loadAssets(gridContainer, query = "*", options = {}) {
         state.total = null;
         state.done = false;
         state.loading = false;
+        state.allowUntilFilled = true; // Reset: Allow auto-filling the viewport on new search
         state.seenKeys = new Set();
         state.assets = [];
         state.filenameCounts = new Map();
+        state.cardStemMap = new Map();
+        state.cardFilenameMap = new Map();
+        state.stemMap = new Map();
+        state.renderedFilenameMap = new Map();
         state.nonImageStems = new Set();
         state.hiddenPngSiblings = 0;
         try {
             gridContainer.dataset.mjrHiddenPngSiblings = "0";
         } catch {}
-        gridContainer.innerHTML = "";
+        
+        // Clear virtual grid items (but keep instance)
+        const vg = ensureVirtualGrid(gridContainer, state);
+        if (vg) vg.setItems([]);
+        // We don't clear innerHTML directly if VirtualGrid is active, as it manages it.
+        // But showLoadingOverlay expects to be appended.
+        // VirtualGrid sets container to relative. Overlay is absolute inset 0. It works.
+        
         showLoadingOverlay(gridContainer, state.query === "*" ? "Loading assets..." : `Searching for "${state.query}"...`);
     }
 
@@ -860,9 +1177,12 @@ export async function loadAssets(gridContainer, query = "*", options = {}) {
 
         if (reset) {
             hideLoadingOverlay(gridContainer);
-            const hasCards = gridContainer.querySelector(".mjr-card") != null;
-            if (!hasCards && state.offset === 0) {
-                gridContainer.innerHTML = "";
+            // Check if items present in state, not just DOM (logic shift)
+            const hasItems = state.assets && state.assets.length > 0;
+            if (!hasItems && state.offset === 0) {
+                // Manually clear to show message
+                if (state.virtualGrid) state.virtualGrid.setItems([]);
+                gridContainer.innerHTML = ""; 
                 const p = document.createElement("p");
                 p.className = "mjr-muted";
                 p.textContent = "No assets found";
@@ -912,12 +1232,19 @@ export async function loadAssetsFromList(gridContainer, assets, options = {}) {
         state.seenKeys = new Set();
         state.assets = [];
         state.filenameCounts = new Map();
+        state.cardStemMap = new Map();
+        state.cardFilenameMap = new Map();
+        state.stemMap = new Map();
+        state.renderedFilenameMap = new Map();
         state.nonImageStems = new Set();
         state.hiddenPngSiblings = 0;
         try {
             gridContainer.dataset.mjrHiddenPngSiblings = "0";
         } catch {}
-        gridContainer.innerHTML = "";
+        
+        const vg = ensureVirtualGrid(gridContainer, state);
+        if (vg) vg.setItems([]);
+        
         showLoadingOverlay(gridContainer, list.length ? `Loading ${title}...` : `${title} is empty`);
     }
 
@@ -936,8 +1263,9 @@ export async function loadAssetsFromList(gridContainer, assets, options = {}) {
 
         if (reset) {
             hideLoadingOverlay(gridContainer);
-            const hasCards = gridContainer.querySelector(".mjr-card") != null;
-            if (!hasCards) {
+            const hasItems = state.assets && state.assets.length > 0;
+            if (!hasItems) {
+                if (state.virtualGrid) state.virtualGrid.setItems([]);
                 gridContainer.innerHTML = "";
                 const p = document.createElement("p");
                 p.className = "mjr-muted";
@@ -966,22 +1294,30 @@ export function disposeGrid(gridContainer) {
     const state = GRID_STATE.get(gridContainer);
     if (!state) return;
     stopObserver(state);
+    
+    // Dispose virtual grid
+    if (state.virtualGrid) {
+        try {
+            state.virtualGrid.dispose();
+        } catch {}
+        state.virtualGrid = null;
+    }
+
     try {
         cleanupVideoThumbsIn?.(gridContainer);
     } catch {}
     try {
         state.seenKeys?.clear?.();
+        state.stemMap?.clear?.();
+        state.renderedFilenameMap?.clear?.();
     } catch {}
-    // Best-effort: clear any queued rating/tag hydration jobs for this grid.
+    // Best-effort callback cleanup
     try {
         const st = _getRtHydrateState(gridContainer);
-        if (st?.queue?.length) {
-            for (const job of st.queue) {
-                try {
-                    if (job?.id) RT_HYDRATE_ACTIVE.delete(String(job.id));
-                } catch {}
-            }
-            st.queue.length = 0;
+        if (st) {
+             st.queue.length = 0;
+             st.active?.clear?.();
+             st.seen?.clear?.();
         }
     } catch {}
     try {
@@ -1046,7 +1382,10 @@ function findAssetElement(gridContainer, assetId) {
 }
 
 /**
- * Update or insert a single asset in the grid
+ * Update or insert a single asset in the grid (Live Update).
+ * @param {HTMLElement} gridContainer 
+ * @param {Object} asset The new or updated asset data
+ * @returns {boolean} True if state was modified
  */
 export function upsertAsset(gridContainer, asset) {
     if (!asset || !asset.id) return false;
@@ -1055,94 +1394,48 @@ export function upsertAsset(gridContainer, asset) {
     const assetId = String(asset.id);
     const key = assetKey(asset);
 
-    // Check if asset already exists in the grid
-    const existingElement = findAssetElement(gridContainer, assetId);
+    const vg = ensureVirtualGrid(gridContainer, state);
+    if (!vg) return false;
 
-    if (existingElement) {
-        // Update existing asset
-        const existingAsset = existingElement._mjrAsset;
-        if (existingAsset) {
-            // Check if the existing element was selected before replacement
-            const wasSelected = existingElement.classList.contains("is-selected");
-            const wasAriaSelected = existingElement.getAttribute("aria-selected");
+    // Check if asset already exists in DATA
+    const existingIndex = state.assets.findIndex(a => String(a.id) === assetId);
 
-            // Update the asset data
-            Object.assign(existingAsset, asset);
-            // Update the card display
-            const card = createAssetCard(asset);
-
-            // Preserve selection state after replacement
-            if (wasSelected) {
-                card.classList.add("is-selected");
-            }
-            if (wasAriaSelected) {
-                card.setAttribute("aria-selected", wasAriaSelected);
-            }
-
-            existingElement.replaceWith(card);
-            return true;
+    if (existingIndex > -1) {
+        // Update existing
+        const existingAsset = state.assets[existingIndex];
+        
+        // Preserve computed properties if not in new asset
+        const collision = existingAsset._mjrNameCollision;
+        const collisionCount = existingAsset._mjrNameCollisionCount;
+        
+        Object.assign(existingAsset, asset);
+        
+        if (collision && !asset._mjrNameCollision) {
+             existingAsset._mjrNameCollision = true;
+             existingAsset._mjrNameCollisionCount = collisionCount;
         }
+
+        // Force virtual grid update by creating new identity
+        state.assets[existingIndex] = { ...existingAsset };
+        vg.setItems(state.assets);
+        return true;
     } else {
-        // Check if asset key is already in seen keys
-        if (!state.seenKeys.has(key)) {
-            // Insert new asset
-            const selectedIds = getSelectedIdSet(gridContainer);
-            const card = createAssetCard(asset);
-            try {
-                if (selectedIds.has(assetId)) {
-                    card.classList.add("is-selected");
-                    card.setAttribute?.("aria-selected", "true");
-                }
-            } catch {}
+        if (state.seenKeys.has(key)) return false;
 
-            // Determine sort order from grid container
-            const sortKey = gridContainer.dataset.mjrSort || "mtime_desc";
+        const sortKey = gridContainer.dataset.mjrSort || "mtime_desc";
+        const insertPos = findInsertPosition(state.assets, asset, sortKey);
 
-            // Insert at the appropriate position based on sort order
-            const allCards = Array.from(gridContainer.querySelectorAll('.mjr-asset-card'));
-            let insertIndex = -1;
-
-            // Find the correct position based on sort order
-            const assetValue = getSortValue(asset, sortKey);
-            for (let i = 0; i < allCards.length; i++) {
-                const cardAsset = allCards[i]._mjrAsset;
-                const cardValue = getSortValue(cardAsset, sortKey);
-
-                if (shouldInsertBefore(assetValue, cardValue, sortKey)) {
-                    insertIndex = i;
-                    break;
-                }
-            }
-
-            if (insertIndex === -1) {
-                // Append to end if no earlier asset found
-                gridContainer.appendChild(card);
-            } else {
-                // Insert at the calculated position
-                gridContainer.insertBefore(card, allCards[insertIndex]);
-            }
-
-            // Add to seen keys and assets array in correct sort position
-            state.seenKeys.add(key);
-            const insertPos = findInsertPosition(state.assets, asset, sortKey);
-            if (insertPos === -1) {
-                state.assets.push(asset);
-            } else {
-                state.assets.splice(insertPos, 0, asset);
-            }
-
-            // Bind context menu and drag start
-            // Context menus are bound by the panel.
-            bindAssetDragStart(gridContainer);
-
-            // Hydrate rating/tags if needed
-            enqueueRatingTagsHydration(gridContainer, card, asset);
-
-            return true;
+        state.seenKeys.add(key);
+        
+        if (insertPos === -1) {
+            state.assets.push(asset);
+        } else {
+            state.assets.splice(insertPos, 0, asset);
         }
-    }
 
-    return false;
+        vg.setItems(state.assets);
+        return true;
+    }
 }
 
 /**
@@ -1150,6 +1443,7 @@ export function upsertAsset(gridContainer, asset) {
  */
 export function captureAnchor(gridContainer) {
     const state = getOrCreateState(gridContainer);
+    const scrollContainer = _getScrollContainer(gridContainer, state);
     const selectedElement = gridContainer.querySelector('.mjr-asset-card.is-selected');
     const firstVisibleElement = getFirstVisibleAssetElement(gridContainer);
 
@@ -1162,7 +1456,7 @@ export function captureAnchor(gridContainer) {
     return {
         id: el.dataset.mjrAssetId,
         top: rect.top - containerRect.top,
-        scrollTop: gridContainer.parentElement?.scrollTop || 0
+        scrollTop: scrollContainer?.scrollTop || 0
     };
 }
 
@@ -1192,6 +1486,10 @@ function getFirstVisibleAssetElement(gridContainer) {
 export async function restoreAnchor(gridContainer, anchor) {
     if (!anchor) return;
 
+    const state = getOrCreateState(gridContainer);
+    const scrollContainer = _getScrollContainer(gridContainer, state);
+    if (!scrollContainer) return;
+
     // Wait for layout to complete
     await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
 
@@ -1202,21 +1500,19 @@ export async function restoreAnchor(gridContainer, anchor) {
     const containerRect = gridContainer.getBoundingClientRect();
     const delta = (rect.top - containerRect.top) - anchor.top;
 
-    const parent = gridContainer.parentElement;
-    if (parent) {
-        parent.scrollTop = (parent.scrollTop || 0) + delta;
-    }
+    scrollContainer.scrollTop = (scrollContainer.scrollTop || 0) + delta;
 }
 
 /**
  * Check if user is at bottom of grid (within threshold)
  */
 export function isAtBottom(gridContainer, threshold = null) {
-    const parent = gridContainer.parentElement;
-    if (!parent) return false;
+    const state = getOrCreateState(gridContainer);
+    const scrollContainer = _getScrollContainer(gridContainer, state);
+    if (!scrollContainer) return false;
 
     const effectiveThreshold = Number(threshold) || Number(APP_CONFIG.BOTTOM_GAP_PX) || 80;
-    const atBottom = (parent.scrollHeight - (parent.scrollTop + parent.clientHeight)) < effectiveThreshold;
+    const atBottom = (scrollContainer.scrollHeight - (scrollContainer.scrollTop + scrollContainer.clientHeight)) < effectiveThreshold;
     return atBottom;
 }
 
@@ -1224,10 +1520,32 @@ export function isAtBottom(gridContainer, threshold = null) {
  * Scroll to bottom of grid
  */
 export function scrollToBottom(gridContainer) {
-    const parent = gridContainer.parentElement;
-    if (parent) {
-        parent.scrollTop = parent.scrollHeight;
-    }
+    const state = getOrCreateState(gridContainer);
+    const scrollContainer = _getScrollContainer(gridContainer, state);
+    if (!scrollContainer) return;
+    scrollContainer.scrollTop = scrollContainer.scrollHeight;
+}
+
+/**
+ * Force specific refresh of the grid visuals (e.g. after settings change).
+ */
+export function refreshGrid(gridContainer) {
+    try {
+        const state = GRID_STATE.get(gridContainer);
+        if (state && state.virtualGrid && state.assets) {
+            // Update VirtualGrid layout config from global settings
+            if (state.virtualGrid.updateConfig) {
+                 state.virtualGrid.updateConfig({
+                     minItemWidth: APP_CONFIG.GRID_MIN_SIZE,
+                     gap: APP_CONFIG.GRID_GAP
+                 });
+            }
+            
+            // Re-setting items triggers a re-render of the visible range.
+            // Pass force=true to ensure Card.js re-reads APP_CONFIG for badges/details updates.
+            state.virtualGrid.setItems(state.assets, true);
+        }
+    } catch {}
 }
 
 /**

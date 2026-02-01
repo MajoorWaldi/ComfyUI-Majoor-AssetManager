@@ -7,6 +7,15 @@
   "repository": "https://github.com/MajoorWaldi/ComfyUI-Majoor-AssetsManager",
   "documentation": "user_guide.html",
   "icon": "https://raw.githubusercontent.com/MajoorWaldi/ComfyUI-Majoor-AssetsManager/main/ressources/icon.png",
+  "tags": [
+    "assets",
+    "manager",
+    "browser",
+    "gallery",
+    "utility",
+    "metadata",
+    "search"
+  ],
   "install_type": "git-clone",
   "js_path": "js",
   "nodename_pattern": "^Majoor"

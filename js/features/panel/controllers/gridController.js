@@ -7,6 +7,7 @@ export function createGridController({ gridContainer, loadAssets, loadAssetsFrom
         } catch {}
         gridContainer.dataset.mjrScope = state.scope;
         gridContainer.dataset.mjrCustomRootId = state.customRootId || "";
+        gridContainer.dataset.mjrSubfolder = state.subfolder || "";
         gridContainer.dataset.mjrFilterKind = state.kindFilter || "";
         gridContainer.dataset.mjrFilterWorkflowOnly = state.workflowOnly ? "1" : "0";
         gridContainer.dataset.mjrFilterMinRating = String(state.minRating || 0);

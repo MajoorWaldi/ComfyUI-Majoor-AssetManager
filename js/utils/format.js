@@ -1,13 +1,22 @@
 function parseDate(input) {
     if (!input) return null;
-    let date;
-    if (typeof input === 'number') {
-        date = new Date(input * 1000);
-    } else {
-        date = new Date(input);
+    
+    // Try to parse as number (seconds) first, even if string
+    const num = Number(input);
+    if (!isNaN(num)) {
+        return new Date(num * 1000);
     }
+
+    const date = new Date(input);
     if (isNaN(date.getTime())) return null;
     return date;
+}
+
+export function formatDateTime(input) {
+    const date = parseDate(input);
+    if (!date) return "";
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 export function formatDate(input) {

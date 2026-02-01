@@ -125,17 +125,17 @@ export function createWorkflowDot(asset) {
     const dot = document.createElement("span");
     dot.className = "mjr-workflow-dot";
 
-    let color = "#666";
+    let color = "var(--mjr-status-neutral, #666)";
     let title = "Not parsed yet";
 
     if (asset.has_workflow && asset.has_generation_metadata) {
-        color = "#4CAF50";
+        color = "var(--mjr-status-success, #4CAF50)";
         title = "Complete: Workflow + Generation metadata";
     } else if (asset.has_workflow || asset.has_generation_metadata) {
-        color = "#FF9800";
+        color = "var(--mjr-status-warning, #FF9800)";
         title = asset.has_workflow ? "Partial: Workflow only" : "Partial: Generation metadata only";
     } else if (asset.has_workflow === false || asset.has_generation_metadata === false) {
-        color = "#f44336";
+        color = "var(--mjr-status-error, #f44336)";
         title = "No workflow or generation data";
     }
 
@@ -182,7 +182,7 @@ export function createRatingBadge(rating) {
     for (let i = 1; i <= ratingValue; i++) {
         const star = document.createElement("span");
         star.textContent = "\u2605";
-        star.style.color = "#FFD45A";
+        star.style.color = "var(--mjr-star-active, #FFD45A)";
         star.style.marginRight = i < ratingValue ? "2px" : "0";
         badge.appendChild(star);
     }

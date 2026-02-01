@@ -22,6 +22,7 @@ from ...config import (
     SCAN_BATCH_MED,
     SCAN_BATCH_LARGE,
     SCAN_BATCH_XL,
+    MAX_TO_ENRICH_ITEMS,
 )
 from ..metadata import MetadataService
 from .metadata_helpers import MetadataHelpers
@@ -125,7 +126,7 @@ class IndexScanner:
             def _stream_batch_target(scanned_count: int) -> int:
                 try:
                     n = int(scanned_count or 0)
-                except Exception:
+                except (ValueError, TypeError):
                     n = 0
                 if n <= SCAN_BATCH_SMALL_THRESHOLD:
                     return int(SCAN_BATCH_SMALL)
@@ -394,7 +395,7 @@ class IndexScanner:
                         existing_id = int(existing_state.get("id") or 0)
                         if existing_id:
                             asset_ids.append(existing_id)
-                    except Exception:
+                    except (ValueError, TypeError):
                         pass
 
             if asset_ids:
@@ -422,7 +423,7 @@ class IndexScanner:
                 existing_state = existing_map.get(fp)
 
             # Stat the file
-            stat_result = await asyncio.to_thread(self._stat_with_retry, file_path)
+            stat_result = await self._stat_with_retry(file_path)
             if not stat_result[0]:
                 stats["errors"] += 1
                 logger.warning("Failed to stat %s: %s", str(file_path), stat_result[1])
@@ -583,7 +584,8 @@ class IndexScanner:
                             )
                             stats["skipped"] += 1
                             if refreshed and entry.get("fast") and to_enrich is not None:
-                                to_enrich.append(entry.get("filepath") or str(entry.get("file_path") or ""))
+                                if len(to_enrich) < MAX_TO_ENRICH_ITEMS:
+                                    to_enrich.append(entry.get("filepath") or str(entry.get("file_path") or ""))
                         except Exception as exc:
                             stats["errors"] += 1
                             logger.warning("Metadata refresh failed for asset_id=%s: %s", asset_id, exc)
@@ -626,7 +628,8 @@ class IndexScanner:
                             )
                             stats["updated"] += 1
                             if entry.get("fast") and to_enrich is not None:
-                                to_enrich.append(entry.get("filepath") or str(entry.get("file_path") or ""))
+                                if len(to_enrich) < MAX_TO_ENRICH_ITEMS:
+                                    to_enrich.append(entry.get("filepath") or str(entry.get("file_path") or ""))
                         else:
                             stats["errors"] += 1
                         continue
@@ -670,7 +673,8 @@ class IndexScanner:
                             )
                             stats["added"] += 1
                             if entry.get("fast") and to_enrich is not None:
-                                to_enrich.append(entry.get("filepath") or str(entry.get("file_path") or ""))
+                                if len(to_enrich) < MAX_TO_ENRICH_ITEMS:
+                                    to_enrich.append(entry.get("filepath") or str(entry.get("file_path") or ""))
                         else:
                             stats["errors"] += 1
                         continue
@@ -716,7 +720,8 @@ class IndexScanner:
                                 stats["skipped"] += 1
                                 stats["errors"] -= 1  # Correct the error count
                                 if refreshed and entry.get("fast") and to_enrich is not None:
-                                    to_enrich.append(entry.get("filepath") or str(entry.get("file_path") or ""))
+                                    if len(to_enrich) < 10000:
+                                        to_enrich.append(entry.get("filepath") or str(entry.get("file_path") or ""))
                             except Exception as exc:
                                 stats["errors"] += 1  # Keep as error
                                 logger.warning("Metadata refresh failed for asset_id=%s: %s", asset_id, exc)
@@ -832,7 +837,7 @@ class IndexScanner:
         Prepare indexing work for a file (stat + incremental decision + metadata extraction),
         but do not write to the DB. DB writes are applied in a batch transaction.
         """
-        stat_result = await asyncio.to_thread(self._stat_with_retry, file_path)
+        stat_result = await self._stat_with_retry(file_path)
         if not stat_result[0]:
             return Result.Err("STAT_FAILED", f"Failed to stat file: {stat_result[1]}")
         stat = stat_result[1]
@@ -1136,14 +1141,14 @@ class IndexScanner:
             (filepath, dir_path, state_hash, mtime, size)
         )
 
-    def _stat_with_retry(self, file_path: Path):
+    async def _stat_with_retry(self, file_path: Path):
         for attempt in range(STAT_RETRY_COUNT):
             try:
-                stat = file_path.stat()
+                stat = await asyncio.to_thread(file_path.stat)
                 return True, stat
             except OSError as exc:
                 if attempt < (STAT_RETRY_COUNT - 1):
-                    time.sleep(STAT_RETRY_BASE_DELAY_S * (attempt + 1))
+                    await asyncio.sleep(STAT_RETRY_BASE_DELAY_S * (attempt + 1))
                     continue
                 logger.warning("Failed to stat %s after retries: %s", file_path, exc)
                 return False, exc
@@ -1173,7 +1178,7 @@ class IndexScanner:
         Returns:
             Result with action taken (added, updated, skipped)
         """
-        stat_result = await asyncio.to_thread(self._stat_with_retry, file_path)
+        stat_result = await self._stat_with_retry(file_path)
         if not stat_result[0]:
             return Result.Err("STAT_FAILED", f"Failed to stat file: {stat_result[1]}")
         stat = stat_result[1]

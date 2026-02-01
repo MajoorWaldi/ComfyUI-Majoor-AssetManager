@@ -105,16 +105,22 @@ app.registerExtension({
                         } catch {}
                     });
 
+                const cleanupCbs = [];
+
                 const rt = {
                     ac,
                     trackTimeout,
                     delay,
+                    register: (fn) => { if (typeof fn === "function") cleanupCbs.push(fn); },
                     abort: () => {
                         try {
                             clearTimers();
                         } catch {}
                         try {
                             ac?.abort?.();
+                        } catch {}
+                        try {
+                            cleanupCbs.forEach(fn => { try { fn(); } catch {} });
                         } catch {}
                     },
                 };
@@ -130,7 +136,11 @@ app.registerExtension({
 
         testAPI();
         ensureStyleLoaded({ enabled: UI_FLAGS.useComfyThemeUI });
-        initDragDrop();
+        
+        try {
+            const disposeDnD = initDragDrop();
+            runtime.register(disposeDnD);
+        } catch {}
 
         registerMajoorSettings(app, () => {
             const grid = getActiveGridContainer();

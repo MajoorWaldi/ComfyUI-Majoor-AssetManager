@@ -21,11 +21,14 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+*.zip
+*_release.zip
 
 # Virtual environments
 venv/
 env/
 ENV/
+.venv/
 
 # IDE
 .vscode/
@@ -33,6 +36,7 @@ ENV/
 *.swp
 *.swo
 *~
+.history/
 
 # OS
 .DS_Store
@@ -86,18 +90,30 @@ check_sync_await_backend.py
 check_sync_await_refined.py
 fix_async_defs.py
 update_filesystem_handlers.py
+find_duplicates.py
+scripts/benchmark_scan.py
 
 # Jupyter Notebooks (scratchpads)
 *.ipynb
 
 # Build artifacts
 node.zip
+user_guide.html
+variation_exif_dump.json
 
 # Claude Code local settings
 .claude/settings.local.json
 
-# Audit reports (temporary work files)
+# Audit reports and temporary docs (work files)
 *AUDIT*.md
 DEEP_AUDIT*.md
 SECURITY_FIXES*.md
-find_duplicates.py
+VIEWER_*.md
+docs/VIEWER_FULLSCREEN.md
+
+# Generated or Temporary Docs
+docs/COMPLETE_USER_GUIDE.md
+docs/METADATA_VIEWER.md
+docs/USER_GUIDE.md
+ressources/MPDF.png
+docs/adr/0003-context-menu-strategy.md

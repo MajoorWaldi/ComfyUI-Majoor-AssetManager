@@ -251,7 +251,10 @@ class MetadataHelpers:
                     WHEN COALESCE(asset_metadata.tags, '[]') IN ('[]', '') THEN excluded.tags
                     ELSE asset_metadata.tags
                 END,
-                tags_text = excluded.tags_text,
+                tags_text = CASE
+                    WHEN COALESCE(asset_metadata.tags, '[]') IN ('[]', '') THEN excluded.tags_text
+                    ELSE asset_metadata.tags_text
+                END,
                 has_workflow = CASE
                     WHEN {should_upgrade} THEN excluded.has_workflow
                     ELSE asset_metadata.has_workflow

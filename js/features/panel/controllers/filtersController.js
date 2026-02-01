@@ -1,3 +1,5 @@
+let _lastAgendaHandler = null;
+
 export function bindFilters({
     state,
     kindSelect,
@@ -8,6 +10,14 @@ export function bindFilters({
     reloadGrid,
     onFiltersChanged = null
 }) {
+    // Cleanup previous window listener to prevent accumulation
+    if (_lastAgendaHandler) {
+        try {
+            window.removeEventListener("MJR:AgendaStatus", _lastAgendaHandler);
+        } catch {}
+        _lastAgendaHandler = null;
+    }
+
     kindSelect.addEventListener("change", async () => {
         state.kindFilter = kindSelect.value || "";
         try { onFiltersChanged?.(); } catch {}
@@ -67,6 +77,7 @@ export function bindFilters({
         };
         try {
             window?.addEventListener?.("MJR:AgendaStatus", handleAgendaStatus, { passive: true });
+            _lastAgendaHandler = handleAgendaStatus;
         } catch {}
     }
 }

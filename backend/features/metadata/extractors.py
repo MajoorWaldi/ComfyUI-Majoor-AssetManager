@@ -4,179 +4,316 @@ Extracts ComfyUI workflow and generation parameters from PNG, WEBP, MP4.
 """
 import json
 import os
-import base64
 import re
-import zlib
 from typing import Optional, Dict, Any, Tuple
 
 from ...shared import Result, ErrorCode, get_logger
 from .graph_traversal import iter_nested_dicts
+from .parsing_utils import (
+    try_parse_json_text,
+    parse_json_value,
+    looks_like_comfyui_workflow,
+    looks_like_comfyui_prompt_graph,
+    parse_auto1111_params
+)
 
 logger = get_logger(__name__)
 
-_BASE64_RE = re.compile(r"^[A-Za-z0-9+/=\s]+$")
-_AUTO1111_KV_RE = re.compile(r"(?:^|,\s*)([^:,]+):\s*")
-
-MAX_METADATA_JSON_SIZE = 10 * 1024 * 1024  # 10MB
-MIN_BASE64_CANDIDATE_LEN = 80
-MAX_ZLIB_DECOMPRESS_BYTES = 5 * 1024 * 1024  # 5MB
+# Constants removed (moved to parsing_utils)
 MAX_TAG_LENGTH = 100
-
-
-def _try_parse_json_text(text: str) -> Optional[Dict[str, Any]]:
-    """Parse JSON embedded in text, handling standard ComfyUI prefixes."""
-    if not isinstance(text, str):
-        return None
-    raw = text.strip()
-    if not raw:
-        return None
-
-    # Handle common prefixes
-    lower_raw = raw.lower()
-    if lower_raw.startswith("workflow:"):
-        raw = raw[9:].strip()
-    elif lower_raw.startswith("prompt:"):
-        raw = raw[7:].strip()
-    elif lower_raw.startswith("makeprompt:"):
-        raw = raw[11:].strip()
-
-    if len(raw) > MAX_METADATA_JSON_SIZE:
-        return None
-
-    def _loads_maybe(s: str) -> Optional[Dict[str, Any]]:
-        try:
-            parsed = json.loads(s)
-        except Exception:
-            return None
-        if isinstance(parsed, dict):
-            return parsed
-        if isinstance(parsed, str):
-            try:
-                nested = json.loads(parsed)
-            except Exception:
-                return None
-            return nested if isinstance(nested, dict) else None
-        return None
-
-    direct = _loads_maybe(raw)
-    if direct is not None:
-        return direct
-
-    # Base64 check
-    if len(raw) < MIN_BASE64_CANDIDATE_LEN or len(raw) > (MAX_METADATA_JSON_SIZE * 2):
-        return None
-    if not _BASE64_RE.match(raw):
-        return None
-
-    try:
-        decoded = base64.b64decode(raw, validate=False)
-    except Exception:
-        return None
-
-    # Zlib check
-    if decoded.startswith(b"x\x9c") or decoded.startswith(b"x\xda"):
-        try:
-            decoded = zlib.decompress(decoded)
-        except Exception:
-            pass
-
-    try:
-        decoded_text = decoded.decode("utf-8", errors="replace").strip()
-    except Exception:
-        return None
-
-    if not decoded_text or len(decoded_text) > MAX_METADATA_JSON_SIZE:
-        return None
-
-    return _loads_maybe(decoded_text)
 
 
 def _reconstruct_params_from_workflow(workflow: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Fallback: Extract prompts and parameters directly from the Workflow nodes
-    when the 'Parameters' text field is missing.
+    Fallback: Extract prompts and parameters directly from the Workflow nodes.
+    Uses link traversal to distinguish Positive vs Negative prompts.
     """
     params = {}
     nodes = workflow.get("nodes", [])
+    links = workflow.get("links", [])  # [[id, src_node, src_slot, tgt_node, tgt_slot, type], ...]
     if not nodes:
         return params
 
-    prompts = []
-    negative_prompts = []
+    # 1. Index Nodes by ID and Links by Target
+    node_map = {n["id"]: n for n in nodes if "id" in n}
+    
+    # link_lookup: link_id -> (origin_node_id, origin_slot_idx, target_node_id, target_slot_idx)
+    link_lookup = {}
+    for link in links:
+        # [id, src_node, src_slot, tgt_node, tgt_slot, type]
+        if len(link) >= 4:
+            link_lookup[link[0]] = (link[1], link[2], link[3], link[4])
 
-    # Simple heuristic scan of nodes
-    for node in nodes:
+    def get_source_data(target_node_id, input_name):
+        """Find the (origin_node, link_id) connected to a specific named input."""
+        t_node = node_map.get(target_node_id)
+        if not t_node: return None
+        
+        inp_def = next((i for i in t_node.get("inputs", []) if i.get("name") == input_name), None)
+        if not inp_def: return None
+        
+        link_id = inp_def.get("link")
+        if not link_id: return None
+        
+        link_info = link_lookup.get(link_id)
+        if not link_info: return None
+        
+        origin_id = link_info[0]
+        return (node_map.get(origin_id), link_id)
+
+    def get_node_text(node, context=None):
+        """
+        Extract text widget value from a node.
+        If context='negative' and multiple widgets exist, prefers the second/last one.
+        If context='positive' and multiple widgets exist, prefers the first one.
+        """
         widgets = node.get("widgets_values")
         if not widgets or not isinstance(widgets, list):
-            continue
+            return None
+        
+        # Filter for string widgets that look like prompts
+        s_widgets = [w for w in widgets if isinstance(w, str) and len(w.strip()) > 0]
+        
+        if not s_widgets:
+            return None
+            
+        if len(s_widgets) == 1:
+            return s_widgets[0]
+            
+        # Heuristic for multi-widget nodes (like Weaver's PromptToLoras)
+        if context == "negative":
+            # Return the last one (usually negative)
+            return s_widgets[-1]
+        
+        # Default/Positive: Return the first one
+        return s_widgets[0]
 
+    def find_upstream_text(start_node, depth=0, seen=None, context=None):
+        """
+        Recursively find text from upstream nodes with semantic filtering.
+        context: 'positive' or 'negative' (regulates which inputs we follow)
+        """
+        if not start_node or depth > 8: 
+            return []
+        
+        node_id = start_node.get("id")
+        if seen is None: seen = set()
+        if node_id in seen: return []
+        seen.add(node_id)
+        
+        found_texts = []
+        node_type = str(start_node.get("type", "")).lower()
+
+        
+        # 1. Widgets in this node
+        # We assume if a node has text widgets, it contributes to the prompt.
+        # But we must be careful with Loaders (filenames).
+        if "loader" not in node_type and "checkpoint" not in node_type and "loadimage" not in node_type:
+             txt = get_node_text(start_node, context)
+             if txt:
+                 found_texts.append(txt)
+
+        # 2. Recurse Upstream
+        inputs = start_node.get("inputs", [])
+        for inp in inputs:
+            link_id = inp.get("link")
+            if not link_id: continue
+            
+            # Semantic Filtering based on Input Name
+            name = str(inp.get("name", "")).lower()
+            
+            # If we are strictly tracing Positive, avoid explicitly Negative paths
+            if context == "positive":
+                if "negative" in name: continue
+                
+            # If we are strictly tracing Negative, avoid explicitly Positive paths
+            if context == "negative":
+                if "positive" in name: continue
+            
+            # Always follow: 'text', 'string', 'clip', 'model', 'conditioning', wildcard/default
+            
+            link_info = link_lookup.get(link_id)
+            if not link_info: continue
+            
+            origin_id = link_info[0]
+            origin_node = node_map.get(origin_id)
+            if origin_node:
+                found_texts.extend(find_upstream_text(origin_node, depth + 1, seen, context))
+                
+        return found_texts
+
+    # Detect Samplers
+    unique_prompts = set()
+    unique_negatives = set()
+    visited_nodes = set()
+    sampler_found = False
+
+    for node in nodes:
         node_type = str(node.get("type", "")).lower()
-        title = str(node.get("title", "")).lower()
-
-        # 1. Extract Prompts (CLIPTextEncode, PrimitiveString, etc.)
-        if "text" in node_type or "string" in node_type or "prompt" in node_type:
-            # Usually the first widget is the text
-            for val in widgets:
-                if isinstance(val, str) and len(val) > 2:
-                    # heuristic: negative prompts often have "negative" in title or color/bg
-                    if "negative" in title or "negative" in node_type:
-                        negative_prompts.append(val)
-                    else:
-                        prompts.append(val)
-                    break # take first string only per node
-
-        # 2. Extract KSampler Info (Seed, Steps, CFG, Sampler)
         if "ksampler" in node_type or "sampler" in node_type:
-            # Common widget order varies, but we can look for specific types
+            sampler_found = True
+            
+            # Extract Params from Widgets
+            widgets = node.get("widgets_values", [])
             for val in widgets:
                 if isinstance(val, int):
-                    # Large int is likely seed
-                    if val > 10000 and "seed" not in params:
-                        params["seed"] = val
-                    # Small int (1-100) likely steps
-                    elif 1 <= val <= 200 and "steps" not in params:
-                        params["steps"] = val
+                    if val > 10000 and "seed" not in params: params["seed"] = val
+                    elif 1 <= val <= 200 and "steps" not in params: params["steps"] = val
                 elif isinstance(val, float):
-                    # Small float (1.0-30.0) likely CFG
-                    if 1.0 <= val <= 30.0 and "cfg" not in params:
-                        params["cfg"] = val
+                    if 1.0 <= val <= 30.0 and "cfg" not in params: params["cfg"] = val
                 elif isinstance(val, str):
-                    # Check for sampler names
                     v_low = val.lower()
                     if v_low in ["euler", "euler_a", "dpm++", "ddim", "uni_pc"] and "sampler" not in params:
                         params["sampler"] = val
 
-        # 3. Extract Model Name
-        if "loader" in node_type and "checkpoint" in node_type:
-             for val in widgets:
-                 if isinstance(val, str) and (".safetensors" in val or ".ckpt" in val):
-                     params["model"] = val
-                     break
+            # Trace Prompts
+            # 1. Positive
+            pos_info = get_source_data(node["id"], "positive")
+            if pos_info:
+                # Use a local set for this trace to allow the same node to be visited 
+                # in the negative trace (e.g. dual-role nodes like PromptToLoras)
+                trace_seen = set()
+                pos_texts = find_upstream_text(pos_info[0], context="positive", seen=trace_seen)
+                unique_prompts.update(pos_texts)
+                visited_nodes.update(trace_seen)
 
-    # Construct parameter text
-    if prompts:
-        # Join multiple prompt nodes if found
-        full_prompt = "\n".join(prompts)
-        params["prompt"] = full_prompt
+            # 2. Negative
+            neg_info = get_source_data(node["id"], "negative")
+            if neg_info:
+                trace_seen = set()
+                neg_texts = find_upstream_text(neg_info[0], context="negative", seen=trace_seen)
+                unique_negatives.update(neg_texts)
+                visited_nodes.update(trace_seen)
 
-        # Build a fake parameters string for display
-        fake_text = full_prompt
-        if negative_prompts:
-            neg = "\n".join(negative_prompts)
-            params["negative_prompt"] = neg
-            fake_text += f"\nNegative prompt: {neg}"
+            # 3. Model
+            model_info = get_source_data(node["id"], "model")
+            if model_info:
+                model_node = model_info[0]
+                # Often connects to CheckpointLoaderSimple
+                widgets_m = model_node.get("widgets_values", [])
+                for w in widgets_m:
+                    if isinstance(w, str) and (".safetensors" in w or ".ckpt" in w):
+                        params["model"] = w
+                        break
 
-        details = []
-        if "steps" in params: details.append(f"Steps: {params['steps']}")
-        if "sampler" in params: details.append(f"Sampler: {params['sampler']}")
-        if "cfg" in params: details.append(f"CFG scale: {params['cfg']}")
-        if "seed" in params: details.append(f"Seed: {params['seed']}")
-        if "model" in params: details.append(f"Model: {params['model']}")
+    # HEURISTIC FALLBACK / POST-PASS
+    # If we found disjoint text nodes (not connected to KSampler directly, e.g. WanVideo Bridge),
+    # we should try to include them by inferring their role from their DOWNSTREAM connections.
+    
+    # helper to check if a node connects to a positive/negative input anywhere
+    def classify_unconnected_node(node):
+        out_role = "unknown"
+        outputs = node.get("outputs", [])
+        for out in outputs:
+            links_arr = out.get("links") # Usually list of IDs, or single ID? ComfyUI format depends.
+            if not links_arr: continue
+            if not isinstance(links_arr, list): links_arr = [links_arr] # Normalize
+            
+            for lid in links_arr:
+                # Check where this link goes
+                link_target = link_lookup.get(lid)
+                if not link_target: continue
+                # link_lookup: link_id -> (origin, slot, target, slot)
+                tgt_id = link_target[2]
+                tgt_node = node_map.get(tgt_id)
+                if not tgt_node: continue
+                
+                # Check inputs of target node to find the name
+                tgt_inputs = tgt_node.get("inputs", [])
+                for inp in tgt_inputs:
+                    if inp.get("link") == lid:
+                        iname = str(inp.get("name", "")).lower()
+                        if "positive" in iname:
+                            return "positive"
+                        if "negative" in iname:
+                            return "negative"
+                        # Fallback for "clip" input? No, ambiguous.
+        return out_role
 
-        if details:
-            fake_text += "\n" + ", ".join(details)
+    for node in nodes:
+        uid = node.get("id")
+        if uid in visited_nodes: continue
+        
+        node_type = str(node.get("type", "")).lower()
+        title = str(node.get("title", "")).lower()
+        
+        # Check if it looks like a text node
+        if "text" in node_type or "string" in node_type or "prompt" in node_type:
+            # Check widgets first
+            txt = get_node_text(node)
+            if not txt: continue
+            
+            # Check Title hint
+            if "negative" in title:
+                unique_negatives.add(txt)
+                continue
+            if "positive" in title:
+                unique_prompts.add(txt)
+                continue
+            
+            # Check Downstream connections
+            role = classify_unconnected_node(node)
+            if role == "positive":
+                unique_prompts.add(txt)
+            elif role == "negative":
+                unique_negatives.add(txt)
+            elif not sampler_found: 
+                # If NO sampler was found at all, we fall back to dumping everything into positive/negative based on heuristic
+                # But here we are in post-pass.
+                pass 
 
-        params["parameters"] = fake_text
+    # Construct output
+    if unique_prompts:
+        params["prompt"] = "\n".join(unique_prompts)
+    
+    if unique_negatives:
+        params["negative_prompt"] = "\n".join(unique_negatives)
+
+    # HEURISTIC FALLBACK: If no sampler tracing worked (e.g. non-standard sampler names or broken links),
+    # revert to the "title contains negative" scan, BUT ONLY for nodes not already found.
+    if not unique_prompts and not unique_negatives:
+        for node in nodes:
+            widgets = node.get("widgets_values")
+            if not widgets or not isinstance(widgets, list): continue
+            
+            node_type = str(node.get("type", "")).lower()
+            title = str(node.get("title", "")).lower()
+            
+            if "text" in node_type or "string" in node_type or "prompt" in node_type:
+                 for val in widgets:
+                    if isinstance(val, str) and len(val) > 2:
+                        if "negative" in title or "negative" in node_type:
+                            unique_negatives.add(val)
+                        else:
+                            unique_prompts.add(val)
+                        break
+
+    # Construct output
+    if unique_prompts:
+        params["prompt"] = "\n".join(unique_prompts)
+    
+    if unique_negatives:
+        params["negative_prompt"] = "\n".join(unique_negatives)
+
+    # Build fake parameters text
+    fake_text_parts = []
+    if "prompt" in params:
+        fake_text_parts.append(params["prompt"])
+    if "negative_prompt" in params:
+        fake_text_parts.append(f"Negative prompt: {params['negative_prompt']}")
+    
+    details = []
+    if "steps" in params: details.append(f"Steps: {params['steps']}")
+    if "sampler" in params: details.append(f"Sampler: {params['sampler']}")
+    if "cfg" in params: details.append(f"CFG scale: {params['cfg']}")
+    if "seed" in params: details.append(f"Seed: {params['seed']}")
+    if "model" in params: details.append(f"Model: {params['model']}")
+    
+    if details:
+        fake_text_parts.append(", ".join(details))
+        
+    if fake_text_parts:
+        params["parameters"] = "\n".join(fake_text_parts)
 
     return params
 
@@ -424,11 +561,11 @@ def _apply_common_exif_fields(
         if pr is None:
             pr = scanned_prompt
 
-    if _looks_like_comfyui_workflow(wf):
+    if looks_like_comfyui_workflow(wf):
         metadata["workflow"] = wf
         _bump_quality(metadata, "full")
 
-    if _looks_like_comfyui_prompt_graph(pr):
+    if looks_like_comfyui_prompt_graph(pr):
         metadata["prompt"] = pr
         if str(metadata.get("quality") or "none") != "full":
             _bump_quality(metadata, "partial")
@@ -472,7 +609,7 @@ def extract_png_metadata(file_path: str, exif_data: Optional[Dict] = None) -> Re
         if png_params:
             metadata["parameters"] = png_params
             _bump_quality(metadata, "partial")
-            parsed = _parse_auto1111_params(png_params)
+            parsed = parse_auto1111_params(png_params)
             if parsed:
                 metadata.update(parsed)
 
@@ -505,13 +642,29 @@ def extract_webp_metadata(file_path: str, exif_data: Optional[Dict] = None) -> R
         def _inspect_json_field(key_names, container):
             for key in key_names:
                 value = container.get(key) if isinstance(container, dict) else None
-                parsed = _parse_json_value(value)
+                parsed = parse_json_value(value)
                 if parsed is not None:
                     return parsed
             return None
 
-        workflow = _inspect_json_field(["EXIF:Make", "IFD0:Make", "Keys:Workflow", "comfyui:workflow"], exif_data)
-        prompt = _inspect_json_field(["EXIF:Model", "IFD0:Model", "Keys:Prompt", "comfyui:prompt"], exif_data)
+        workflow = None
+        prompt = None
+
+        potential_workflow = _inspect_json_field(["EXIF:Make", "IFD0:Make", "Keys:Workflow", "comfyui:workflow"], exif_data)
+        potential_prompt = _inspect_json_field(["EXIF:Model", "IFD0:Model", "Keys:Prompt", "comfyui:prompt"], exif_data)
+
+        # Cross-check because sometimes Prompt is in Make, or Workflow is in ImageDescription
+        if potential_workflow:
+            if looks_like_comfyui_workflow(potential_workflow):
+                workflow = potential_workflow
+            elif looks_like_comfyui_prompt_graph(potential_workflow) and not prompt:
+                prompt = potential_workflow
+
+        if potential_prompt:
+            if looks_like_comfyui_prompt_graph(potential_prompt) and not prompt:
+                prompt = potential_prompt
+            elif looks_like_comfyui_workflow(potential_prompt) and not workflow:
+                workflow = potential_prompt
 
         # 2) Fallback: scan all tags (optimized scan)
         if not workflow or not prompt:
@@ -536,17 +689,17 @@ def extract_webp_metadata(file_path: str, exif_data: Optional[Dict] = None) -> R
                 continue
 
             # A) Try to parse as JSON first (handles "Workflow: {...}")
-            parsed_json = _try_parse_json_text(candidate)
+            parsed_json = try_parse_json_text(candidate)
             if parsed_json:
-                if workflow is None and _looks_like_comfyui_workflow(parsed_json):
+                if workflow is None and looks_like_comfyui_workflow(parsed_json):
                     workflow = parsed_json
                     continue
-                if prompt is None and _looks_like_comfyui_prompt_graph(parsed_json):
+                if prompt is None and looks_like_comfyui_prompt_graph(parsed_json):
                     prompt = parsed_json
                     continue
 
             # B) Try to parse as Auto1111 parameters
-            parsed_a1111 = _parse_auto1111_params(candidate)
+            parsed_a1111 = parse_auto1111_params(candidate)
             if parsed_a1111:
                 metadata["parameters"] = candidate
                 metadata.update(parsed_a1111)
@@ -611,7 +764,7 @@ def extract_video_metadata(file_path: str, exif_data: Optional[Dict] = None, ffp
         def _inspect_json_field(key_names, container):
             for key in key_names:
                 value = container.get(key) if isinstance(container, dict) else None
-                parsed = _parse_json_value(value)
+                parsed = parse_json_value(value)
                 if parsed is not None:
                     return parsed
             return None
@@ -632,21 +785,37 @@ def extract_video_metadata(file_path: str, exif_data: Optional[Dict] = None, ffp
         # NOTE: Some encoders store JSON in ItemList:Comment that is NOT a ComfyUI workflow.
         # We intentionally do not treat ItemList:Comment as a workflow source unless it
         # clearly contains a workflow payload (see fallback scan below).
-        workflow = _inspect_json_field(
+        workflow = None
+        prompt = None
+
+        potential_workflow = _inspect_json_field(
             ["QuickTime:Workflow", "Keys:Workflow", "comfyui:workflow"],
             exif_data
         )
-        prompt = _inspect_json_field(
+        potential_prompt = _inspect_json_field(
             ["QuickTime:Prompt", "Keys:Prompt", "comfyui:prompt"],
             exif_data
         )
 
+        # Cross-check to handle swapped tags (e.g. prompt in workflow tag)
+        if potential_workflow:
+            if looks_like_comfyui_workflow(potential_workflow):
+                workflow = potential_workflow
+            elif looks_like_comfyui_prompt_graph(potential_workflow) and not prompt:
+                prompt = potential_workflow
+
+        if potential_prompt:
+            if looks_like_comfyui_prompt_graph(potential_prompt) and not prompt:
+                prompt = potential_prompt
+            elif looks_like_comfyui_workflow(potential_prompt) and not workflow:
+                workflow = potential_prompt
+
         # Fallback scan across all ExifTool tags, using shape-based heuristics.
         if workflow is None or prompt is None:
             scanned_workflow, scanned_prompt = _extract_json_fields(exif_data)
-            if workflow is None and _looks_like_comfyui_workflow(scanned_workflow):
+            if workflow is None and looks_like_comfyui_workflow(scanned_workflow):
                 workflow = scanned_workflow
-            if prompt is None and _looks_like_comfyui_prompt_graph(scanned_prompt):
+            if prompt is None and looks_like_comfyui_prompt_graph(scanned_prompt):
                 prompt = scanned_prompt
 
         # Fallback: check ffprobe container tags (some encoders store metadata here).
@@ -660,9 +829,9 @@ def extract_video_metadata(file_path: str, exif_data: Optional[Dict] = None, ffp
 
         if format_tags and (workflow is None or prompt is None):
             scanned_workflow, scanned_prompt = _extract_json_fields(format_tags)
-            if workflow is None and _looks_like_comfyui_workflow(scanned_workflow):
+            if workflow is None and looks_like_comfyui_workflow(scanned_workflow):
                 workflow = scanned_workflow
-            if prompt is None and _looks_like_comfyui_prompt_graph(scanned_prompt):
+            if prompt is None and looks_like_comfyui_prompt_graph(scanned_prompt):
                 prompt = scanned_prompt
 
         # VHS/other pipelines may store tags on the stream rather than container.
@@ -681,9 +850,9 @@ def extract_video_metadata(file_path: str, exif_data: Optional[Dict] = None, ffp
         if stream_tag_dicts and (workflow is None or prompt is None):
             for tags in stream_tag_dicts:
                 scanned_workflow, scanned_prompt = _extract_json_fields(tags)
-                if workflow is None and _looks_like_comfyui_workflow(scanned_workflow):
+                if workflow is None and looks_like_comfyui_workflow(scanned_workflow):
                     workflow = scanned_workflow
-                if prompt is None and _looks_like_comfyui_prompt_graph(scanned_prompt):
+                if prompt is None and looks_like_comfyui_prompt_graph(scanned_prompt):
                     prompt = scanned_prompt
                 if workflow is not None and prompt is not None:
                     break
@@ -696,7 +865,7 @@ def extract_video_metadata(file_path: str, exif_data: Optional[Dict] = None, ffp
             for tags in stream_tag_dicts or []:
                 candidates.extend(_collect_text_candidates(tags))
             for _, text in candidates:
-                parsed = _parse_auto1111_params(text)
+                parsed = parse_auto1111_params(text)
                 if not parsed:
                     continue
                 metadata["parameters"] = text
@@ -719,166 +888,6 @@ def extract_video_metadata(file_path: str, exif_data: Optional[Dict] = None, ffp
     except Exception as e:
         logger.warning(f"Video metadata extraction error: {e}")
         return Result.Err(ErrorCode.PARSE_ERROR, str(e), quality="degraded")
-
-def _parse_auto1111_params(params_text: str) -> Optional[Dict[str, Any]]:
-    """
-    Parse Auto1111/Forge parameters text.
-
-    Format:
-        positive prompt
-        Negative prompt: negative text
-        Steps: 20, Sampler: DPM++ SDE, CFG scale: 7, Seed: 123, Size: 512x768, Model: model_name
-
-    Args:
-        params_text: Parameters text string
-
-    Returns:
-        Parsed parameters dict or None
-    """
-    if not params_text:
-        return None
-
-    try:
-        text = params_text.strip()
-        if not text:
-            return None
-
-        result: Dict[str, Any] = {}
-
-        remaining = ""
-        neg_marker = "Negative prompt:"
-        neg_idx = text.find(neg_marker)
-        if neg_idx != -1:
-            result["prompt"] = text[:neg_idx].strip()
-            after = text[neg_idx + len(neg_marker):].lstrip()
-            nl = after.find("\n")
-            if nl != -1:
-                result["negative_prompt"] = after[:nl].strip()
-                remaining = after[nl + 1:].strip()
-            else:
-                result["negative_prompt"] = after.strip()
-                remaining = ""
-        else:
-            # No negative prompt, find where parameter kvs start (usually at "Steps:").
-            steps_idx = text.find("\nSteps:")
-            if steps_idx == -1:
-                steps_idx = text.find("Steps:")
-            if steps_idx != -1:
-                # Handle either "\nSteps:" or "Steps:" at start.
-                if text.startswith("Steps:"):
-                    result["prompt"] = ""
-                    remaining = text
-                else:
-                    result["prompt"] = text[:steps_idx].strip()
-                    remaining = text[steps_idx:].lstrip()
-            else:
-                result["prompt"] = text
-                remaining = ""
-
-        if remaining:
-            matches = list(_AUTO1111_KV_RE.finditer(remaining))
-            for i, match in enumerate(matches):
-                key = match.group(1).strip().lower().replace(" ", "_")
-                value_start = match.end()
-                value_end = matches[i + 1].start() if (i + 1) < len(matches) else len(remaining)
-                value = remaining[value_start:value_end].strip().strip(",").strip()
-
-                if not key:
-                    continue
-
-                if key == "steps":
-                    try:
-                        result["steps"] = int(value)
-                    except (ValueError, TypeError):
-                        logger.debug("Invalid steps value: %s", value)
-                elif key == "sampler":
-                    result["sampler"] = value
-                elif key in ("cfg_scale", "cfg"):
-                    try:
-                        result["cfg"] = float(value)
-                    except (ValueError, TypeError):
-                        logger.debug("Invalid cfg value: %s", value)
-                elif key == "seed":
-                    try:
-                        result["seed"] = int(value)
-                    except (ValueError, TypeError):
-                        logger.debug("Invalid seed value: %s", value)
-                elif key in ("size", "hires_resize"):
-                    if "x" in value:
-                        w, h = value.split("x", 1)
-                        try:
-                            result["width"] = int(w.strip())
-                            result["height"] = int(h.strip())
-                        except (ValueError, TypeError):
-                            logger.debug("Invalid size value: %s", value)
-                elif key == "model":
-                    result["model"] = value
-                elif key == "model_hash":
-                    result["model_hash"] = value
-
-        return result or None
-
-    except Exception as e:
-        logger.warning(f"Failed to parse Auto1111 params: {e}")
-        return None
-
-
-def _parse_json_value(value: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Try to parse a JSON payload from a tag value, trimming known prefixes.
-
-    ExifTool can return duplicate tags as arrays, so accept strings or lists of strings.
-    """
-    candidates = []
-    if isinstance(value, str):
-        candidates = [value]
-    elif isinstance(value, (list, tuple)):
-        candidates = [v for v in value if isinstance(v, str)]
-    else:
-        return None
-
-    for raw in candidates:
-        parsed = _try_parse_json_text(raw)
-        if isinstance(parsed, dict):
-            return parsed
-
-    return None
-
-
-def _looks_like_comfyui_workflow(value: Optional[Dict[str, Any]]) -> bool:
-    """
-    Heuristic check: only treat a JSON dict as a ComfyUI workflow if it matches
-    the expected graph structure (prevents false positives from generic JSON
-    comments/parameters).
-    """
-    if not isinstance(value, dict):
-        return False
-
-    nodes = value.get("nodes")
-    if not isinstance(nodes, list) or not nodes:
-        return False
-
-    # Most ComfyUI workflows also contain 'links' as an array, but allow missing.
-    links = value.get("links")
-    if links is not None and not isinstance(links, list):
-        return False
-
-    # Validate a few node fields on first N nodes.
-    sample = nodes[:5]
-    valid_nodes = 0
-    for node in sample:
-        if not isinstance(node, dict):
-            continue
-        if "type" in node and "id" in node:
-            valid_nodes += 1
-            continue
-        # Some exports use 'title' + 'id'
-        if "id" in node and ("title" in node or "outputs" in node or "inputs" in node):
-            valid_nodes += 1
-            continue
-
-    min_required = max(2, len(sample) // 2)  # at least 50% or 2 nodes
-    return valid_nodes >= min_required
-
 
 def _extract_json_fields(exif_data: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
@@ -915,13 +924,13 @@ def _extract_json_fields(exif_data: Dict[str, Any]) -> Tuple[Optional[Dict[str, 
 
         wf_out, pr_out = None, None
 
-        if isinstance(wf, dict) and _looks_like_comfyui_workflow(wf):
+        if isinstance(wf, dict) and looks_like_comfyui_workflow(wf):
             wf_out = wf
-        if isinstance(pr, dict) and _looks_like_comfyui_prompt_graph(pr):
+        if isinstance(pr, dict) and looks_like_comfyui_prompt_graph(pr):
             pr_out = pr
         elif isinstance(pr, str):
-            parsed = _try_parse_json_text(pr)
-            if isinstance(parsed, dict) and _looks_like_comfyui_prompt_graph(parsed):
+            parsed = try_parse_json_text(pr)
+            if isinstance(parsed, dict) and looks_like_comfyui_prompt_graph(parsed):
                 pr_out = parsed
         return (wf_out, pr_out)
 
@@ -935,7 +944,7 @@ def _extract_json_fields(exif_data: Dict[str, Any]) -> Tuple[Optional[Dict[str, 
             continue
 
         normalized = key.lower() if isinstance(key, str) else ""
-        parsed = _parse_json_value(value)
+        parsed = parse_json_value(value)
 
         if not parsed:
             continue
@@ -951,64 +960,19 @@ def _extract_json_fields(exif_data: Dict[str, Any]) -> Tuple[Optional[Dict[str, 
                 break
 
         # Check direct match
-        if workflow is None and _looks_like_comfyui_workflow(parsed):
+        if workflow is None and looks_like_comfyui_workflow(parsed):
             workflow = parsed
-        if prompt is None and _looks_like_comfyui_prompt_graph(parsed):
+        if prompt is None and looks_like_comfyui_prompt_graph(parsed):
             prompt = parsed
 
         # Check prefix usage (workflow: ...)
         if isinstance(value, str):
             text_lower = value.strip().lower()
             if workflow is None and (text_lower.startswith("workflow:") or "workflow" in normalized):
-                if _looks_like_comfyui_workflow(parsed):
+                if looks_like_comfyui_workflow(parsed):
                     workflow = parsed
             if prompt is None and (text_lower.startswith("prompt:") or "prompt" in normalized):
-                if _looks_like_comfyui_prompt_graph(parsed):
+                if looks_like_comfyui_prompt_graph(parsed):
                     prompt = parsed
 
     return workflow, prompt
-
-
-def _looks_like_prompt_node_id(value: Any) -> bool:
-    """
-    Accept plain integers or colon-delimited numeric ids (e.g. "91:68").
-    """
-    if isinstance(value, int):
-        return True
-    if not isinstance(value, str):
-        return False
-    parts = value.split(":")
-    if not parts:
-        return False
-    return all(part.isdigit() for part in parts)
-
-
-def _looks_like_comfyui_prompt_graph(value: Optional[Dict[str, Any]]) -> bool:
-    """
-    Heuristic check for a ComfyUI prompt graph (the runtime `prompt` dict keyed by node id).
-
-    Expected shape:
-      { "3": {"class_type": "...", "inputs": {...}}, ... }
-    """
-    if not isinstance(value, dict) or not value:
-        return False
-
-    # Avoid confusing workflow exports (they have `nodes: []`).
-    if "nodes" in value and isinstance(value.get("nodes"), list):
-        return False
-
-    keys = list(value.keys())[:8]
-    digit_keys = 0
-    valid_nodes = 0
-    for k in keys:
-        if _looks_like_prompt_node_id(k):
-            digit_keys += 1
-        node = value.get(k)
-        if not isinstance(node, dict):
-            continue
-        ct = node.get("class_type") or node.get("type")
-        ins = node.get("inputs")
-        if isinstance(ct, str) and isinstance(ins, dict):
-            valid_nodes += 1
-
-    return digit_keys >= max(2, len(keys) // 2) and valid_nodes >= max(2, len(keys) // 2)

@@ -1,45 +1,5 @@
 import { safeAddListener, safeCall } from "./lifecycle.js";
-
-function createModeButton(label, mode) {
-    const btn = document.createElement("button");
-    btn.textContent = label;
-    btn.dataset.mode = mode;
-    try {
-        btn.setAttribute("aria-label", label);
-        btn.setAttribute("aria-pressed", "false");
-    } catch {}
-    btn.style.cssText = `
-        padding: 4px 12px;
-        background: rgba(255, 255, 255, 0.1);
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        color: white;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 12px;
-        transition: all 0.2s;
-    `;
-    return btn;
-}
-
-function createIconButton(label, title) {
-    const btn = document.createElement("button");
-    btn.textContent = label;
-    btn.title = title;
-    try {
-        btn.setAttribute("aria-label", title || label || "Button");
-    } catch {}
-    btn.style.cssText = `
-        padding: 6px 12px;
-        background: transparent;
-        border: 1px solid rgba(255, 255, 255, 0.3);
-        color: white;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 14px;
-        transition: all 0.2s;
-    `;
-    return btn;
-}
+import { createIconButton, createModeButton } from "../../components/buttons.js";
 
 export function createViewerToolbar({
     VIEWER_MODES,
@@ -55,6 +15,7 @@ export function createViewerToolbar({
     onCompareModeChanged,
     onExportFrame,
     onCopyFrame,
+    onToggleFullscreen,
     getCanAB,
 } = {}) {
     const unsubs = lifecycle?.unsubs || [];
@@ -138,6 +99,57 @@ export function createViewerToolbar({
         closeBtn.appendChild(icon);
     } catch {}
 
+    const fullscreenBtn = createIconButton("⛶", "Toggle Fullscreen (F)");
+    fullscreenBtn.style.fontSize = "16px";
+    try {
+        fullscreenBtn.style.position = "absolute";
+        fullscreenBtn.style.top = "10px";
+        fullscreenBtn.style.right = "50px"; // To the left of close button
+        fullscreenBtn.style.zIndex = "10002";
+        fullscreenBtn.style.width = "34px";
+        fullscreenBtn.style.height = "34px";
+        fullscreenBtn.style.padding = "0";
+        fullscreenBtn.style.display = "inline-flex";
+        fullscreenBtn.style.alignItems = "center";
+        fullscreenBtn.style.justifyContent = "center";
+        fullscreenBtn.style.borderRadius = "8px";
+        
+        const icon = document.createElement("span");
+        icon.className = "pi pi-window-maximize"; 
+        icon.setAttribute("aria-hidden", "true");
+        fullscreenBtn.textContent = "";
+        fullscreenBtn.appendChild(icon);
+
+        const updateFsIcon = () => {
+            try {
+                const isFs = document.fullscreenElement != null;
+                icon.className = isFs ? "pi pi-window-minimize" : "pi pi-window-maximize";
+                fullscreenBtn.title = isFs ? "Exit Fullscreen (F)" : "Enter Fullscreen (F)";
+            } catch {}
+        };
+        
+        fullscreenBtn.onclick = (e) => {
+            e.stopPropagation();
+            onToggleFullscreen?.();
+        };
+
+        if (lifecycle?.safeAddListener) {
+            lifecycle.safeAddListener(document, "fullscreenchange", updateFsIcon);
+        } else {
+             // Fallback cleanup if lifecycle missing (though unlikely in prod)
+             try {
+                document.addEventListener("fullscreenchange", updateFsIcon);
+                // Attach a one-time cleanup to the element itself to avoid global leaks
+                const cleanup = () => {
+                    try { document.removeEventListener("fullscreenchange", updateFsIcon); } catch {}
+                };
+                if (header._mjrCleanup) header._mjrCleanup.push(cleanup);
+                else header._mjrCleanup = [cleanup];
+             } catch {}
+        }
+        updateFsIcon();
+    } catch {}
+
     const leftArea = document.createElement("div");
     leftArea.className = "mjr-viewer-header-area mjr-viewer-header-area--left";
     leftArea.style.cssText = "display:flex; align-items:center; gap:12px; flex:1; min-width:0;";
@@ -156,9 +168,11 @@ export function createViewerToolbar({
     headerTop.appendChild(leftArea);
     headerTop.appendChild(centerArea);
     headerTop.appendChild(rightArea);
-    // Keep the close button in the viewer's top-right corner (not constrained by header layout).
+    // Keep the close button in the viewer's top-right corner.
+    // Use absolute positioning relative to the overlay (or nearest positioned parent)
+    // rather than fixed to ensure it stays with the viewer if the viewer is ever not full-screen.
     try {
-        closeBtn.style.position = "fixed";
+        closeBtn.style.position = "absolute";
         closeBtn.style.top = "10px";
         closeBtn.style.right = "10px";
         closeBtn.style.transform = "";
@@ -171,6 +185,7 @@ export function createViewerToolbar({
         closeBtn.style.justifyContent = "center";
         closeBtn.style.borderRadius = "8px";
     } catch {}
+    headerTop.appendChild(fullscreenBtn);
     headerTop.appendChild(closeBtn);
     header.appendChild(headerTop);
 

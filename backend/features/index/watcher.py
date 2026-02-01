@@ -3,6 +3,7 @@ Lightweight directory watcher that triggers incremental scans.
 """
 import logging
 import threading
+import asyncio
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -25,6 +26,10 @@ class DirectoryWatcher:
     ):
         self.index_service = index_service
         self.directories = [Path(dir_path).resolve() for dir_path in directories if dir_path]
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = asyncio.get_event_loop()
         self.interval = interval_seconds or WATCHER_INTERVAL_SECONDS
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -104,7 +109,11 @@ class DirectoryWatcher:
                     continue
 
                 try:
-                    scan_result = self.index_service.scan_directory(str(directory), recursive=True, incremental=True)
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.index_service.scan_directory(str(directory), recursive=True, incremental=True),
+                        self._loop
+                    )
+                    scan_result = future.result()
                     if not scan_result.ok:
                         logger.warning(
                             "Watcher scan reported issues for %s: %s (code=%s)",

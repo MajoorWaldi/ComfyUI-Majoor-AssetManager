@@ -198,6 +198,8 @@ class IndexSearcher:
             # FTS5 search
             fts_query = self._sanitize_fts_query(query)
 
+            total_field = "COUNT(*) OVER() as _total," if include_total else ""
+
             sql_parts = [
                 f"""
                 WITH matches AS (
@@ -217,6 +219,7 @@ class IndexSearcher:
                     GROUP BY asset_id
                 )
                 SELECT
+                    {total_field}
                     a.id, a.filename, a.subfolder, a.filepath, a.kind,
                     a.source, a.root_id,
                     a.width, a.height, a.duration, a.size, a.mtime,
@@ -257,7 +260,11 @@ class IndexSearcher:
             rows = result.data
 
             total = None
-            if include_total:
+            # Optimization: Use window function result if available (FTS queries)
+            if include_total and rows and "_total" in rows[0]:
+                total = rows[0]["_total"]
+
+            if include_total and total is None:
                 # Get total count (without pagination)
                 count_sql = """
                     WITH matches AS (

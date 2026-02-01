@@ -85,6 +85,7 @@ export function createImageProcessor({
         _connectRAF: null,
         _connectTries: 0,
         _pendingParams: null,
+        _buffer: null,
     };
 
     const scheduleWhenConnected = () => {
@@ -187,16 +188,21 @@ export function createImageProcessor({
             }
         } catch {}
 
-        let dst;
-        try {
-            dst = ctx.createImageData(w, h);
-        } catch {
+        let dst = proc._buffer;
+        if (!dst || dst.width !== w || dst.height !== h) {
             try {
-                dst = new ImageData(w, h);
+                dst = ctx.createImageData(w, h);
+                proc._buffer = dst;
             } catch {
-                return;
+                try {
+                    dst = new ImageData(w, h);
+                    proc._buffer = dst;
+                } catch {
+                    return;
+                }
             }
         }
+        if (!dst) return;
 
         const p = params || getGradeParams?.() || {};
         const exposureEV = Number(p.exposureEV) || 0;
@@ -206,6 +212,13 @@ export function createImageProcessor({
         const analysisMode = String(p.analysisMode || "none");
         const zebraThreshold = clamp01(p.zebraThreshold ?? 0.95);
         const exposureScale = Math.pow(2, exposureEV);
+
+        // Precompute gamma LUT (256 entries) to avoid per-pixel Math.pow()
+        // We store floats 0.0-1.0 in the LUT to match pipeline expectations.
+        const gammaLUT = new Float32Array(256);
+        for (let j = 0; j < 256; j++) {
+            gammaLUT[j] = Math.pow(j / 255, invGamma);
+        }
 
         const d = dst.data;
         const s = src.data;
@@ -241,14 +254,14 @@ export function createImageProcessor({
                         gg = stripe ? 1 : 0;
                         bb = stripe ? 1 : 0;
                     } else {
-                        rr = Math.pow(clamp01(rr), invGamma);
-                        gg = Math.pow(clamp01(gg), invGamma);
-                        bb = Math.pow(clamp01(bb), invGamma);
+                        rr = gammaLUT[(clamp01(rr) * 255 + 0.5) | 0];
+                        gg = gammaLUT[(clamp01(gg) * 255 + 0.5) | 0];
+                        bb = gammaLUT[(clamp01(bb) * 255 + 0.5) | 0];
                     }
                 } else {
-                    rr = Math.pow(clamp01(rr), invGamma);
-                    gg = Math.pow(clamp01(gg), invGamma);
-                    bb = Math.pow(clamp01(bb), invGamma);
+                    rr = gammaLUT[(clamp01(rr) * 255 + 0.5) | 0];
+                    gg = gammaLUT[(clamp01(gg) * 255 + 0.5) | 0];
+                    bb = gammaLUT[(clamp01(bb) * 255 + 0.5) | 0];
                 }
 
                 // Channel viewing
@@ -267,7 +280,7 @@ export function createImageProcessor({
                     bb = a0;
                 } else if (channel === "l") {
                     const l = clamp01(lum);
-                    const lg = Math.pow(l, invGamma);
+                    const lg = gammaLUT[(l * 255 + 0.5) | 0];
                     rr = lg;
                     gg = lg;
                     bb = lg;
@@ -397,6 +410,8 @@ export function createImageProcessor({
                 canvas.width = 0;
                 canvas.height = 0;
             } catch {}
+            proc.srcData = null;
+            proc._buffer = null;
         },
     };
 }

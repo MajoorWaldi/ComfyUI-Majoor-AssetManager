@@ -145,5 +145,82 @@ export function createGenerationSection(asset) {
         container.appendChild(createParametersBox("Image", imageData, "#2196F3"));
     }
 
+    // Input Files Section
+    if (metadata.inputs && Array.isArray(metadata.inputs) && metadata.inputs.length > 0) {
+        const inputBox = document.createElement("div");
+        inputBox.style.cssText = `
+            background: rgba(0,0,0,0.3);
+            border-left: 3px solid #4CAF50;
+            border-radius: 6px;
+            padding: 12px;
+            margin-top: 10px;
+        `;
+        
+        const header = document.createElement("div");
+        header.textContent = "Source Files";
+        header.style.cssText = `
+             font-size: 11px;
+             font-weight: 600;
+             color: #4CAF50;
+             text-transform: uppercase;
+             letter-spacing: 0.5px;
+             margin-bottom: 8px;
+        `;
+        inputBox.appendChild(header);
+
+        const grid = document.createElement("div");
+        grid.style.cssText = "display: flex; gap: 8px; flex-wrap: wrap;";
+        
+        metadata.inputs.forEach(inp => {
+            const thumb = document.createElement("div");
+            thumb.style.cssText = "width: 64px; height: 64px; background: #222; border-radius: 4px; overflow: hidden; position: relative; cursor: pointer; display: flex; align-items: center; justify-content: center;";
+            thumb.title = inp.filename;
+            
+            const params = new URLSearchParams({
+                filename: inp.filename,
+                type: inp.folder_type || "input",
+                subfolder: inp.subfolder || ""
+            });
+            const src = `./view?${params.toString()}`;
+            
+            const isVideo = inp.type === "video" || inp.filename.match(/\.(mp4|mov|webm)$/i);
+
+            if (isVideo) {
+                const vid = document.createElement("video");
+                vid.src = src;
+                vid.muted = true;
+                vid.loop = true;
+                vid.autoplay = false; // Hover to play? Or just poster?
+                // Auto-play many videos might be heavy. Let's try mouseover.
+                vid.onmouseover = () => vid.play().catch(() => {});
+                vid.onmouseout = () => vid.pause();
+                
+                vid.style.cssText = "width: 100%; height: 100%; object-fit: cover;";
+                thumb.appendChild(vid);
+                
+                // Play icon overlay
+                const icon = document.createElement("div");
+                icon.innerHTML = "▶";
+                icon.style.cssText = "position: absolute; color: white; opacity: 0.7; font-size: 16px; pointer-events: none;";
+                thumb.appendChild(icon);
+            } else {
+                const img = document.createElement("img");
+                img.src = src;
+                img.style.cssText = "width: 100%; height: 100%; object-fit: cover;";
+                thumb.appendChild(img);
+            }
+            
+            thumb.onclick = (e) => {
+                e.stopPropagation();
+                window.open(src, "_blank");
+            };
+            
+            grid.appendChild(thumb);
+        });
+        
+        inputBox.appendChild(grid);
+        container.appendChild(inputBox);
+    }
+
     return container.children.length > 0 ? container : null;
 }

@@ -260,7 +260,8 @@ export function createViewerPanZoom({
                 } catch {}
             }
             try {
-                scheduleOverlayRedraw?.();
+                // Immediate redraw to avoid 1-frame lag (sync grid with new transform)
+                scheduleOverlayRedraw?.(true);
             } catch {}
         } catch {}
     };

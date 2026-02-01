@@ -1,10 +1,32 @@
 /**
  * Asset Card Component
+ * @ts-check
  */
 
 import { buildAssetViewURL } from "../api/endpoints.js";
 import { createFileBadge, createRatingBadge, createTagsBadge, createWorkflowDot } from "./Badges.js";
-import { formatTimestamp, formatDuration, formatDate, formatTime } from "../utils/format.js";
+import { formatTimestamp, formatDuration, formatDate, formatTime, formatDateTime } from "../utils/format.js";
+import { APP_CONFIG } from "../app/config.js";
+
+/**
+ * @typedef {Object} Asset
+ * @property {number|string} id
+ * @property {string} filename
+ * @property {string} filepath
+ * @property {string} [ext]
+ * @property {string} [kind]
+ * @property {number} [rating] - 0 to 5
+ * @property {Array<string>|string|null} [tags] - Array of strings or JSON string
+ * @property {boolean} [has_workflow]
+ * @property {boolean} [has_generation_metadata]
+ * @property {boolean} [has_unknown_nodes]
+ * @property {number} [width]
+ * @property {number} [height]
+ * @property {number} [duration]
+ * @property {number} [size]
+ * @property {number} [mtime]
+ * @property {boolean} [_mjrNameCollision] - Internal flag for visual collision warning
+ */
 
 const VIDEO_THUMBS_KEY = "__MJR_VIDEO_THUMBS__";
 const VIDEO_THUMB_MAX_AUTOPLAY = 6;
@@ -131,6 +153,10 @@ const getVideoThumbManager = () => {
         try {
             playing.delete(video);
         } catch {}
+        try {
+            const overlay = video._mjrPlayOverlay || null;
+            if (overlay) overlay.style.opacity = "1";
+        } catch {}
     };
 
     const ensurePrepared = async (video) => {
@@ -164,8 +190,8 @@ const getVideoThumbManager = () => {
             playing.add(video);
             while (playing.size > VIDEO_THUMB_MAX_AUTOPLAY) {
                 const oldest = playing.values().next().value;
-                playing.delete(oldest);
-                stopVideo(oldest);
+                // Demote to prepared (paused with frame kept)
+                pauseVideo(oldest);
             }
         } else {
             playing.delete(video);
@@ -209,7 +235,32 @@ const getVideoThumbManager = () => {
     };
     try {
         document.addEventListener("visibilitychange", onVisibility);
-    } catch {}
+        // Periodic cleanup for videos detached from DOM (memory leak prevention)
+        setInterval(() => {
+             // 1. Prune sets
+             pruneSets();
+             
+             // 2. Extra safety: Check if playing videos are still in DOM
+             // If Card was removed by virtual scroll but pause() didn't fire, we catch it here.
+             const checkSet = (set, isPlaying) => {
+                 for (const v of Array.from(set)) {
+                     if (!v || !v.isConnected) {
+                         set.delete(v);
+                         if (isPlaying) stopVideo(v);
+                         else {
+                             // Just unbind
+                             try { observer?.unobserve?.(v); } catch {}
+                         }
+                     }
+                 }
+             };
+             checkSet(playing, true);
+             checkSet(prepared, false);
+             
+        }, 10_000);
+    } catch (e) {
+        console.debug("[Majoor] Video cleanup error:", e);
+    }
 
     const observer =
         typeof IntersectionObserver !== "undefined"
@@ -231,12 +282,12 @@ const getVideoThumbManager = () => {
                           }
 
                           if (entry.isIntersecting && entry.intersectionRatio >= 0.2) {
-                              // Prepare first frame when visible; play only on hover/explicit request.
-                              ensurePrepared(video);
-                              if (overlay) overlay.style.opacity = "1";
+                              // Auto play when visible
+                              playVideo(video);
+                              if (overlay) overlay.style.opacity = "0";
                           } else {
-                              playing.delete(video);
-                              stopVideo(video);
+                              // Use pauseVideo to keep the frame ("prepared") until pruneSets evicts it.
+                              pauseVideo(video);
                               if (overlay) overlay.style.opacity = "1";
                           }
                       }
@@ -278,6 +329,14 @@ const getVideoThumbManager = () => {
             } catch {}
             playing.delete(video);
             stopVideo(video);
+            
+            // Cleanup hover listeners on parent thumb
+            try {
+                const thumb = video.parentElement;
+                if (thumb && thumb._mjrHoverCleanup) {
+                     thumb._mjrHoverCleanup();
+                }
+            } catch {}
         },
         bindHover(thumb, video) {
             if (!thumb || !video) return;
@@ -307,6 +366,15 @@ const getVideoThumbManager = () => {
                 thumb.addEventListener("mouseleave", onLeave);
                 thumb.addEventListener("focusin", onEnter);
                 thumb.addEventListener("focusout", onLeave);
+                
+                thumb._mjrHoverCleanup = () => {
+                    thumb.removeEventListener("mouseenter", onEnter);
+                    thumb.removeEventListener("mouseleave", onLeave);
+                    thumb.removeEventListener("focusin", onEnter);
+                    thumb.removeEventListener("focusout", onLeave);
+                    thumb._mjrHoverBound = false;
+                    thumb._mjrHoverCleanup = null;
+                };
             } catch {}
         }
     };
@@ -319,6 +387,8 @@ const getVideoThumbManager = () => {
 
 /**
  * Create asset card element
+ * @param {Asset} asset
+ * @returns {HTMLDivElement}
  */
 export function createAssetCard(asset) {
     const card = document.createElement("div");
@@ -330,6 +400,15 @@ export function createAssetCard(asset) {
     card.setAttribute("role", "button");
     card.setAttribute("aria-label", `Asset ${asset?.filename || ""}`);
     card.setAttribute("aria-selected", "false");
+    
+    // Accessibility: Keyboard navigation support
+    card.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            card.click();
+        }
+    });
+
     if (asset?.id != null) {
         try {
             card.dataset.mjrAssetId = String(asset.id);
@@ -355,98 +434,109 @@ export function createAssetCard(asset) {
     const thumb = createThumbnail(asset, viewUrl);
 
     // Add file type badge (top left)
-    const fileBadge = createFileBadge(asset.filename, asset.kind, !!asset?._mjrNameCollision);
-    thumb.appendChild(fileBadge);
+    if (APP_CONFIG.GRID_SHOW_BADGES_EXTENSION) {
+        const fileBadge = createFileBadge(asset.filename, asset.kind, !!asset?._mjrNameCollision);
+        thumb.appendChild(fileBadge);
+    }
 
     // Add rating badge (top right)
-    const ratingBadge = createRatingBadge(asset.rating || 0);
-    if (ratingBadge) thumb.appendChild(ratingBadge);
+    if (APP_CONFIG.GRID_SHOW_BADGES_RATING) {
+        const ratingBadge = createRatingBadge(asset.rating || 0);
+        if (ratingBadge) thumb.appendChild(ratingBadge);
+    }
 
     // Add tags badge (bottom left)
-    const tagsBadge = createTagsBadge(asset.tags || []);
-    thumb.appendChild(tagsBadge);
+    if (APP_CONFIG.GRID_SHOW_BADGES_TAGS) {
+        const tagsBadge = createTagsBadge(asset.tags || []);
+        thumb.appendChild(tagsBadge);
+    }
 
     // Store asset reference for sidebar
     card._mjrAsset = asset;
+    
+    card.appendChild(thumb);
 
     // Info section
-    const info = document.createElement("div");
-    info.classList.add("mjr-card-meta");
+    if (APP_CONFIG.GRID_SHOW_DETAILS) {
+        const info = document.createElement("div");
+        info.classList.add("mjr-card-meta");
 
-    const filenameDiv = document.createElement("div");
-    filenameDiv.classList.add("mjr-card-filename");
-    filenameDiv.title = asset.filename;
+        if (APP_CONFIG.GRID_SHOW_DETAILS_FILENAME) {
+            const filenameDiv = document.createElement("div");
+            filenameDiv.classList.add("mjr-card-filename");
+            filenameDiv.title = asset.filename;
 
-    const filenameText = document.createElement("span");
-    filenameText.textContent = displayName;
-    filenameText.classList.add("mjr-card-filename-text");
+            const filenameText = document.createElement("span");
+            filenameText.textContent = displayName;
+            filenameText.classList.add("mjr-card-filename-text");
 
-    filenameDiv.appendChild(filenameText);
-
-    // Add workflow status dot
-    const workflowDot = createWorkflowDot(asset);
-    filenameDiv.appendChild(workflowDot);
-
-    info.appendChild(filenameDiv);
-
-    // Add metadata/stats row
-    const metaRow = document.createElement("div");
-    metaRow.classList.add("mjr-card-details");
-    
-    // Size / Duration
-    const statsSpan = document.createElement("span");
-    const parts = [];
-    const addPart = (text, className) => {
-        const span = document.createElement("span");
-        span.textContent = text;
-        if (className) span.className = className;
-        statsSpan.appendChild(span);
-        
-        // Add separator if not last (handled by flex gap or pseudo-element in CSS ideally, but here we append text nodes for now)
-        // Actually, let's use a flex container for `statsSpan` or just append a separator node.
-        // The previous code used parts.join(" • "). Let's replicate that structure but with elements.
-    };
-
-    // We will clear statsSpan content first (it's empty by new formatting) but we won't use parts.join anymore.
-    // We want styles: Resolution (blue?), Time (green?), Duration (orange?)
-    
-    const items = [];
-
-    // Resolution / Duration (Video Length)
-    if (asset.duration) {
-        items.push({ text: `(${formatDuration(asset.duration)})`, class: "mjr-meta-duration" }); // Format: (19s)
-    } 
-    if (asset.width && asset.height) {
-         items.push({ text: `${asset.width}x${asset.height}`, class: "mjr-meta-res" });
-    }
-    
-    // Time
-    // Priority: Generation Time (Content) > File Creation (FS) > Modification (FS Mtime) > DB indexed time
-    const timestamp = asset.generation_time || asset.file_creation_time || asset.mtime || asset.created_at;
-    if (timestamp) {
-        // Clear color separation for date and hour
-        items.push({ text: formatDate(timestamp), class: "mjr-meta-date" });
-        items.push({ text: formatTime(timestamp), class: "mjr-meta-time" });
-    }
-
-    items.forEach((item, idx) => {
-        const span = document.createElement("span");
-        span.textContent = item.text;
-        if (item.class) span.classList.add(item.class);
-        statsSpan.appendChild(span);
-        
-        if (idx < items.length - 1) {
-            const sep = document.createTextNode(" • ");
-            statsSpan.appendChild(sep);
+            filenameDiv.appendChild(filenameText);
+            info.appendChild(filenameDiv);
         }
-    });
-    
-    metaRow.appendChild(statsSpan);
-    
-    info.appendChild(metaRow);
 
-    card.appendChild(thumb);
-    card.appendChild(info);
+        // Bottom Row: Metadata (Left) + Workflow Dot (Right)
+        const bottomRow = document.createElement("div");
+        bottomRow.style.cssText = "display: flex; justify-content: space-between; align-items: center; gap: 6px; min-width: 0;";
+
+        const metaDetails = document.createElement("div");
+        metaDetails.classList.add("mjr-card-details");
+        metaDetails.style.cssText = "flex: 1; min-width: 0; margin-bottom: 0;"; // Override CSS margin
+        
+        const statsSpan = document.createElement("span");
+        const items = [];
+
+        // Resolution / Duration (Video Length)
+        if (APP_CONFIG.GRID_SHOW_DETAILS_DIMENSIONS) {
+            if (asset.duration) {
+                items.push({ text: `(${formatDuration(asset.duration)})`, class: "mjr-meta-duration" }); // Format: (19s)
+            } 
+            if (asset.width && asset.height) {
+                 items.push({ text: `${asset.width}x${asset.height}`, class: "mjr-meta-res" });
+            }
+        }
+        
+        // Time
+        if (APP_CONFIG.GRID_SHOW_DETAILS_DATE) {
+            const timestamp = asset.generation_time || asset.file_creation_time || asset.mtime || asset.created_at;
+            if (timestamp) {
+                const full = formatDateTime(timestamp);
+                if (full) items.push({ text: full, class: "mjr-meta-date" });
+            }
+        }
+
+        if (items.length > 0) {
+            items.forEach((item, idx) => {
+                const span = document.createElement("span");
+                span.textContent = item.text;
+                if (item.class) span.classList.add(item.class);
+                statsSpan.appendChild(span);
+                
+                if (idx < items.length - 1) {
+                    const sep = document.createTextNode(" • ");
+                    statsSpan.appendChild(sep);
+                }
+            });
+            metaDetails.appendChild(statsSpan);
+        }
+        
+        bottomRow.appendChild(metaDetails);
+
+        // Workflow Dot (Right aligned)
+        if (APP_CONFIG.GRID_SHOW_WORKFLOW_DOT) {
+             const workflowDot = createWorkflowDot(asset);
+             workflowDot.style.flex = "0 0 auto";
+             bottomRow.appendChild(workflowDot);
+        }
+
+        // Only add bottom row if it has content (stats or dot)
+        if (items.length > 0 || APP_CONFIG.GRID_SHOW_WORKFLOW_DOT) {
+            info.appendChild(bottomRow);
+        }
+
+        if (info.hasChildNodes()) {
+            card.appendChild(info);
+        }
+    }
 
     // Store view URL (click handled by panel event delegation)
     card.dataset.mjrViewUrl = viewUrl;
@@ -457,6 +547,11 @@ export function createAssetCard(asset) {
 /**
  * Create thumbnail for asset
  */
+/**
+ * @param {Asset} asset 
+ * @param {string} viewUrl 
+ * @returns {HTMLDivElement}
+ */
 function createThumbnail(asset, viewUrl) {
     const thumb = document.createElement("div");
     thumb.classList.add("mjr-thumb");
@@ -464,11 +559,23 @@ function createThumbnail(asset, viewUrl) {
     if (asset.kind === "image") {
         const img = document.createElement("img");
         img.src = viewUrl;
+        img.alt = asset.filename || "Asset Image";
         img.classList.add("mjr-thumb-media");
         try {
             img.loading = "lazy";
             img.decoding = "async";
         } catch {}
+        
+        // Critical: Handle broken images
+        img.onerror = () => {
+             img.style.display = "none";
+             const err = document.createElement("div");
+             err.className = "mjr-thumb-error";
+             err.innerHTML = '<i class="pi pi-image" style="font-size:24px; opacity:0.5;"></i>';
+             err.style.cssText = "display:flex; align-items:center; justify-content:center; width:100%; height:100%; background:rgba(255,50,50,0.1);";
+             thumb.appendChild(err);
+        };
+
         thumb.appendChild(img);
     } else if (asset.kind === "video") {
         // Create video element lazily to avoid eager network/decoder cost on large grids
@@ -486,6 +593,15 @@ function createThumbnail(asset, viewUrl) {
         try {
             video.disablePictureInPicture = true;
         } catch {}
+        
+        video.onerror = () => {
+             video.style.display = "none";
+             const err = document.createElement("div");
+             err.className = "mjr-thumb-error";
+             err.innerHTML = '<i class="pi pi-video" style="font-size:24px; opacity:0.5;"></i>';
+             err.style.cssText = "display:flex; align-items:center; justify-content:center; width:100%; height:100%; background:rgba(255,50,50,0.1);";
+             thumb.appendChild(err);
+        };
 
         // Play icon overlay
         const playIcon = document.createElement("div");
@@ -505,7 +621,8 @@ function createThumbnail(asset, viewUrl) {
         // Observe after insertion for reliable IntersectionObserver behavior.
         const mgr = getVideoThumbManager();
         mgr.observe(video);
-        mgr.bindHover(thumb, video);
+        // Hover binding removed in favor of autoplay-in-grid
+        // mgr.bindHover(thumb, video);
     }
 
     return thumb;

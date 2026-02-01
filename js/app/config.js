@@ -48,12 +48,21 @@ export const APP_DEFAULTS = Object.freeze({
 
     // Viewer
     VIEWER_ALLOW_PAN_AT_ZOOM_1: false,
+    VIEWER_DISABLE_WEBGL_VIDEO: false,
     VIEWER_VIDEO_GRADE_THROTTLE_FPS: 15,
     VIEWER_SCOPES_FPS: 10,
 
     // Grid
     GRID_MIN_SIZE: 120,
     GRID_GAP: 10,
+    GRID_SHOW_BADGES_EXTENSION: true,
+    GRID_SHOW_BADGES_RATING: true,
+    GRID_SHOW_BADGES_TAGS: true,
+    GRID_SHOW_DETAILS: true,
+    GRID_SHOW_DETAILS_FILENAME: true,
+    GRID_SHOW_DETAILS_DATE: true,
+    GRID_SHOW_DETAILS_DIMENSIONS: true,
+    GRID_SHOW_WORKFLOW_DOT: true,
 
     // Pagination
     DEFAULT_PAGE_SIZE: 100,
@@ -71,7 +80,7 @@ export const APP_DEFAULTS = Object.freeze({
 
     // Auto-scan
     AUTO_SCAN_ENABLED: true,
-    AUTO_SCAN_ON_STARTUP: false,
+    AUTO_SCAN_ON_STARTUP: true,
 
     // Rating/tags hydration (grid)
     RT_HYDRATE_CONCURRENCY: 2,

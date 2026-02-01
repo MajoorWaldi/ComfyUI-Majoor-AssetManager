@@ -1,9 +1,11 @@
 """
 Metadata service - coordinates metadata extraction from multiple sources.
 """
+import asyncio
 import logging
 import os
 import time
+import functools
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -17,6 +19,7 @@ from .extractors import (
     extract_video_metadata,
     extract_rating_tags_from_exif,
 )
+from .native_extractors import extract_png_metadata_native
 from ..geninfo.parser import parse_geninfo_from_prompt
 
 logger = get_logger(__name__)
@@ -155,6 +158,30 @@ class MetadataService:
         self.ffprobe = ffprobe
         self._settings = settings
 
+    async def _enrich_with_geninfo_async(self, combined: Dict[str, Any]) -> None:
+        """Helper to parse geninfo from prompt/workflow in combined metadata (Worker Thread)."""
+        try:
+            prompt_graph = combined.get("prompt")
+            workflow = combined.get("workflow")
+            
+            loop = asyncio.get_running_loop()
+            # Offload heavy parsing to thread pool to prevent blocking the event loop
+            geninfo_res = await loop.run_in_executor(
+                None, 
+                functools.partial(parse_geninfo_from_prompt, prompt_graph, workflow=workflow)
+            )
+
+            if geninfo_res.ok and geninfo_res.data:
+                combined["geninfo"] = geninfo_res.data
+            elif "geninfo" not in combined:
+                gi = _build_geninfo_from_parameters(combined)
+                if gi:
+                    combined["geninfo"] = gi
+                elif _looks_like_media_pipeline(prompt_graph):
+                    combined["geninfo_status"] = {"kind": "media_pipeline", "reason": "no_sampler"}
+        except Exception as exc:
+            logger.debug(f"GenInfo parse skipped: {exc}")
+
     async def _resolve_probe_mode(self, override: Optional[str]) -> str:
         if isinstance(override, str):
             normalized = override.strip().lower()
@@ -207,16 +234,16 @@ class MetadataService:
             allow_ffprobe = "ffprobe" in backends
 
             if kind == "image":
-                return self._extract_image_metadata(file_path, scan_id=scan_id, allow_exif=allow_exif)
+                return await self._extract_image_metadata(file_path, scan_id=scan_id, allow_exif=allow_exif)
             elif kind == "video":
-                return self._extract_video_metadata(
+                return await self._extract_video_metadata(
                     file_path,
                     scan_id=scan_id,
                     allow_exif=allow_exif,
                     allow_ffprobe=allow_ffprobe,
                 )
             elif kind == "audio":
-                return self._extract_audio_metadata(file_path, scan_id=scan_id, allow_exif=allow_exif)
+                return await self._extract_audio_metadata(file_path, scan_id=scan_id, allow_exif=allow_exif)
             else:
                 return Result.Ok({
                     "file_info": self._get_file_info(file_path),
@@ -247,7 +274,7 @@ class MetadataService:
         ext = os.path.splitext(file_path)[1].lower()
 
         exif_start = time.perf_counter()
-        exif_result = self.exiftool.read(file_path)
+        exif_result = await asyncio.to_thread(self.exiftool.read, file_path)
         exif_duration = time.perf_counter() - exif_start
         exif_data = exif_result.data if exif_result.ok else None
         if not exif_result.ok:
@@ -284,7 +311,7 @@ class MetadataService:
         }
         return Result.Ok(payload, quality=payload.get("quality", "none"))
 
-    def _extract_image_metadata(
+    async def _extract_image_metadata(
         self,
         file_path: str,
         scan_id: Optional[str] = None,
@@ -301,7 +328,7 @@ class MetadataService:
             }, quality="none")
 
         exif_start = time.perf_counter()
-        exif_result = self.exiftool.read(file_path)
+        exif_result = await asyncio.to_thread(self.exiftool.read, file_path)
         exif_duration = time.perf_counter() - exif_start
         exif_data = exif_result.data if exif_result.ok else None
         if not exif_result.ok:
@@ -332,6 +359,19 @@ class MetadataService:
                 "prompt": None,
                 "quality": "partial" if exif_data else "none"
             })
+            
+        # Ensure dimensions are present even if ExifTool missed them or didn't map them correctly
+        # We can call the native extractor cheaply here for dims.
+        try:
+             native_dims = await extract_png_metadata_native(file_path)
+             if native_dims and metadata_result.ok:
+                 data = metadata_result.data or {}
+                 if not data.get("width") and native_dims.get("width"):
+                     data["width"] = native_dims["width"]
+                 if not data.get("height") and native_dims.get("height"):
+                     data["height"] = native_dims["height"]
+        except Exception:
+             pass
 
         if not metadata_result.ok:
             self._log_metadata_issue(
@@ -353,25 +393,13 @@ class MetadataService:
         }
 
         # Optional: parse deterministic generation info from ComfyUI prompt graph (backend-first).
-        try:
-            prompt_graph = combined.get("prompt")
-            workflow = combined.get("workflow")
-            geninfo_res = parse_geninfo_from_prompt(prompt_graph, workflow=workflow)
-            if geninfo_res.ok and geninfo_res.data:
-                combined["geninfo"] = geninfo_res.data
-            elif "geninfo" not in combined:
-                gi = _build_geninfo_from_parameters(combined)
-                if gi:
-                    combined["geninfo"] = gi
-                elif _looks_like_media_pipeline(prompt_graph):
-                    combined["geninfo_status"] = {"kind": "media_pipeline", "reason": "no_sampler"}
-        except Exception as exc:
-            logger.debug(f"GenInfo parse skipped: {exc}")
+        # Uses worker thread to avoid blocking loop.
+        await self._enrich_with_geninfo_async(combined)
 
         quality = metadata_result.meta.get("quality", "none")
         return Result.Ok(combined, quality=quality)
 
-    def _extract_video_metadata(
+    async def _extract_video_metadata(
         self,
         file_path: str,
         scan_id: Optional[str] = None,
@@ -383,7 +411,7 @@ class MetadataService:
         exif_duration = 0.0
         if allow_exif:
             exif_start = time.perf_counter()
-            exif_result = self.exiftool.read(file_path)
+            exif_result = await asyncio.to_thread(self.exiftool.read, file_path)
             exif_duration = time.perf_counter() - exif_start
             exif_data = exif_result.data if exif_result.ok else None
             if not exif_result.ok:
@@ -404,7 +432,7 @@ class MetadataService:
         ffprobe_duration = 0.0
         if allow_ffprobe:
             ffprobe_start = time.perf_counter()
-            ffprobe_result = self.ffprobe.read(file_path)
+            ffprobe_result = await asyncio.to_thread(self.ffprobe.read, file_path)
             ffprobe_duration = time.perf_counter() - ffprobe_start
             if not ffprobe_result.ok:
                 self._log_metadata_issue(
@@ -435,6 +463,16 @@ class MetadataService:
             )
             return metadata_result
 
+        # Unpack resolution tuple to width/height for DB compatibility
+        data = metadata_result.data or {}
+        if data.get("resolution"):
+            try:
+                w, h = data["resolution"]
+                data["width"] = w
+                data["height"] = h
+            except (ValueError, TypeError):
+                pass
+
         # Combine results
         combined = {
             "file_info": self._get_file_info(file_path),
@@ -444,24 +482,14 @@ class MetadataService:
         }
 
         try:
-            prompt_graph = combined.get("prompt")
-            workflow = combined.get("workflow")
-            geninfo_res = parse_geninfo_from_prompt(prompt_graph, workflow=workflow)
-            if geninfo_res.ok and geninfo_res.data:
-                combined["geninfo"] = geninfo_res.data
-            elif "geninfo" not in combined:
-                gi = _build_geninfo_from_parameters(combined)
-                if gi:
-                    combined["geninfo"] = gi
-                elif _looks_like_media_pipeline(prompt_graph):
-                    combined["geninfo_status"] = {"kind": "media_pipeline", "reason": "no_sampler"}
+            await self._enrich_with_geninfo_async(combined)
         except Exception as exc:
             logger.debug(f"GenInfo parse skipped: {exc}")
 
         quality = metadata_result.meta.get("quality", "none")
         return Result.Ok(combined, quality=quality)
 
-    def _extract_audio_metadata(
+    async def _extract_audio_metadata(
         self,
         file_path: str,
         scan_id: Optional[str] = None,
@@ -476,7 +504,7 @@ class MetadataService:
             }, quality="none")
 
         exif_start = time.perf_counter()
-        exif_result = self.exiftool.read(file_path)
+        exif_result = await asyncio.to_thread(self.exiftool.read, file_path)
         exif_duration = time.perf_counter() - exif_start
         exif_data = exif_result.data if exif_result.ok else None
         if not exif_result.ok:
@@ -510,7 +538,8 @@ class MetadataService:
         """
         Extract metadata from multiple files in batch (much faster than individual calls).
 
-        This uses batch ExifTool/FFProbe execution to dramatically reduce subprocess overhead.
+        This uses batch ExifTool/FFProbe execution and native Python extractors (PNG)
+        to dramatically reduce subprocess overhead.
 
         Args:
             file_paths: List of file paths to process
@@ -552,7 +581,39 @@ class MetadataService:
         seen_exif = set()
         seen_ffprobe = set()
 
+        # 1. Optimistic native extraction
+        # Try for all images to get dimensions at minimum.
+        # For PNGs, if full metadata is found, we might skip ExifTool.
+        native_cache: Dict[str, Dict[str, Any]] = {}
+        
+        for path in images:
+            if probe_mode == "exiftool": # Forced check
+                continue
+                
+            native_res = await extract_png_metadata_native(path) # Supports all images (dimensions) now
+            if native_res:
+                native_cache[path] = native_res
+                
+                # Decision: Is this result "complete" enough to skip ExifTool?
+                # For PNG: If we have workflow/prompt OR just dimensions, we often trust Pillow for PNGs in ComfyUI ecosystem.
+                # NOTE: Only skip ExifTool if it is actually a PNG, other formats might need ExifTool for metadata hidden in EXIF tags.
+                if path.lower().endswith(".png"):
+                     combined = {
+                         "file_info": self._get_file_info(path),
+                         "exif": None,
+                         **native_res
+                     }
+                     await self._enrich_with_geninfo_async(combined)
+                     # If we have workflow/prompt, it's definitely full. Result handles partial too.
+                     results[path] = Result.Ok(combined, quality="full")
+                     seen_exif.add(path)
+
+        # 2. Schedule remaining files for tools
+
         for path in [*images, *videos, *audios]:
+            if path in results:
+                continue
+
             backends = pick_probe_backend(path, settings_override=probe_mode)
             if "exiftool" in backends and path not in seen_exif:
                 seen_exif.add(path)
@@ -571,10 +632,14 @@ class MetadataService:
         if ffprobe_targets:
             ffprobe_results = self.ffprobe.read_batch(ffprobe_targets)
 
-        # Process images
+        # Process images (remaining)
         for path in images:
+            if path in results:
+                continue
+
             ext = os.path.splitext(path)[1].lower()
-            exif_data = exif_results.get(path, Result.Err(ErrorCode.EXIFTOOL_ERROR, "No result")).data if exif_results.get(path, Result.Err(ErrorCode.EXIFTOOL_ERROR, "No result")).ok else None
+            ex_res = exif_results.get(path)
+            exif_data = ex_res.data if ex_res and ex_res.ok else None
 
             if ext == ".png":
                 metadata_result = extract_png_metadata(path, exif_data)
@@ -593,21 +658,7 @@ class MetadataService:
                     "exif": exif_data,
                     **metadata_result.data
                 }
-                # Optional geninfo parsing
-                try:
-                    prompt_graph = combined.get("prompt")
-                    workflow = combined.get("workflow")
-                    geninfo_res = parse_geninfo_from_prompt(prompt_graph, workflow=workflow)
-                    if geninfo_res.ok and geninfo_res.data:
-                        combined["geninfo"] = geninfo_res.data
-                    elif "geninfo" not in combined:
-                        gi = _build_geninfo_from_parameters(combined)
-                        if gi:
-                            combined["geninfo"] = gi
-                        elif _looks_like_media_pipeline(prompt_graph):
-                            combined["geninfo_status"] = {"kind": "media_pipeline", "reason": "no_sampler"}
-                except Exception:
-                    pass
+                await self._enrich_with_geninfo_async(combined)
 
                 quality = metadata_result.meta.get("quality", "none")
                 results[path] = Result.Ok(combined, quality=quality)
@@ -616,8 +667,14 @@ class MetadataService:
 
         # Process videos
         for path in videos:
-            exif_data = exif_results.get(path, Result.Err(ErrorCode.EXIFTOOL_ERROR, "No result")).data if exif_results.get(path, Result.Err(ErrorCode.EXIFTOOL_ERROR, "No result")).ok else None
-            ffprobe_data = ffprobe_results.get(path, Result.Err(ErrorCode.FFPROBE_ERROR, "No result")).data if ffprobe_results.get(path, Result.Err(ErrorCode.FFPROBE_ERROR, "No result")).ok else None
+            if path in results:
+                continue
+
+            ex_res = exif_results.get(path)
+            exif_data = ex_res.data if ex_res and ex_res.ok else None
+            
+            ff_res = ffprobe_results.get(path)
+            ffprobe_data = ff_res.data if ff_res and ff_res.ok else None
 
             metadata_result = extract_video_metadata(path, exif_data, ffprobe_data)
 
@@ -628,20 +685,7 @@ class MetadataService:
                     "ffprobe": ffprobe_data,
                     **metadata_result.data
                 }
-                try:
-                    prompt_graph = combined.get("prompt")
-                    workflow = combined.get("workflow")
-                    geninfo_res = parse_geninfo_from_prompt(prompt_graph, workflow=workflow)
-                    if geninfo_res.ok and geninfo_res.data:
-                        combined["geninfo"] = geninfo_res.data
-                    elif "geninfo" not in combined:
-                        gi = _build_geninfo_from_parameters(combined)
-                        if gi:
-                            combined["geninfo"] = gi
-                        elif _looks_like_media_pipeline(prompt_graph):
-                            combined["geninfo_status"] = {"kind": "media_pipeline", "reason": "no_sampler"}
-                except Exception:
-                    pass
+                await self._enrich_with_geninfo_async(combined)
 
                 quality = metadata_result.meta.get("quality", "none")
                 results[path] = Result.Ok(combined, quality=quality)
@@ -650,7 +694,12 @@ class MetadataService:
 
         # Process audio (ExifTool only)
         for path in audios:
-            exif_data = exif_results.get(path, Result.Err(ErrorCode.EXIFTOOL_ERROR, "No result")).data if exif_results.get(path, Result.Err(ErrorCode.EXIFTOOL_ERROR, "No result")).ok else None
+            if path in results:
+                continue
+            
+            ex_res = exif_results.get(path)
+            exif_data = ex_res.data if ex_res and ex_res.ok else None
+            
             results[path] = Result.Ok({
                 "file_info": self._get_file_info(path),
                 "exif": exif_data,

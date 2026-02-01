@@ -32,7 +32,7 @@ SINK_CLASS_TYPES: Set[str] = {
 }
 
 
-def _sink_priority(node: Dict[str, Any]) -> Tuple[int, int]:
+def _sink_priority(node: Dict[str, Any], node_id: Optional[str] = None) -> Tuple[int, int, int]:
     """
     Rank sinks so we pick the "real" output when multiple sinks exist.
 
@@ -57,7 +57,16 @@ def _sink_priority(node: Dict[str, Any]) -> Tuple[int, int]:
         has_images = 0 if _is_link(_inputs(node).get("images")) else 1
     except Exception:
         has_images = 1
-    return (group, has_images)
+    
+    # Tie-breaker: prefer higher node IDs (likely added later / final output)
+    try:
+        nid_score = -int(node_id) if node_id is not None else 0
+    except Exception:
+        nid_score = 0
+        
+    prio = (group, has_images, nid_score)
+    # print(f"DEBUG: Sink {node_id} priority {prio}")
+    return prio
 
 _MODEL_EXTS: Tuple[str, ...] = (
     ".safetensors",
@@ -297,6 +306,20 @@ def _is_sampler(node: Dict[str, Any]) -> bool:
         return False
     if "ksampler" in ct:
         return True
+    if "iterativelatentupscale" in ct:
+        return True
+
+    # Generic detection: any node with (steps + cfg + seed) is likely a sampler
+    try:
+        ins = _inputs(node)
+        has_steps = ins.get("steps") is not None
+        has_cfg = ins.get("cfg") is not None or ins.get("cfg_scale") is not None or ins.get("guidance") is not None
+        has_seed = ins.get("seed") is not None or ins.get("noise_seed") is not None
+        if has_steps and has_cfg and has_seed:
+            return True
+    except Exception:
+        pass
+
     # WanVideoSampler / custom samplers
     if ("sampler" in ct) and ("select" not in ct) and ("ksamplerselect" not in ct):
         try:
@@ -563,7 +586,10 @@ def _resolve_scalar_from_link(nodes_by_id: Dict[str, Dict[str, Any]], value: Any
     if not isinstance(node, dict):
         return None
     ins = _inputs(node)
-    for k in ("seed", "value", "number", "int", "float", "text"):
+    for k in (
+        "seed", "value", "number", "int", "float", "text",
+        "string", "prompt", "input", "text_a", "text_b"
+    ):
         v = ins.get(k)
         s = _scalar(v)
         if s is not None:
@@ -653,6 +679,11 @@ def _collect_text_encoder_nodes_from_conditioning(
         # ConditioningZeroOut to satisfy a required negative input.
         if branch == "negative" and "conditioningzeroout" in ct:
             return False
+            
+        # Optimization: Pass through Area Setters transparently
+        if "conditioningsetarea" in ct:
+            return True
+            
         if _is_reroute(node):
             return True
         if "conditioning" in ct:
@@ -701,7 +732,13 @@ def _collect_text_encoder_nodes_from_conditioning(
                 stack.append(src_id)
             continue
 
-        for v in ins.values():
+        for k, v in ins.items():
+            k_s = str(k).lower()
+            if branch == "positive" and (k_s in ("negative", "neg", "negative_prompt") or k_s.startswith("negative_")):
+                continue
+            if branch == "negative" and (k_s in ("positive", "pos", "positive_prompt") or k_s.startswith("positive_")):
+                continue
+
             if _is_link(v):
                 src_id = _walk_passthrough(nodes_by_id, v)
                 if src_id and src_id not in visited:
@@ -1076,25 +1113,109 @@ def _trace_size(nodes_by_id: Dict[str, Dict[str, Any]], latent_link: Any, confid
     return None
 
 
+def _extract_workflow_metadata(workflow: Any) -> Dict[str, Any]:
+    meta = {}
+    if isinstance(workflow, dict):
+        extra = workflow.get("extra", {})
+        if isinstance(extra, dict):
+            for k in ("title", "author", "license", "version", "description"):
+                if extra.get(k):
+                    meta[k] = str(extra[k]).strip()
+    return meta
+
+
+def _extract_input_files(nodes_by_id: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Extract input file references (LoadImage, LoadVideo, etc).
+    """
+    inputs = []
+    seen = set()
+    
+    for nid, node in nodes_by_id.items():
+        if not isinstance(node, dict):
+            continue
+            
+        ntype = _lower(_node_type(node))
+        
+        # Standard input nodes
+        is_image_load = "loadimage" in ntype
+        is_video_load = "loadvideo" in ntype 
+        
+        if is_image_load or is_video_load:
+            ins = _inputs(node)
+            
+            # 1. API Format inputs
+            filename = ins.get("image") or ins.get("video") or ins.get("filename")
+            
+            # 2. Workflow Format widgets_values (Heuristic)
+            if not filename:
+                widgets = node.get("widgets_values")
+                if isinstance(widgets, list) and len(widgets) > 0:
+                    candidate = widgets[0]
+                    # Heuristic: Valid filenames usually have extensions or paths
+                    if isinstance(candidate, str) and (
+                        "." in candidate or "/" in candidate or "\\" in candidate
+                    ):
+                        filename = candidate
+
+            if isinstance(filename, str) and filename:
+                # Deduplicate by (filename, subfolder, type)
+                subfolder = ins.get("subfolder", "") or ""
+                key = (filename, str(subfolder), ntype)
+                
+                if key not in seen:
+                    seen.add(key)
+                    inputs.append({
+                        "filename": filename,
+                        "subfolder": subfolder,
+                        "type": "video" if is_video_load else "image",
+                        "node_id": nid,
+                        "folder_type": ins.get("type", "input") 
+                    })
+    
+    return inputs
+
+
 def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result[Optional[Dict[str, Any]]]:
     """
     Parse generation information from a ComfyUI prompt graph (dict of nodes).
     Returns Ok(None) when not enough information is available (do-not-lie).
     """
-    if not isinstance(prompt_graph, dict) or not prompt_graph:
-        return Result.Ok(None)
+    workflow_meta = _extract_workflow_metadata(workflow)
+
+    target_graph = prompt_graph
+    
+    # If no prompt graph provided, try to use workflow as the source graph
+    if not isinstance(target_graph, dict) or not target_graph:
+        if isinstance(workflow, dict) and "nodes" in workflow:
+            target_graph = workflow
+        else:
+            if workflow_meta:
+                return Result.Ok({"metadata": workflow_meta})
+            return Result.Ok(None)
 
     nodes_by_id: Dict[str, Dict[str, Any]] = {}
-    for k, v in prompt_graph.items():
-        if isinstance(v, dict):
-            nodes_by_id[str(k)] = v
+
+    # Handle standard API prompt format vs Workflow Graph format
+    # Workflow Graph format (e.g. from PNGs with only workflow)
+    if "nodes" in target_graph and isinstance(target_graph["nodes"], list):
+        for node in target_graph["nodes"]:
+            if isinstance(node, dict):
+                nodes_by_id[str(node.get("id"))] = node
+    else:
+        # API PROMPT format (default)
+        for k, v in target_graph.items():
+            if isinstance(v, dict):
+                nodes_by_id[str(k)] = v
 
     sinks = _find_candidate_sinks(nodes_by_id)
     if not sinks:
+        if workflow_meta:
+            return Result.Ok({"metadata": workflow_meta})
         return Result.Ok(None)
 
     # Prefer "real" sinks (SaveVideo over PreviewImage, etc.)
-    sinks.sort(key=lambda nid: _sink_priority(nodes_by_id.get(nid, {}) or {}))
+    sinks.sort(key=lambda nid: _sink_priority(nodes_by_id.get(nid, {}) or {}, nid))
 
     sink_id = sinks[0]
     sampler_id, sampler_conf = _select_primary_sampler(nodes_by_id, sink_id)
@@ -1106,6 +1227,18 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
         sampler_id, sampler_conf = _select_any_sampler(nodes_by_id)
         sampler_mode = "global" if sampler_id else sampler_mode
     if not sampler_id:
+        out_fallback: Dict[str, Any] = {}
+        if workflow_meta:
+            out_fallback["metadata"] = workflow_meta
+            
+        # Try extracting inputs even without a recognized sampler (e.g. format conversion)
+        input_files_fallback = _extract_input_files(nodes_by_id)
+        if input_files_fallback:
+            out_fallback["inputs"] = input_files_fallback
+            
+        if out_fallback:
+            return Result.Ok(out_fallback)
+            
         return Result.Ok(None)
 
     # For secondary traces (VAE, etc.), compute a stable upstream set from the sink input.
@@ -1221,7 +1354,7 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
     sampler_name = _scalar(ins.get("sampler_name")) or _scalar(ins.get("sampler"))
     scheduler = _scalar(ins.get("scheduler"))
     steps = _scalar(ins.get("steps"))
-    cfg = _scalar(ins.get("cfg")) or _scalar(ins.get("cfg_scale"))
+    cfg = _scalar(ins.get("cfg")) or _scalar(ins.get("cfg_scale")) or _scalar(ins.get("guidance")) or _scalar(ins.get("guidance_scale"))
     denoise = _scalar(ins.get("denoise"))
     seed_val = _scalar(ins.get("seed"))
     if seed_val is None and _is_link(ins.get("seed")):
@@ -1231,6 +1364,7 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
     model_link_for_chain = ins.get("model") if _is_link(ins.get("model")) else None
     if model_link_for_chain is None and _is_link(guider_model_link):
         model_link_for_chain = guider_model_link
+
     if advanced:
         if _is_link(ins.get("sampler")):
             s = _trace_sampler_name(nodes_by_id, ins.get("sampler"))
@@ -1325,6 +1459,8 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
             "sampler_mode": sampler_mode,
         },
     }
+    if workflow_meta:
+        out["metadata"] = workflow_meta
 
     if pos_val:
         out["positive"] = {"value": pos_val[0], "confidence": confidence, "source": pos_val[1]}
@@ -1390,6 +1526,11 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
 
     if clip_skip:
         out["clip_skip"] = clip_skip
+    
+    # Extract inputs (images/videos used)
+    input_files = _extract_input_files(nodes_by_id)
+    if input_files:
+        out["inputs"] = input_files
 
     # Do-not-lie: if nothing useful extracted besides engine, return None.
     if len(out.keys()) <= 1:

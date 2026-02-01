@@ -26,6 +26,7 @@ import { createViewerPanZoom } from "../features/viewer/panzoom.js";
 import { createViewerMediaFactory } from "../features/viewer/mediaFactory.js";
 import { drawScopesLight } from "../features/viewer/scopes.js";
 import { ensureViewerMetadataAsset, buildViewerMetadataBlocks } from "../features/viewer/genInfo.js";
+import { createIconButton } from "./buttons.js";
 
 /**
  * Viewer modes
@@ -41,7 +42,8 @@ export const VIEWER_MODES = {
  */
 export function createViewer() {
     const overlay = document.createElement("div");
-    overlay.className = "mjr-viewer-overlay";
+    // mjr-assets-manager class allows access to theme variables (colors, fonts)
+    overlay.className = "mjr-viewer-overlay mjr-assets-manager";
     overlay.style.cssText = `
         position: fixed;
         top: 0;
@@ -172,7 +174,7 @@ export function createViewer() {
         flex-direction: column;
         gap: 8px;
         padding: 12px 20px;
-        background: rgba(0, 0, 0, 0.8);
+        background: var(--mjr-surface-0, rgba(0, 0, 0, 0.8));
         border-bottom: 1px solid rgba(255, 255, 255, 0.1);
         color: white;
         box-sizing: border-box;
@@ -198,6 +200,19 @@ export function createViewer() {
             state,
             lifecycle,
             getCanAB: () => canAB(),
+            onToggleFullscreen: () => {
+                try {
+                    if (!document.fullscreenElement) {
+                        try {
+                            overlay.requestFullscreen();
+                        } catch {}
+                    } else {
+                        try {
+                            document.exitFullscreen();
+                        } catch {}
+                    }
+                } catch {}
+            },
             // Close button should fully tear down the viewer (remove overlay + listeners) to avoid leaks/ghost UI.
             onClose: () => _requestCloseFromButton?.(),
             onMode: (mode) => {
@@ -631,9 +646,19 @@ export function createViewer() {
 
     // Overlay drawing (grid + probe + loupe)
     let _overlayRAF = null;
-    function scheduleOverlayRedraw() {
+    function scheduleOverlayRedraw(immediate) {
         try {
             if (overlay.style.display === "none") return;
+            if (immediate === true) {
+                if (_overlayRAF != null) {
+                    cancelAnimationFrame(_overlayRAF);
+                    _overlayRAF = null;
+                }
+                try {
+                    redrawOverlays();
+                } catch {}
+                return;
+            }
             if (_overlayRAF != null) return;
             _overlayRAF = requestAnimationFrame(() => {
                 _overlayRAF = null;
@@ -1776,6 +1801,7 @@ export function createViewer() {
             tonemap: null,
             maxProcPixels: MAX_PROC_PIXELS,
             maxProcPixelsVideo: MAX_PROC_PIXELS_VIDEO,
+            disableWebGL: !!APP_CONFIG.VIEWER_DISABLE_WEBGL_VIDEO,
             videoGradeThrottleFps: VIDEO_GRADE_THROTTLE_FPS,
             safeAddListener,
             safeCall,
@@ -1966,6 +1992,7 @@ export function createViewer() {
         ASSET_RATING_CHANGED_EVENT,
         probeTooltip,
         loupeWrap,
+        renderGenInfoPanel,
         getVideoControls: () => {
             try {
                 return state?._videoControlsMounted || null;
@@ -2359,25 +2386,7 @@ export function createViewer() {
 /**
  * Helper to create icon button
  */
-function createIconButton(label, title) {
-    const btn = document.createElement("button");
-    btn.textContent = label;
-    btn.title = title;
-    try {
-        btn.setAttribute("aria-label", title || label || "Button");
-    } catch {}
-    btn.style.cssText = `
-        padding: 6px 12px;
-        background: transparent;
-        border: 1px solid rgba(255, 255, 255, 0.3);
-        color: white;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 14px;
-        transition: all 0.2s;
-    `;
-    return btn;
-}
+
 
 /**
  * Get or create global viewer instance

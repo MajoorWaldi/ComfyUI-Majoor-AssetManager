@@ -50,3 +50,39 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
             return _json_response(Result.Err("DB_ERROR", safe_error_message(exc, "Database optimize failed")))
 
         return _json_response(Result.Ok({"ran": steps}))
+
+    @routes.post("/mjr/am/db/reset")
+    async def db_reset(request: web.Request):
+        """
+        Reset database and trigger rescan.
+        """
+        import asyncio
+        from backend.config import WATCHER_PATHS
+
+        csrf = _csrf_error(request)
+        if csrf:
+            return _json_response(Result.Err("CSRF", csrf))
+
+        svc, error_result = await _require_services()
+        if error_result:
+            return _json_response(error_result)
+
+        db = svc.get("db")
+        index_service = svc.get("index")
+        
+        if not db or not index_service:
+             return _json_response(Result.Err("SERVICE_UNAVAILABLE", "Services unavailable"))
+
+        # 1. Reset DB
+        logger.warning("Resetting database requested by user")
+        reset_res = await db.areset()
+        if not reset_res.ok:
+            return _json_response(reset_res)
+
+        # 2. Trigger Rescan
+        started_scans = []
+        for path in WATCHER_PATHS:
+             asyncio.create_task(index_service.scan_directory(str(path), recursive=True, incremental=False))
+             started_scans.append(str(path))
+             
+        return _json_response(Result.Ok({"reset": True, "scans_triggered": started_scans}))

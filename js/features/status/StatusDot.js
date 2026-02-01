@@ -146,7 +146,7 @@ export function createStatusIndicator() {
         
         // Status indicator feedback
         const prevColor = statusDot.style.background;
-        statusDot.style.background = "#FFA726"; // Orange (working)
+        statusDot.style.background = "var(--mjr-status-warning, #FFA726)"; // Orange (working)
 
         try {
             const res = await resetIndex({
@@ -157,14 +157,14 @@ export function createStatusIndicator() {
                 rebuild_fts: true,
             });
             if (res?.ok) {
-                statusDot.style.background = "#4CAF50"; // Green (success)
+                statusDot.style.background = "var(--mjr-status-success, #4CAF50)"; // Green (success)
                 comfyToast("Index reset started. Files will be reindexed in the background.", "success");
             } else {
-                statusDot.style.background = "#f44336"; // Red (error)
+                statusDot.style.background = "var(--mjr-status-error, #f44336)"; // Red (error)
                 comfyToast(res?.error || "Failed to reset index.", "error");
             }
         } catch (error) {
-            statusDot.style.background = "#f44336"; // Red (error)
+            statusDot.style.background = "var(--mjr-status-error, #f44336)"; // Red (error)
             comfyToast(error?.message || "Reset index failed.", "error");
         } finally {
             resetBtn.disabled = false;
@@ -262,7 +262,7 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
     } else if (desiredScope === "output") detail = roots?.output_directory ? ` (${roots.output_directory})` : "";
 
     // Show scanning status
-    statusDot.style.background = "#FFA726"; // Orange
+    statusDot.style.background = "var(--mjr-status-warning, #FFA726)"; // Orange
     setStatusWithHint(statusText, `Scanning ${scopeLabel}${detail}...`, "This may take a while");
 
     const payload = {
@@ -274,7 +274,7 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
     };
     if (desiredScope === "custom") {
         if (!desiredCustomRootId) {
-            statusDot.style.background = "#f44336";
+            statusDot.style.background = "var(--mjr-status-error, #f44336)";
             statusText.textContent = "Select a custom folder first";
             return;
         }
@@ -286,7 +286,7 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
 
     if (scanResult.ok) {
         const stats = scanResult.data;
-        statusDot.style.background = "#4CAF50"; // Green
+        statusDot.style.background = "var(--mjr-status-success, #4CAF50)"; // Green
         setStatusWithHint(
             statusText,
             "Scan complete!",
@@ -298,7 +298,7 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
             updateStatus(statusDot, statusText, capabilitiesSection);
         }, 2000);
     } else {
-        statusDot.style.background = "#f44336"; // Red
+        statusDot.style.background = "var(--mjr-status-error, #f44336)"; // Red
         setStatusLines(statusText, [`Scan failed: ${scanResult.error || "Unknown error"}`]);
 
         // Restore status after 3 seconds
@@ -465,7 +465,7 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
 
         if (totalAssets === 0) {
             // No assets indexed - yellow
-            statusDot.style.background = "#FFA726";
+            statusDot.style.background = "var(--mjr-status-warning, #FFA726)";
             setStatusWithHint(
                 statusText,
                 `No assets indexed yet (${scopeLabel})`,
@@ -473,7 +473,7 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
             );
         } else {
             // Assets indexed - green
-            statusDot.style.background = "#4CAF50";
+            statusDot.style.background = "var(--mjr-status-success, #4CAF50)";
             setStatusLines(
                 statusText,
                 [
@@ -489,7 +489,7 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
         // Error - red
         renderCapabilities(capabilitiesSection, {}, {});
         renderToolsStatusLine(capabilitiesSection, toolStatusData);
-        statusDot.style.background = "#f44336";
+        statusDot.style.background = "var(--mjr-status-error, #f44336)";
         if (result?.code === "INVALID_RESPONSE" && result?.status === 404) {
             setStatusWithHint(
                 statusText,

@@ -1,8 +1,8 @@
 # AGENTS — Directives pour Majoor Assets Manager
 
-Updated: 2026-01-24
+Updated: 2026-01-31
 
-> **Status (as of 2026-01-24):** See `docs/AUDIT_ISSUES.md` for current issues tracking.
+> **Status (as of 2026-01-31):** OPTIMIZED & STABLE. Critical performance audits complete. Virtual Scrolling & WebGL Player implemented.
 
 ## Objectif
 Créer un **Assets Manager pour ComfyUI** qui indexe, recherche et gère les assets (images/vidéos) avec **ratings**, **tags**, **workflows**, et **metadata de génération**, sans faire planter l’UI.

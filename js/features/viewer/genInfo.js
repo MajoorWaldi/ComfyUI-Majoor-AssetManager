@@ -321,7 +321,7 @@ export function buildViewerMetadataBlocks({ title, asset, ui } = {}) {
     const status = getGenInfoStatus(asset);
     if (ui?.loading) {
         safeCall(() => {
-            block.appendChild(createInfoBox("Loading", "Loading generation data\u2026", "#2196F3"));
+            block.appendChild(createInfoBox("Loading", "Loading generation data\u2026", "var(--mjr-status-info, #2196F3)"));
         });
     }
 
@@ -330,7 +330,7 @@ export function buildViewerMetadataBlocks({ title, asset, ui } = {}) {
         const code = String(status.code || status.stage || "").trim();
         const content = code ? `${msg}\n\nCode: ${code}\nClick to retry.` : `${msg}\n\nClick to retry.`;
         safeCall(() => {
-            const box = createInfoBox("Error Loading Metadata", content, "#F44336");
+            const box = createInfoBox("Error Loading Metadata", content, "var(--mjr-status-error, #F44336)");
             try {
                 box.style.cursor = "pointer";
             } catch {}

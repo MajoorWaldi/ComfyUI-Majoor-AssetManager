@@ -3,7 +3,8 @@
  */
 
 import { APP_CONFIG, APP_DEFAULTS } from "./config.js";
-import { getSecuritySettings, setSecuritySettings, setProbeBackendMode } from "../api/client.js";
+import { getSecuritySettings, setSecuritySettings, setProbeBackendMode, resetIndex } from "../api/client.js";
+import { comfyToast } from "./toast.js";
 import { safeDispatchCustomEvent } from "../utils/events.js";
 import { t, initI18n } from "./i18n.js";
 
@@ -22,6 +23,14 @@ const DEFAULT_SETTINGS = {
         pageSize: APP_DEFAULTS.DEFAULT_PAGE_SIZE,
         minSize: APP_DEFAULTS.GRID_MIN_SIZE,
         gap: APP_DEFAULTS.GRID_GAP,
+        showExtBadge: APP_DEFAULTS.GRID_SHOW_BADGES_EXTENSION,
+        showRatingBadge: APP_DEFAULTS.GRID_SHOW_BADGES_RATING,
+        showTagsBadge: APP_DEFAULTS.GRID_SHOW_BADGES_TAGS,
+        showDetails: APP_DEFAULTS.GRID_SHOW_DETAILS,
+        showFilename: APP_DEFAULTS.GRID_SHOW_DETAILS_FILENAME,
+        showDate: APP_DEFAULTS.GRID_SHOW_DETAILS_DATE,
+        showDimensions: APP_DEFAULTS.GRID_SHOW_DETAILS_DIMENSIONS,
+        showWorkflowDot: APP_DEFAULTS.GRID_SHOW_WORKFLOW_DOT,
     },
     infiniteScroll: {
         enabled: APP_DEFAULTS.INFINITE_SCROLL_ENABLED,
@@ -41,6 +50,7 @@ const DEFAULT_SETTINGS = {
     },
     viewer: {
         allowPanAtZoom1: APP_DEFAULTS.VIEWER_ALLOW_PAN_AT_ZOOM_1,
+        disableWebGL: APP_DEFAULTS.VIEWER_DISABLE_WEBGL_VIDEO,
         videoGradeThrottleFps: APP_DEFAULTS.VIEWER_VIDEO_GRADE_THROTTLE_FPS,
         scopesFps: APP_DEFAULTS.VIEWER_SCOPES_FPS,
         metaTtlMs: APP_DEFAULTS.VIEWER_META_TTL_MS,
@@ -63,13 +73,13 @@ const DEFAULT_SETTINGS = {
         mode: "auto",
     },
     ratingTagsSync: {
-        enabled: false,
+        enabled: true,
     },
     cache: {
         tagsTTLms: 30_000,
     },
     workflowMinimap: {
-        enabled: true,
+        enabled: false,
         nodeColors: true,
         showLinks: true,
         showGroups: true,
@@ -83,7 +93,7 @@ const DEFAULT_SETTINGS = {
         allowDelete: true,
         allowRename: true,
         allowOpenInFolder: true,
-        allowResetIndex: false,
+        allowResetIndex: true,
     },
 };
 
@@ -199,18 +209,28 @@ const applySettingsToConfig = (settings) => {
     APP_CONFIG.GRID_MIN_SIZE = Math.max(60, Math.min(600, Math.round(_safeNum(settings.grid?.minSize, APP_DEFAULTS.GRID_MIN_SIZE))));
     APP_CONFIG.GRID_GAP = Math.max(0, Math.min(40, Math.round(_safeNum(settings.grid?.gap, APP_DEFAULTS.GRID_GAP))));
 
+    APP_CONFIG.GRID_SHOW_BADGES_EXTENSION = !!(settings.grid?.showExtBadge ?? APP_DEFAULTS.GRID_SHOW_BADGES_EXTENSION);
+    APP_CONFIG.GRID_SHOW_BADGES_RATING = !!(settings.grid?.showRatingBadge ?? APP_DEFAULTS.GRID_SHOW_BADGES_RATING);
+    APP_CONFIG.GRID_SHOW_BADGES_TAGS = !!(settings.grid?.showTagsBadge ?? APP_DEFAULTS.GRID_SHOW_BADGES_TAGS);
+    APP_CONFIG.GRID_SHOW_DETAILS = !!(settings.grid?.showDetails ?? APP_DEFAULTS.GRID_SHOW_DETAILS);
+    APP_CONFIG.GRID_SHOW_DETAILS_FILENAME = !!(settings.grid?.showFilename ?? APP_DEFAULTS.GRID_SHOW_DETAILS_FILENAME);
+    APP_CONFIG.GRID_SHOW_DETAILS_DATE = !!(settings.grid?.showDate ?? APP_DEFAULTS.GRID_SHOW_DETAILS_DATE);
+    APP_CONFIG.GRID_SHOW_DETAILS_DIMENSIONS = !!(settings.grid?.showDimensions ?? APP_DEFAULTS.GRID_SHOW_DETAILS_DIMENSIONS);
+    APP_CONFIG.GRID_SHOW_WORKFLOW_DOT = !!(settings.grid?.showWorkflowDot ?? APP_DEFAULTS.GRID_SHOW_WORKFLOW_DOT);
+
     APP_CONFIG.INFINITE_SCROLL_ENABLED = !!settings.infiniteScroll?.enabled;
     APP_CONFIG.INFINITE_SCROLL_ROOT_MARGIN = String(settings.infiniteScroll?.rootMargin || APP_DEFAULTS.INFINITE_SCROLL_ROOT_MARGIN);
     APP_CONFIG.INFINITE_SCROLL_THRESHOLD = Math.max(0, Math.min(1, _safeNum(settings.infiniteScroll?.threshold, APP_DEFAULTS.INFINITE_SCROLL_THRESHOLD)));
     APP_CONFIG.BOTTOM_GAP_PX = Math.max(0, Math.min(5000, Math.round(_safeNum(settings.infiniteScroll?.bottomGapPx, APP_DEFAULTS.BOTTOM_GAP_PX))));
 
     APP_CONFIG.VIEWER_ALLOW_PAN_AT_ZOOM_1 = !!settings.viewer?.allowPanAtZoom1;
+    APP_CONFIG.VIEWER_DISABLE_WEBGL_VIDEO = !!settings.viewer?.disableWebGL;
     APP_CONFIG.VIEWER_VIDEO_GRADE_THROTTLE_FPS = Math.max(1, Math.min(60, Math.round(_safeNum(settings.viewer?.videoGradeThrottleFps, APP_DEFAULTS.VIEWER_VIDEO_GRADE_THROTTLE_FPS))));
     APP_CONFIG.VIEWER_SCOPES_FPS = Math.max(1, Math.min(60, Math.round(_safeNum(settings.viewer?.scopesFps, APP_DEFAULTS.VIEWER_SCOPES_FPS))));
     APP_CONFIG.VIEWER_META_TTL_MS = Math.max(1000, Math.min(10 * 60_000, Math.round(_safeNum(settings.viewer?.metaTtlMs, APP_DEFAULTS.VIEWER_META_TTL_MS))));
     APP_CONFIG.VIEWER_META_MAX_ENTRIES = Math.max(50, Math.min(5000, Math.round(_safeNum(settings.viewer?.metaMaxEntries, APP_DEFAULTS.VIEWER_META_MAX_ENTRIES))));
 
-    APP_CONFIG.WORKFLOW_MINIMAP_ENABLED = !!(settings.workflowMinimap?.enabled ?? true);
+    APP_CONFIG.WORKFLOW_MINIMAP_ENABLED = !!(settings.workflowMinimap?.enabled ?? false);
 
     APP_CONFIG.RT_HYDRATE_CONCURRENCY = Math.max(1, Math.min(16, Math.round(_safeNum(settings.rtHydrate?.concurrency, APP_DEFAULTS.RT_HYDRATE_CONCURRENCY))));
     APP_CONFIG.RT_HYDRATE_QUEUE_MAX = Math.max(10, Math.min(5000, Math.round(_safeNum(settings.rtHydrate?.queueMax, APP_DEFAULTS.RT_HYDRATE_QUEUE_MAX))));
@@ -317,6 +337,128 @@ export const registerMajoorSettings = (app, onApplied) => {
         });
 
         safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Grid.ShowExtBadge`,
+            category: cat(t("cat.display"), "Show format/extension badges"),
+            name: "Show format badges",
+            tooltip: "Display format badges (e.g. JPG, MP4) on thumbnails",
+            type: "boolean",
+            defaultValue: !!settings.grid?.showExtBadge,
+            onChange: (value) => {
+                settings.grid.showExtBadge = !!value;
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("grid.showExtBadge");
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Grid.ShowRatingBadge`,
+            category: cat(t("cat.display"), "Show rating badges"),
+            name: "Show ratings",
+            tooltip: "Display star ratings on thumbnails",
+            type: "boolean",
+            defaultValue: !!settings.grid?.showRatingBadge,
+            onChange: (value) => {
+                settings.grid.showRatingBadge = !!value;
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("grid.showRatingBadge");
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Grid.ShowTagsBadge`,
+            category: cat(t("cat.display"), "Show tags badges"),
+            name: "Show tags",
+            tooltip: "Display a small indicator if an asset has tags",
+            type: "boolean",
+            defaultValue: !!settings.grid?.showTagsBadge,
+            onChange: (value) => {
+                settings.grid.showTagsBadge = !!value;
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("grid.showTagsBadge");
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Grid.ShowDetails`,
+            category: cat(t("cat.display"), "Show card details"),
+            name: "Show metadata panel",
+            tooltip: "Show the bottom details panel on asset cards (filename, date, etc.)",
+            type: "boolean",
+            defaultValue: !!settings.grid?.showDetails,
+            onChange: (value) => {
+                settings.grid.showDetails = !!value;
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("grid.showDetails");
+            },
+        });
+
+        if (settings.grid?.showDetails !== false) {
+             safeAddSetting({
+                id: `${SETTINGS_PREFIX}.Grid.ShowFilename`,
+                category: cat(t("cat.display"), "Show filename"),
+                name: "Show filename",
+                tooltip: "Display filename in details panel",
+                type: "boolean",
+                defaultValue: !!settings.grid?.showFilename,
+                onChange: (value) => {
+                    settings.grid.showFilename = !!value;
+                    saveMajoorSettings(settings);
+                    applySettingsToConfig(settings);
+                    notifyApplied("grid.showFilename");
+                },
+            });
+
+            safeAddSetting({
+                id: `${SETTINGS_PREFIX}.Grid.ShowDate`,
+                category: cat(t("cat.display"), "Show date"),
+                name: "Show date/time",
+                tooltip: "Display date and time in details panel",
+                type: "boolean",
+                defaultValue: !!settings.grid?.showDate,
+                onChange: (value) => {
+                    settings.grid.showDate = !!value;
+                    saveMajoorSettings(settings);
+                    applySettingsToConfig(settings);
+                    notifyApplied("grid.showDate");
+                },
+            });
+
+            safeAddSetting({
+                id: `${SETTINGS_PREFIX}.Grid.ShowDimensions`,
+                category: cat(t("cat.display"), "Show dimensions"),
+                name: "Show dimensions",
+                tooltip: "Display resolution (WxH) in details panel",
+                type: "boolean",
+                defaultValue: !!settings.grid?.showDimensions,
+                onChange: (value) => {
+                    settings.grid.showDimensions = !!value;
+                    saveMajoorSettings(settings);
+                    applySettingsToConfig(settings);
+                    notifyApplied("grid.showDimensions");
+                },
+            });
+
+            safeAddSetting({
+                id: `${SETTINGS_PREFIX}.Grid.ShowWorkflowDot`,
+                category: cat(t("cat.display"), "Show workflow dot"),
+                name: "Show workflow indicator",
+                tooltip: "Display the green dot indicating workflow metadata availability (bottom right of card)",
+                type: "boolean",
+                defaultValue: !!settings.grid?.showWorkflowDot,
+                onChange: (value) => {
+                    settings.grid.showWorkflowDot = !!value;
+                    saveMajoorSettings(settings);
+                    applySettingsToConfig(settings);
+                    notifyApplied("grid.showWorkflowDot");
+                },
+            });
+        }
+
+        safeAddSetting({
             id: `${SETTINGS_PREFIX}.Sidebar.Position`,
             category: cat(t("cat.display"), t("setting.sidebar.pos.name").replace("Majoor: ", "")),
             name: t("setting.sidebar.pos.name"),
@@ -382,7 +524,7 @@ export const registerMajoorSettings = (app, onApplied) => {
 
         safeAddSetting({
             id: `${SETTINGS_PREFIX}.Viewer.AllowPanAtZoom1`,
-            category: cat(t("cat.navigation"), t("setting.viewer.pan.name").replace("Majoor: ", "")),
+            category: cat(t("cat.viewer"), t("setting.viewer.pan.name").replace("Majoor: ", "")),
             name: t("setting.viewer.pan.name"),
             tooltip: t("setting.viewer.pan.desc"),
             type: "boolean",
@@ -393,6 +535,22 @@ export const registerMajoorSettings = (app, onApplied) => {
                 saveMajoorSettings(settings);
                 applySettingsToConfig(settings);
                 notifyApplied("viewer.allowPanAtZoom1");
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Viewer.DisableWebGL`,
+            category: cat(t("cat.viewer"), "Disable WebGL Video"),
+            name: "Disable WebGL Video",
+            tooltip: "Use CPU rendering (Canvas 2D) for video playback. Fixes 'black screen' issues on incompatible hardware/browsers.",
+            type: "boolean",
+            defaultValue: !!settings.viewer?.disableWebGL,
+            onChange: (value) => {
+                settings.viewer = settings.viewer || {};
+                settings.viewer.disableWebGL = !!value;
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("viewer.disableWebGL");
             },
         });
 
@@ -538,6 +696,82 @@ export const registerMajoorSettings = (app, onApplied) => {
         registerSecurityToggle("allowRename", "setting.sec.ren.name", "setting.sec.ren.desc");
         registerSecurityToggle("allowOpenInFolder", "setting.sec.open.name", "setting.sec.open.desc");
         registerSecurityToggle("allowResetIndex", "setting.sec.reset.name", "setting.sec.reset.desc");
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Maintenance.ResetIndexRun`,
+            category: cat("Maintenance", "Reset Index Now"),
+            name: "⚠️ Reset Index Now",
+            tooltip: "Delete database & rescan (requires 'Allow Reset Index' enabled above)",
+            type: "boolean",
+            defaultValue: false,
+            onChange: async (value) => {
+                if (!value) return; 
+
+                // Hack to ensure this setting is never persisted as true
+                // We use localStorage directly to revert it because ComfyUI saves settings automatically.
+                setTimeout(() => {
+                   const s = app.ui.settings.settingAry.find(s => s.id === `${SETTINGS_PREFIX}.Maintenance.ResetIndexRun`);
+                   if (s) { 
+                       s.value = false;
+                       // Also try to update localStorage directly if ComfyUI uses it
+                       try {
+                           const comfySettings = JSON.parse(localStorage.getItem("Comfy.Settings") || "{}");
+                           comfySettings[`${SETTINGS_PREFIX}.Maintenance.ResetIndexRun`] = false;
+                           localStorage.setItem("Comfy.Settings", JSON.stringify(comfySettings));
+                       } catch(e) {}
+                   }
+                }, 100);
+
+                // Check if this looks like a page-load auto-trigger (e.g. no user interaction)
+                // Since we can't easily detect that, the localStorage reversion above is the primary fix.
+                // But as a secondary guard: delay execution slightly and check if the value is still likely intended.
+                
+                const allowed = settings.security?.allowResetIndex;
+                if (!allowed) {
+                    comfyToast({ 
+                        severity: 'error', 
+                        summary: 'Permission Denied', 
+                        detail: 'Please enable "Allow Reset Index" in Security settings first.' 
+                    }, 'error');
+                    console.warn("[Majoor] Reset Index blocked: Security setting 'allowResetIndex' is OFF.");
+                    // Force visual reset immediately
+                    const s = app.ui.settings.settingAry.find(s => s.id === `${SETTINGS_PREFIX}.Maintenance.ResetIndexRun`);
+                    if (s) s.value = false;
+                    return;
+                }
+
+                if (!confirm("Are you SURE you want to delete the index database? This cannot be undone. A full rescan will start.")) {
+                    const s = app.ui.settings.settingAry.find(s => s.id === `${SETTINGS_PREFIX}.Maintenance.ResetIndexRun`);
+                    if (s) s.value = false;
+                    return;
+                }
+
+                console.log("[Majoor] Requesting Index Reset...");
+                comfyToast({ severity: 'info', summary: 'Resetting...', detail: 'Deleting database and restarting scan.' }, 'info');
+
+                try {
+                    const res = await resetIndex();
+                    if (res.ok) {
+                        console.log("[Majoor] Index Reset SUCCESS:", res.data);
+                        comfyToast({ 
+                            severity: 'success', 
+                            summary: 'Index Reset', 
+                            detail: 'Database deleted. Rescan started in background.' 
+                        }, 'success');
+                    } else {
+                        console.error("[Majoor] Index Reset FAILED:", res.error);
+                         comfyToast({ 
+                            severity: 'error', 
+                            summary: 'Reset Failed', 
+                            detail: res.error || 'Unknown error during reset' 
+                        }, 'error');
+                    }
+                } catch (err) {
+                    console.error("[Majoor] Index Reset EXCEPTION:", err);
+                    comfyToast({ severity: 'error', summary: 'Error', detail: String(err) }, 'error');
+                }
+            },
+        });
 
         try {
             settingsApi[SETTINGS_REG_FLAG] = true;

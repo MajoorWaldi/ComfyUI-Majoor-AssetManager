@@ -26,10 +26,18 @@ const getSelectedAssetIds = (gridContainer) => {
     const selected = new Set();
     if (!gridContainer) return selected;
     try {
-        const cards = gridContainer.querySelectorAll('.mjr-asset-card.is-selected');
-        for (const card of cards) {
-            const id = card.dataset?.mjrAssetId;
-            if (id) selected.add(String(id));
+        // Fix: Use authoritative source (dataset) instead of DOM query which misses off-screen items
+        const raw = gridContainer.dataset?.mjrSelectedAssetIds;
+        if (raw) {
+            const list = JSON.parse(raw);
+            if (Array.isArray(list)) list.forEach(id => selected.add(String(id)));
+        } else {
+             // Fallback for legacy or if dataset missing
+             const cards = gridContainer.querySelectorAll('.mjr-asset-card.is-selected');
+             for (const card of cards) {
+                 const id = card.dataset?.mjrAssetId;
+                 if (id) selected.add(String(id));
+             }
         }
     } catch {}
     return selected;
@@ -313,7 +321,31 @@ export function bindGridContextMenu({
         menu.innerHTML = "";
 
         // Get current selection state
-        const selectedIds = getSelectedAssetIds(gridContainer);
+        let selectedIds = getSelectedAssetIds(gridContainer);
+        
+        // Implicit selection: if Right-Click on unselected item, select it exclusively.
+        if (asset && asset.id && !selectedIds.has(String(asset.id))) {
+             const newSelection = [String(asset.id)];
+             try {
+                 gridContainer.dataset.mjrSelectedAssetIds = JSON.stringify(newSelection);
+                 // Dispatch event to sync state
+                 safeDispatchCustomEvent(gridContainer, "mjr:selection-changed", {
+                     selectedIds: newSelection,
+                     selectedAssets: [asset]
+                 });
+             } catch {}
+             // Update local set for menu logic
+             selectedIds = new Set(newSelection);
+             
+             // Visually update immediately (toggle class) to give feedback
+             try {
+                // Clear others
+                gridContainer.querySelectorAll('.mjr-asset-card.is-selected').forEach(el => el.classList.remove('is-selected'));
+                // Select target
+                if (card) card.classList.add('is-selected');
+             } catch {}
+        }
+
         const isSingleSelected = selectedIds.size === 1 && selectedIds.has(String(asset.id));
         const isMultiSelected = selectedIds.size > 1;
         const hasSelection = selectedIds.size > 0;

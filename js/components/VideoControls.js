@@ -58,6 +58,9 @@ function createBtn(className, text, title) {
     b.type = "button";
     b.className = `mjr-video-btn ${className || ""}`.trim();
     if (title) b.title = title;
+    try {
+        b.setAttribute("aria-label", title || text || "Button");
+    } catch {}
     b.textContent = text;
     return b;
 }
@@ -67,7 +70,9 @@ function createIconBtn(className, iconClass, title, ariaLabel) {
     b.type = "button";
     b.className = `mjr-video-btn ${className || ""}`.trim();
     if (title) b.title = title;
-    if (ariaLabel) b.setAttribute("aria-label", ariaLabel);
+    try {
+        b.setAttribute("aria-label", ariaLabel || title || "Button");
+    } catch {}
 
     const icon = document.createElement("span");
     icon.className = `pi ${iconClass || ""}`.trim();

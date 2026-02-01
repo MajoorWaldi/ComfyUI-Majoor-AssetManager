@@ -296,6 +296,8 @@ def _check_write_access(*, peer_ip: str, headers: Mapping[str, str]) -> "Result[
 
     Returns a Result that never raises (route handlers should return 200 with this Result on error).
     """
+    import hmac
+
     # Local import to avoid cycles: core/security must remain lightweight.
     from ...shared import Result
 
@@ -307,7 +309,8 @@ def _check_write_access(*, peer_ip: str, headers: Mapping[str, str]) -> "Result[
 
     provided = _extract_write_token_from_headers(headers)
     if configured:
-        if provided and provided == configured:
+        # Prevent timing attacks
+        if provided and hmac.compare_digest(provided, configured):
             return Result.Ok(True, auth="token", client_ip=client_ip)
         return Result.Err(
             "AUTH_REQUIRED",

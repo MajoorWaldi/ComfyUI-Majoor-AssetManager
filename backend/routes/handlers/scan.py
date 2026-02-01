@@ -21,7 +21,13 @@ except Exception:
     folder_paths = _FolderPathsStub()  # type: ignore
 
 from backend.adapters.db.schema import rebuild_fts
-from backend.config import OUTPUT_ROOT, TO_THREAD_TIMEOUT_S
+from backend.config import (
+    OUTPUT_ROOT, 
+    TO_THREAD_TIMEOUT_S, 
+    INDEX_DIR_PATH, 
+    INDEX_DB_PATH, 
+    COLLECTIONS_DIR_PATH
+)
 from backend.custom_roots import resolve_custom_root
 from backend.shared import Result, get_logger
 from backend.utils import parse_bool
@@ -738,6 +744,36 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
             if not res.ok:
                 return _json_response(res)
             cleared["metadata_cache"] = int(res.data or 0)
+
+        # FULL RESET CLEANUP: VACUUM and Physical Files
+        if scope == "all" and (clear_scan_journal or clear_metadata_cache):
+            # 1. Vacuum DB to reclaim space and rebuild file
+            try:
+                await db.aexecute("VACUUM")
+                logger.info("Database VACUUM completed during index reset")
+            except Exception as exc:
+                logger.warning(f"Failed to VACUUM database: {exc}")
+
+            # 2. Cleanup physical stray files in index directory
+            # Verify we are cleaning the right folder and safeguard critical files
+            if reindex and INDEX_DIR_PATH.exists():
+                try:
+                    for item in INDEX_DIR_PATH.iterdir():
+                        if item.name.startswith("assets.sqlite"):
+                            continue
+                        if item == COLLECTIONS_DIR_PATH:
+                            continue
+
+                        try:
+                            if item.is_dir():
+                                shutil.rmtree(item)
+                            else:
+                                item.unlink()
+                            logger.info(f"Deleted stray index item: {item.name}")
+                        except Exception as e:
+                            logger.warning(f"Failed to delete {item.name}: {e}")
+                except Exception as exc:
+                    logger.warning(f"Index directory cleanup failed: {exc}")
 
         scan_details: list[dict[str, Any]] = []
         totals = {key: 0 for key in ("scanned", "added", "updated", "skipped", "errors")}

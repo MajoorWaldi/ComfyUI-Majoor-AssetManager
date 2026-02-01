@@ -70,12 +70,19 @@ The system extracts metadata from various file formats:
 - **Parameter Values**: All node parameter settings
 - **Workflow Minimap**: Visual representation of the workflow
 
-## Advanced Viewer
+### Video Playback
 
-### Viewer Access
-- Double-click on any asset card to open the viewer
-- Right-click and select "Open in Viewer" from context menu
-- Use keyboard shortcut when asset is selected
+#### Controls
+- **Play/Pause**: Toggle playback
+- **Example Loop**: Toggle loop mode (Loop / Once / Ping-Pong)
+- **Seek**: Draggable progress bar
+- **Step Frame**: Next/Previous frame (Key: Left/Right arrows)
+- **Speed**: Playback speed control (0.5x, 1x, 2x, etc.)
+
+#### Hardware Acceleration (WebGL)
+The viewer automatically detects WebGL support to enable GPU-accelerated video rendering.
+- **Benefits**: Real-time Exposure, Gamma, and Zebra analysis on 4K videos without CPU load.
+- **Fallback**: If WebGL is unavailable, it automatically switches to a robust CPU-based renderer (Canvas 2D).
 
 ### Single View Mode
 

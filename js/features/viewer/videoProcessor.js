@@ -1,10 +1,12 @@
 import { clamp01 } from "./state.js";
 import { computeProcessorScale } from "./processorUtils.js";
 import { drawMediaError } from "./imageProcessor.js";
+import { createWebGLVideoProcessor, isWebGLAvailable } from "./videoProcessorWebGL.js";
 
 export function createVideoProcessor({
     canvas,
     videoEl,
+    disableWebGL,
     getGradeParams,
     isDefaultGrade,
     tonemap,
@@ -14,7 +16,20 @@ export function createVideoProcessor({
     safeCall,
     onReady,
 } = {}) {
-    const ctx = (() => {
+    // Attempt WebGL first
+    let glProc = null;
+    if (!disableWebGL && isWebGLAvailable()) {
+        try {
+            glProc = createWebGLVideoProcessor({
+                canvas, videoEl, getGradeParams, isDefaultGrade, maxProcPixelsVideo
+            });
+        } catch (e) {
+            console.warn("WebGL Init failed, falling back to 2D", e);
+            glProc = null;
+        }
+    }
+
+    const ctx = glProc ? null : (() => {
         try {
             return canvas.getContext("2d", { willReadFrequently: true, alpha: false });
         } catch {
@@ -57,6 +72,7 @@ export function createVideoProcessor({
         _throttleTimer: null,
         _connectRAF: null,
         _connectTries: 0,
+        _buffer: null,
     };
 
     const unsubs = [];
@@ -102,42 +118,63 @@ export function createVideoProcessor({
     };
 
     const renderProcessedFrame = () => {
-        if (!ctx || !srcCtx) return;
         if (!proc.ready) return;
-        if (!drawSource()) return;
 
         const params = proc.lastParams || getGradeParams?.() || {};
+
+        if (glProc) {
+            glProc.update(params);
+            return;
+        }
+
+        if (!ctx || !srcCtx) return;
+
+        // Optimization: if no grading controls are active, bypass the expensive readback
+        // and draw the video element directly to the destination canvas.
         if (isDefaultGrade?.(params)) {
-            try {
+             try {
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
-                ctx.drawImage(srcCanvas, 0, 0);
+                ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
             } catch {}
             return;
         }
+
+        // Grading active: requires Source -> Buffer -> CPU Transform -> Dest
+        if (!drawSource()) return;
 
         let src;
         try {
             src = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
         } catch {
             try {
+                // Fallback if readback fails (e.g. tainted canvas)
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
-                ctx.drawImage(srcCanvas, 0, 0);
+                ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
             } catch {}
             return;
         }
 
         const w = srcCanvas.width;
         const h = srcCanvas.height;
-        let dst;
-        try {
-            dst = ctx.createImageData(w, h);
-        } catch {
-            try {
-                dst = new ImageData(w, h);
-            } catch {
-                return;
-            }
+        
+        // Reuse buffer if possible to reduce GC churn
+        let dst = proc._buffer;
+        if (!dst || dst.width !== w || dst.height !== h) {
+             try {
+                dst = ctx.createImageData(w, h);
+                proc._buffer = dst;
+             } catch {
+                try {
+                    dst = new ImageData(w, h);
+                    proc._buffer = dst;
+                } catch {
+                    return;
+                }
+             }
         }
+        
+        // Safety check if buffer creation failed
+        if (!dst) return;
 
         const exposureEV = Number(params.exposureEV) || 0;
         const gamma = Math.max(0.1, Math.min(3, Number(params.gamma) || 1));
@@ -400,8 +437,9 @@ export function createVideoProcessor({
     return {
         setParams,
         sampleAtOriginal,
-        getInfo: () => ({ ...proc }),
+        getInfo: () => ({ ...proc, renderer: glProc ? 'webgl' : '2d' }),
         destroy: () => {
+            if (glProc) glProc.destroy();
             proc._destroyed = true;
             try {
                 if (proc._throttleTimer) clearTimeout(proc._throttleTimer);
@@ -434,6 +472,7 @@ export function createVideoProcessor({
                 canvas.width = 0;
                 canvas.height = 0;
             } catch {}
+            proc._buffer = null;
         },
     };
 }

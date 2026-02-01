@@ -429,5 +429,5 @@ The first time you open each scope (Outputs, Inputs, Custom), the system will au
 
 ---
 
-*Complete User Guide Version: 1.0*  
-*Last Updated: January 2026*
+*Complete User Guide Version: 1.1*  
+*Last Updated: January 31, 2026 (Performance Update)*

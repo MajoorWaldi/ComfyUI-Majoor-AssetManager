@@ -28,6 +28,14 @@
     --mjr-pad-sm: 8px;
     --mjr-pad-md: 12px;
     --mjr-pad-lg: 16px;
+
+    /* Semantic Status Colors (Fallbacks to Material Design) */
+    --mjr-status-success: var(--comfy-status-success, #4CAF50);
+    --mjr-status-warning: var(--comfy-status-warning, #FFA726);
+    --mjr-status-error: var(--comfy-status-error, #f44336);
+    --mjr-status-info: var(--comfy-status-info, #2196F3);
+    --mjr-status-neutral: var(--comfy-status-neutral, #9e9e9e);
+    --mjr-star-active: var(--mjr-accent, #FFD45A);
 }
 
 /* Make the theme visibly apply even with inline styles */
@@ -102,24 +110,24 @@
 
 .mjr-assets-manager .mjr-tab {
     padding: 6px 12px;
-    border-radius: 999px !important;
-    border: 1px solid transparent !important;
-    background: transparent !important;
-    color: color-mix(in srgb, var(--content-fg, #ddd) 65%, transparent) !important;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: color-mix(in srgb, var(--content-fg, #ddd) 65%, transparent);
     transition: transform 120ms ease, background-color 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 
 .mjr-assets-manager .mjr-tab:hover {
     transform: translateY(-1px);
-    color: var(--content-fg, #ddd) !important;
-    background: color-mix(in srgb, var(--mjr-surface-2) 55%, transparent) !important;
-    border-color: color-mix(in srgb, var(--mjr-border) 70%, transparent) !important;
+    color: var(--content-fg, #ddd);
+    background: color-mix(in srgb, var(--mjr-surface-2) 55%, transparent);
+    border-color: color-mix(in srgb, var(--mjr-border) 70%, transparent);
 }
 
 .mjr-assets-manager .mjr-tab.is-active {
-    color: var(--content-fg, #fff) !important;
-    background: color-mix(in srgb, var(--mjr-surface-2) 80%, transparent) !important;
-    border-color: color-mix(in srgb, var(--mjr-border) 85%, transparent) !important;
+    color: var(--content-fg, #fff);
+    background: color-mix(in srgb, var(--mjr-surface-2) 80%, transparent);
+    border-color: color-mix(in srgb, var(--mjr-border) 85%, transparent);
     box-shadow: 0 6px 18px rgba(0,0,0,0.18);
 }
 
@@ -661,7 +669,7 @@
         0 0 20px color-mix(in srgb, var(--mjr-accent) 40%, transparent),
         0 10px 28px rgba(0,0,0,0.28);
     border-radius: var(--mjr-r-lg);
-    transform: translateY(-2px);
+    transform: scale(0.92) !important;
     z-index: 10;
 }
 
@@ -672,7 +680,7 @@
         0 0 20px color-mix(in srgb, var(--mjr-accent) 40%, transparent),
         0 10px 28px rgba(0,0,0,0.28);
     border-radius: var(--mjr-r-lg);
-    transform: translateY(-2px);
+    transform: scale(0.92) !important;
     z-index: 10;
 }
 
@@ -751,15 +759,15 @@
 
 .mjr-assets-manager .mjr-btn {
     /* Override inline styles if present */
-    border: 1px solid var(--mjr-border) !important;
-    background: var(--mjr-surface-2) !important;
-    color: var(--content-fg, #ddd) !important;
-    border-radius: var(--mjr-r-md) !important;
+    border: 1px solid var(--mjr-border);
+    background: var(--mjr-surface-2);
+    color: var(--content-fg, #ddd);
+    border-radius: var(--mjr-r-md);
 }
 
 .mjr-assets-manager .mjr-btn:hover {
-    border-color: color-mix(in srgb, var(--mjr-accent) 55%, var(--mjr-border)) !important;
-    background: color-mix(in srgb, var(--mjr-surface-2) 70%, var(--mjr-accent) 10%) !important;
+    border-color: color-mix(in srgb, var(--mjr-accent) 55%, var(--mjr-border));
+    background: color-mix(in srgb, var(--mjr-surface-2) 70%, var(--mjr-accent) 10%);
 }
 
 /* Inputs / selects (used inside portaled popovers too) */
@@ -796,28 +804,16 @@
 .mjr-assets-manager .mjr-input,
 .mjr-assets-manager .mjr-select {
     /* Override inline styles if present */
-    border: 1px solid var(--mjr-border) !important;
-    background: var(--comfy-input-bg, rgba(0, 0, 0, 0.25)) !important;
-    color: var(--input-text, #ddd) !important;
-    border-radius: var(--mjr-r-md) !important;
-    padding: 8px 10px !important;
+    border: 1px solid var(--mjr-border);
+    background: var(--comfy-input-bg, rgba(0, 0, 0, 0.25));
+    color: var(--input-text, #ddd);
+    border-radius: var(--mjr-r-md);
+    padding: 8px 10px;
 }
 
 /* Tabs: overridden above with queue-like style */
 
-.mjr-assets-manager .mjr-tab {
-    /* Override inline styles if present */
-    border-radius: var(--mjr-r-md) !important;
-    border: 1px solid transparent !important;
-    background: transparent !important;
-    color: var(--mjr-muted) !important;
-}
-
-.mjr-assets-manager .mjr-tab.is-active {
-    color: var(--content-fg, #fff) !important;
-    border-color: color-mix(in srgb, var(--mjr-accent) 60%, var(--mjr-border)) !important;
-    background: color-mix(in srgb, var(--mjr-accent) 12%, transparent) !important;
-}
+/* Removed redundant tab declarations that were using !important */
 
 /* Muted text helper */
 .mjr-assets-manager .mjr-muted {
@@ -2001,3 +1997,16 @@
         scroll-behavior: auto !important;
     }
 }
+
+/* Hide header (toolbar) when viewer overlay is in fullscreen */
+.mjr-viewer-overlay:fullscreen .mjr-viewer-header {
+    display: none;
+}
+
+. m j r - v i e w e r - o v e r l a y : f u l l s c r e e n 
+ 
+ . m j r - v i e w e r - h e a d e r 
+ 
+   d i s p l a y :   n o n e ;   
+ 
+ 

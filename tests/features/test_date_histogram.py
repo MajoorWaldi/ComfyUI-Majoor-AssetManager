@@ -49,7 +49,7 @@ async def test_date_histogram_scoped_counts_days(tmp_path: Path):
             (int(r["id"]), 0, 0),
         )
 
-    has_tags_text = table_has_column(db, "asset_metadata", "tags_text")
+    has_tags_text = await table_has_column(db, "asset_metadata", "tags_text")
     searcher = IndexSearcher(db, has_tags_text)
 
     month_start = _ts(2026, 1, 1, 0, 0, 0)

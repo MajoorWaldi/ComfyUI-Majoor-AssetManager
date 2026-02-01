@@ -22,6 +22,7 @@ export function installViewerKeyboard({
     loupeWrap,
     getVideoControls,
     lifecycle,
+    renderGenInfoPanel,
 } = {}) {
     const unsubs = lifecycle?.unsubs || [];
 
@@ -84,7 +85,19 @@ export function installViewerKeyboard({
         try {
             const t = e?.target;
             if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
-                if (e.key === "Escape") {
+                if (e.key === "f" || e.key === "F") {
+                consume();
+                try {
+                    if (!document.fullscreenElement) {
+                        overlay?.requestFullscreen?.();
+                    } else {
+                        document?.exitFullscreen?.();
+                    }
+                } catch {}
+                return;
+            }
+
+            if (e.key === "Escape") {
                     consume();
                     safeCall(closeViewer);
                 }
@@ -174,16 +187,7 @@ export function installViewerKeyboard({
             return;
         }
 
-        // Frame-by-frame (viewer single + video only)
-        if (isSingle && e.shiftKey && (e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "ArrowLeft" || e.key === "ArrowRight")) {
-            const videoEl = singleView?.querySelector?.(".mjr-viewer-video-src") || singleView?.querySelector?.("video");
-            if (videoEl) {
-                consume();
-                const direction = e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 1;
-                void stepFrame(direction);
-                return;
-            }
-        }
+        // Frame-by-frame logic is now handled in Arrow shortcuts contextually
 
         switch (e.key) {
             case "1": {
@@ -210,6 +214,16 @@ export function installViewerKeyboard({
             }
             case "f":
             case "F": {
+                break;
+            }
+            case "d":
+            case "D": {
+                consume();
+                 try {
+                     state.genInfoOpen = !state.genInfoOpen;
+                 } catch {}
+                 safeCall(syncToolsUIFromState);
+                 safeCall(renderGenInfoPanel);
                 break;
             }
             case "z":
@@ -303,10 +317,20 @@ export function installViewerKeyboard({
                 safeCall(closeViewer);
                 break;
             case "ArrowLeft":
+                if (isSingle && e.target?.closest?.(".mjr-viewer-playerbar")) {
+                    consume();
+                    void stepFrame(-1);
+                    break;
+                }
                 consume();
                 safeCall(() => navigateViewerAssets?.(-1));
                 break;
             case "ArrowRight":
+                if (isSingle && e.target?.closest?.(".mjr-viewer-playerbar")) {
+                    consume();
+                    void stepFrame(1);
+                    break;
+                }
                 consume();
                 safeCall(() => navigateViewerAssets?.(1));
                 break;

@@ -1,6 +1,7 @@
 import { createImageProcessor, drawMediaError } from "./imageProcessor.js";
 import { createVideoProcessor } from "./videoProcessor.js";
 import { safeAddListener as defaultSafeAddListener, safeCall as defaultSafeCall } from "../../utils/safeCall.js";
+import { APP_CONFIG } from "../../app/config.js";
 
 export function createViewerMediaFactory({
     overlay,
@@ -15,6 +16,7 @@ export function createViewerMediaFactory({
     tonemap,
     maxProcPixels,
     maxProcPixelsVideo,
+    disableWebGL,
     videoGradeThrottleFps,
     safeAddListener,
     safeCall,
@@ -193,6 +195,7 @@ export function createViewerMediaFactory({
                 canvas._mjrProc = createVideoProcessor({
                     canvas,
                     videoEl: video,
+                    disableWebGL: disableWebGL || !!APP_CONFIG.VIEWER_DISABLE_WEBGL_VIDEO,
                     getGradeParams,
                     isDefaultGrade,
                     tonemap,

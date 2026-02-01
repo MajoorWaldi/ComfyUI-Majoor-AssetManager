@@ -2,7 +2,7 @@ import { triggerAutoScan } from "../../app/bootstrap.js";
 import { comfyConfirm, comfyPrompt } from "../../app/dialogs.js";
 import { comfyToast } from "../../app/toast.js";
 import { createStatusIndicator, setupStatusPolling, triggerScan } from "../status/StatusDot.js";
-import { createGridContainer, loadAssets, loadAssetsFromList, disposeGrid } from "../grid/GridView.js";
+import { createGridContainer, loadAssets, loadAssetsFromList, disposeGrid, refreshGrid } from "../grid/GridView.js";
 import { get, post, getCollectionAssets } from "../../api/client.js";
 import { ENDPOINTS } from "../../api/endpoints.js";
 import { createSidebar, showAssetInSidebar, closeSidebar } from "../../components/SidebarView.js";
@@ -75,6 +75,14 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         sortPopover,
         collectionsPopover
     });
+    
+    // Restore persistent search query
+    if (state.searchQuery) {
+        searchInputEl.value = state.searchQuery;
+    }
+    searchInputEl.addEventListener("input", (e) => {
+        state.searchQuery = e.target.value;
+    });
 
     const { bar: summaryBar, update: updateSummaryBar } = createSummaryBarView();
 
@@ -104,6 +112,25 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         overflow: auto;
         position: relative;
     `;
+
+    // Restore persistent scroll position
+    if (state.scrollTop > 0) {
+        requestAnimationFrame(() => {
+            try {
+                gridWrapper.scrollTop = state.scrollTop;
+            } catch {}
+        });
+    }
+    
+    let _scrollTimer = null;
+    gridWrapper.addEventListener("scroll", () => {
+        if (_scrollTimer) clearTimeout(_scrollTimer);
+        _scrollTimer = setTimeout(() => {
+            try {
+                state.scrollTop = gridWrapper.scrollTop;
+            } catch {}
+        }, 100);
+    }, { passive: true });
 
     gridContainer = createGridContainer();
     gridWrapper.appendChild(gridContainer);
@@ -172,14 +199,20 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     } catch {}
 
     // Live updates when ComfyUI settings change.
-    const onSidebarSettingsChanged = () => {
+    const onSettingsChanged = (e) => {
         try {
             const s = loadMajoorSettings();
+            
+            // 1. Sidebar position
             applySidebarPosition(s.sidebar?.position || "right");
+            
+            // 2. Grid visuals (badges, details, sizes)
+            // Use key from event to optimize? For now, refresh is cheap (VirtualGrid).
+            refreshGrid(gridWrapper);
         } catch {}
     };
     try {
-        document.addEventListener?.("mjr-settings-changed", onSidebarSettingsChanged);
+        window.addEventListener?.("mjr-settings-changed", onSettingsChanged);
     } catch {}
 
     content.appendChild(statusSection);
@@ -446,7 +479,7 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
             sidebarController?.dispose?.();
         } catch {}
         try {
-            document.removeEventListener?.("mjr-settings-changed", onSidebarSettingsChanged);
+            window.removeEventListener?.("mjr-settings-changed", onSettingsChanged);
         } catch {}
         try {
             if (gridContainer) disposeGrid(gridContainer);
@@ -528,6 +561,9 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     );
 
     scopeController.setActiveTabStyles();
+    
+    // Initial loading of custom roots (restores selection from state if applicable)
+    customRootsController.refreshCustomRoots().catch(() => {});
 
     searchInputEl.addEventListener("input", (e) => {
         const value = e?.target?.value ?? "";

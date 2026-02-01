@@ -373,8 +373,10 @@ export function createViewerGrid({
 
                     const centerCss = { x: ox + boxW / 2, y: oy + boxH / 2 };
                     const z = Number(state?.zoom) || 1;
-                    const panX = Number(state?.panX) || 0;
-                    const panY = Number(state?.panY) || 0;
+                    // Pan state is stored as "screen_pixels * zoom" (inflated) in panzoom.js to maintain stability.
+                    // We must deflate it here to get back to screen pixels for the grid transform.
+                    const panX = (Number(state?.panX) || 0) / z;
+                    const panY = (Number(state?.panY) || 0) / z;
 
                     const baseRectCss = _transformRectAround(baseRectCss0, centerCss, z, panX, panY);
                     const fmtRectCss = _transformRectAround(fmtRectCss0, centerCss, z, panX, panY);

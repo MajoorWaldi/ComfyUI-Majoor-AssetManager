@@ -45,6 +45,11 @@ export function normalizeGenerationMetadata(raw) {
             const clipSkip = geninfo.clip_skip?.value ?? geninfo.clip_skip ?? geninfo.clipSkip ?? null;
             if (clipSkip !== null && clipSkip !== undefined) mapped.clip_skip = clipSkip;
 
+            const inputs = geninfo.inputs;
+            if (Array.isArray(inputs)) {
+                mapped.inputs = inputs;
+            }
+
             const size = geninfo.size || null;
             if (size && typeof size === "object") {
                 if (size.width !== undefined) mapped.width = size.width;

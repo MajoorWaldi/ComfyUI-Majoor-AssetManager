@@ -29,6 +29,12 @@ Optional attribution request (non-binding): see `NOTICE`.
 
 ## Key Features
 
+### Performance & Scalability (New)
+- **Virtual Scrolling Engine**: Seamlessly handles grid views with 10,000+ assets with zero UI lag.
+- **GPU-Accelerated Video**: WebGL-based video player for real-time grading (Exposure/Gamma/Zebra) of 4K content.
+- **Non-Blocking Indexing**: Background scanning and metadata parsing (using worker threads) ensures the ComfyUI server remains responsive.
+- **Database Optimization**: SQLite WAL mode + Connection Pooling for high-concurrency access.
+
 ### Search & Filtering
 - Full-text search powered by SQLite **FTS5** (BM25 ranking).
 - Scope: **Outputs**, **Inputs**, **Custom roots**, **Collections**.
@@ -41,6 +47,7 @@ Optional attribution request (non-binding): see `NOTICE`.
 - Viewer modes: single, A/B compare, side-by-side.
 - Navigation: zoom/pan, 1:1 pixel zoom, quick next/prev navigation.
 - Tools: exposure (EV), gamma, channel view (RGB/R/G/B/Alpha/Luma), analysis (false color, zebra).
+- **Video Grading**: Real-time color adjustments using WebGL (Hardware Accelerated).
 - Scopes (optional): downscaled RGB histogram + luma waveform.
 - Overlays: grid (thirds/center/safe/golden), pixel probe, loupe.
 - Compare: wipe (slider) and difference mode.

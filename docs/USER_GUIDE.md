@@ -17,7 +17,8 @@
 The Majoor Assets Manager is an advanced asset browser for ComfyUI that provides a comprehensive solution for managing, organizing, and viewing your generated assets. It integrates directly into ComfyUI, offering features like full-text search, metadata extraction, rating and tagging systems, and advanced viewing capabilities.
 
 ### Key Benefits
-- Browse outputs, inputs, and custom directories directly in ComfyUI
+- Browse output, input, and custom directories directly in ComfyUI
+- **High Performance**: Virtualized grid for browsing 10k+ assets and GPU-accelerated video viewer.
 - Powerful search with full-text indexing
 - Rich metadata extraction from generated assets
 - Rating and tagging systems for organization

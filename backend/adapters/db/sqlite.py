@@ -17,6 +17,7 @@ Critical guarantee:
 
 from __future__ import annotations
 
+import gc
 import asyncio
 import contextvars
 import random
@@ -279,10 +280,16 @@ class Sqlite:
         self.db_path = Path(db_path)
         max_conn = int(max_connections) if max_connections is not None else int(DB_MAX_CONNECTIONS or 8)
         max_conn = max(1, max_conn)
+        self._max_conn_limit = max_conn
         self._pool: "Queue[aiosqlite.Connection]" = Queue(maxsize=max_conn)
         self._initialized = False
         self._lock = threading.Lock()
-        self._sem = threading.BoundedSemaphore(max_conn)
+        self._async_sem: Optional[asyncio.Semaphore] = None
+        
+        # Reset mechanics
+        self._resetting = False
+        self._active_conns: set[aiosqlite.Connection] = set()
+        
         self._timeout = float(timeout)
         self._query_timeout = float(DB_QUERY_TIMEOUT) if DB_QUERY_TIMEOUT is not None else 0.0
         self._lock_retry_attempts = 6
@@ -315,12 +322,12 @@ class Sqlite:
             or "locked" in msg
         )
 
-    def _sleep_backoff(self, attempt: int):
+    async def _sleep_backoff(self, attempt: int):
         base = float(self._lock_retry_base_seconds)
         max_s = float(self._lock_retry_max_seconds)
         delay = min(max_s, base * (2 ** max(0, attempt)))
         delay = delay + (random.random() * 0.03)
-        time.sleep(delay)
+        await asyncio.sleep(delay)
 
     async def _apply_connection_pragmas(self, conn: aiosqlite.Connection):
         await conn.execute("PRAGMA journal_mode=WAL")
@@ -338,20 +345,28 @@ class Sqlite:
         return conn
 
     async def _acquire_connection_async(self) -> aiosqlite.Connection:
-        # Semaphore is sync; acquire here is safe since we're on the loop thread.
-        self._sem.acquire()
+        if self._async_sem is None:
+            self._async_sem = asyncio.Semaphore(self._max_conn_limit)
+        
+        # Check reset flag before acquiring
+        if self._resetting:
+            raise RuntimeError("Database is resetting - connection rejected")
+
+        await self._async_sem.acquire()
         try:
             try:
                 conn = self._pool.get_nowait()
             except Empty:
                 conn = await self._create_connection()
+            self._active_conns.add(conn)
             return conn
         except Exception:
-            self._sem.release()
+            self._async_sem.release()
             raise
 
     async def _release_connection_async(self, conn: aiosqlite.Connection):
         try:
+            self._active_conns.discard(conn)
             if not conn:
                 return
             if not self._pool.full():
@@ -362,7 +377,8 @@ class Sqlite:
                 except Exception:
                     pass
         finally:
-            self._sem.release()
+            if self._async_sem:
+                self._async_sem.release()
 
     async def _ensure_initialized_async(self):
         if self._initialized:
@@ -514,7 +530,7 @@ class Sqlite:
                             pass
                 except sqlite3.OperationalError as exc:
                     if self._is_locked_error(exc) and attempt < self._lock_retry_attempts:
-                        self._sleep_backoff(attempt)
+                        await self._sleep_backoff(attempt)
                         continue
                     raise
         except Exception:
@@ -688,7 +704,7 @@ class Sqlite:
                             pass
                 except sqlite3.OperationalError as exc:
                     if self._is_locked_error(exc) and attempt < self._lock_retry_attempts:
-                        self._sleep_backoff(attempt)
+                        await self._sleep_backoff(attempt)
                         continue
                     raise
         except Exception:
@@ -737,7 +753,7 @@ class Sqlite:
                     return Result.Ok(True)
                 except sqlite3.OperationalError as exc:
                     if self._is_locked_error(exc) and attempt < self._lock_retry_attempts:
-                        self._sleep_backoff(attempt)
+                        await self._sleep_backoff(attempt)
                         continue
                     raise
         except sqlite3.OperationalError as exc:
@@ -876,7 +892,7 @@ class Sqlite:
                     break
                 except sqlite3.OperationalError as exc:
                     if self._is_locked_error(exc) and attempt < self._lock_retry_attempts:
-                        self._sleep_backoff(attempt)
+                        await self._sleep_backoff(attempt)
                         continue
                     raise
             try:
@@ -918,7 +934,7 @@ class Sqlite:
                     break
                 except sqlite3.OperationalError as exc:
                     if self._is_locked_error(exc) and attempt < self._lock_retry_attempts:
-                        self._sleep_backoff(attempt)
+                        await self._sleep_backoff(attempt)
                         continue
                     raise
             return Result.Ok(True)
@@ -980,7 +996,7 @@ class Sqlite:
     # implementation avoids subtle bugs (e.g. missing `_tx_local`).
 
     async def _close_all_async(self):
-        # Close transaction connections first.
+        # 1. Close transaction connections first.
         tokens = list(self._tx_conns.keys())
         for token in tokens:
             conn = self._tx_conns.pop(token, None)
@@ -991,6 +1007,7 @@ class Sqlite:
             except Exception:
                 pass
 
+        # 2. Emptry the pool
         while True:
             try:
                 conn = self._pool.get_nowait()
@@ -1000,6 +1017,18 @@ class Sqlite:
                 await conn.close()
             except Exception:
                 pass
+        
+        # 3. FORCE CLOSE any checked-out connections (critical for reset)
+        active_list = list(self._active_conns)
+        for conn in active_list:
+             try:
+                 await conn.close()
+             except Exception:
+                 pass
+        self._active_conns.clear()
+
+        # Reset counters/semaphores as everything is closed
+        self._async_sem = None
 
     def close(self):
         """Close connections and stop the DB loop thread (sync)."""
@@ -1017,6 +1046,96 @@ class Sqlite:
             await asyncio.wrap_future(fut)
         finally:
             self._loop_thread.stop()
+
+    async def _drain_for_reset_async(self):
+        """Prepare for reset: lock new connections, wait for active ones, close all."""
+        self._resetting = True
+        
+        # Wait for active connections to finish (max 5s)
+        # We can be aggressive because we have the "Force Close" capability in _close_all_async now
+        for _ in range(10):
+            if not self._active_conns:
+                break
+            await asyncio.sleep(0.5)
+            
+        if self._active_conns:
+            logger.warning(f"DB Reset: Forced close with {len(self._active_conns)} active connections")
+            
+        await self._close_all_async()
+
+    async def areset(self) -> Result[bool]:
+        """
+        Aggressive reset:
+        1. Close all connections (drain)
+        2. Force GC to release file handles (Windows fix)
+        3. Delete DB files
+        4. Re-init
+        """
+        try:
+            # 1. Drain and close on loop thread
+            fut = self._loop_thread.submit(self._drain_for_reset_async())
+            await asyncio.wrap_future(fut)
+            
+            # 2. Wait a bit for OS to release file locks & FORCE GC
+            await asyncio.sleep(0.5)
+            gc.collect()
+            
+            # 3. Delete files with RETRY logic
+            base = str(self.db_path)
+            for ext in ["", "-wal", "-shm"]:
+                p = Path(base + ext)
+                if not p.exists():
+                    continue
+                
+                deleted = False
+                last_error = None
+                for attempt in range(5):
+                    try:
+                        p.unlink()
+                        deleted = True
+                        break
+                    except Exception as e:
+                        last_error = e
+                        await asyncio.sleep(0.5 + (attempt * 0.2))
+                        gc.collect() # aggressive gc
+                
+                if not deleted:
+                    logger.warning(f"Failed to delete {p} after retries: {last_error}")
+                    # If main file fails, it's fatal. WAL/SHM might be tolerable or indicate locks.
+                    if ext == "":
+                         # Final Hail Mary: Try rename if delete fails (Windows hack)
+                         try:
+                             trash = p.with_name(f"{p.name}.trash_{uuid.uuid4().hex}")
+                             p.rename(trash)
+                             # Schedule trash deletion for later or ignore
+                             logger.info(f"Renamed locked DB file to {trash}")
+                             deleted = True
+                         except Exception as rename_err:
+                             return Result.Err("DELETE_FAILED", f"Could not delete {p}: {last_error} | Rename failed: {rename_err}")
+
+            # 4. Reset initialization state
+            with self._lock:
+                self._initialized = False
+                self._resetting = False # Unlock
+            
+            # 5. Re-initialize
+            self._init_db()
+
+            # 6. Re-apply schema
+            from .schema import ensure_tables_exist, ensure_indexes_and_triggers
+            schema_res = await ensure_tables_exist(self)
+            if not schema_res.ok:
+                return schema_res
+            
+            indexes_res = await ensure_indexes_and_triggers(self)
+            if not indexes_res.ok:
+                return indexes_res
+            
+            return Result.Ok(True)
+        except Exception as exc:
+            self._resetting = False # Ensure unlock on error
+            logger.error(f"DB Reset failed: {exc}")
+            return Result.Err("RESET_FAILED", str(exc))
 
     async def _begin_tx_for_async(self, mode: str) -> Result[str]:
         fut = self._loop_thread.submit(self._begin_tx_async(mode))
