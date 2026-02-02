@@ -961,47 +961,7 @@ class IndexScanner:
             }
         )
 
-    def _collect_files(self, directory: Path, recursive: bool) -> List[Path]:
-        """
-        Collect all asset files from directory.
 
-        Args:
-            directory: Directory to scan
-            recursive: Scan subdirectories
-
-        Returns:
-            List of file paths
-        """
-        files = []
-
-        def _is_supported(p: Path) -> bool:
-            try:
-                ext = p.suffix.lower()
-            except Exception:
-                ext = ""
-            if ext and _EXT_TO_KIND:
-                return _EXT_TO_KIND.get(ext, "unknown") != "unknown"
-            return classify_file(str(p)) != "unknown"
-
-        if recursive:
-            for root, _, filenames in os.walk(directory):
-                for filename in filenames:
-                    # Avoid Path allocation + classify loops when possible.
-                    try:
-                        ext = os.path.splitext(filename)[1].lower()
-                    except Exception:
-                        ext = ""
-                    if ext and _EXT_TO_KIND and _EXT_TO_KIND.get(ext, "unknown") == "unknown":
-                        continue
-                    file_path = Path(root) / filename
-                    if _is_supported(file_path):
-                        files.append(file_path)
-        else:
-            for item in directory.iterdir():
-                if item.is_file() and _is_supported(item):
-                    files.append(item)
-
-        return files
 
     def _iter_files(self, directory: Path, recursive: bool):
         """

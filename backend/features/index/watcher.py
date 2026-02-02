@@ -121,26 +121,35 @@ class DirectoryWatcher:
         self._join_timeout = join_timeout if join_timeout is not None else WATCHER_JOIN_TIMEOUT
         self._observer = None
         self._shutdown = False
-
-        if HAS_WATCHDOG:
-            self._observer = Observer()
-            handler = IndexEventHandler(self, self._loop)
-            scheduled = 0
-            for d in self.directories:
-                if d.exists() and d.is_dir():
-                    try:
-                        self._observer.schedule(handler, str(d), recursive=True)
-                        scheduled += 1
-                    except Exception as exc:
-                        logger.warning(f"Failed to watch {d}: {exc}")
-            
-            if scheduled > 0:
-                logger.info(f"File watcher initialized for {scheduled} directories (Mode: Event-Driven/Watchdog)")
-        else:
+        
+        if not HAS_WATCHDOG:
              logger.warning("File watcher disabled: Watchdog module missing. Manual refresh required.")
+
+    def _setup_observer(self):
+        if not HAS_WATCHDOG:
+            return None
+        
+        observer = Observer()
+        handler = IndexEventHandler(self, self._loop)
+        scheduled = 0
+        for d in self.directories:
+            if d.exists() and d.is_dir():
+                try:
+                    observer.schedule(handler, str(d), recursive=True)
+                    scheduled += 1
+                except Exception as exc:
+                    logger.warning(f"Failed to watch {d}: {exc}")
+        
+        if scheduled > 0:
+            logger.info(f"File watcher initialized for {scheduled} directories (Mode: Event-Driven/Watchdog)")
+        return observer
 
     def start(self):
         """Start the background watcher thread."""
+        if self._observer and self._observer.is_alive():
+            return
+
+        self._observer = self._setup_observer()
         if self._observer:
             try:
                 self._observer.start()

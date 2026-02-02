@@ -29,7 +29,7 @@ from backend.config import (
     COLLECTIONS_DIR_PATH
 )
 from backend.custom_roots import resolve_custom_root
-from backend.shared import Result, get_logger
+from backend.shared import Result, ErrorCode, get_logger
 from backend.utils import parse_bool
 from ..core import (
     _json_response,

@@ -219,7 +219,7 @@ def _extract_image_metadata_native_sync(path: str) -> Optional[Dict[str, Any]]:
                     elif isinstance(v, bytes):
                         try:
                             candidate_texts.append(v.decode('utf-8', errors='ignore'))
-                        except:
+                        except Exception:
                             pass
             
             # WEBP: Gather EXIF / XMP / Info
@@ -231,7 +231,7 @@ def _extract_image_metadata_native_sync(path: str) -> Optional[Dict[str, Any]]:
                      elif isinstance(v, bytes):
                         try:
                             candidate_texts.append(v.decode('utf-8', errors='ignore'))
-                        except:
+                        except Exception:
                             pass
                 
                 # EXIF Tags
@@ -246,7 +246,7 @@ def _extract_image_metadata_native_sync(path: str) -> Optional[Dict[str, Any]]:
                                 if isinstance(val, bytes):
                                     try:
                                         val = val.decode('utf-8', errors='ignore').strip('\x00')
-                                    except:
+                                    except Exception:
                                         continue
                                 if isinstance(val, str) and len(val) > 2:
                                     candidate_texts.append(val)

@@ -18,7 +18,7 @@ except Exception:
 from backend.config import OUTPUT_ROOT, get_tool_paths, MEDIA_PROBE_BACKEND
 from backend.config import TO_THREAD_TIMEOUT_S
 from backend.custom_roots import resolve_custom_root
-from backend.shared import Result
+from backend.shared import Result, ErrorCode
 from backend.tool_detect import get_tool_status
 from backend.utils import parse_bool
 from ..core import _json_response, _require_services, _csrf_error, _require_write_access, _read_json
@@ -45,9 +45,9 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
         try:
             result = await asyncio.wait_for(svc['health'].status(), timeout=TO_THREAD_TIMEOUT_S)
         except asyncio.TimeoutError:
-            result = Result.Err("TIMEOUT", "Health status timed out")
+            result = Result.Err(ErrorCode.TIMEOUT, "Health status timed out")
         except Exception as exc:
-            result = Result.Err("DEGRADED", f"Health status failed: {exc}")
+            result = Result.Err(ErrorCode.DEGRADED, f"Health status failed: {exc}")
         return _json_response(result)
 
     @routes.get("/mjr/am/health/counters")
@@ -73,17 +73,17 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
         elif scope == "custom":
             root_result = resolve_custom_root(str(custom_root_id or ""))
             if not root_result.ok:
-                return _json_response(Result.Err("INVALID_INPUT", root_result.error))
+                return _json_response(Result.Err(ErrorCode.INVALID_INPUT, root_result.error))
             roots = [str(Path(str(root_result.data)).resolve(strict=False))]
         else:
-            return _json_response(Result.Err("INVALID_INPUT", f"Unknown scope: {scope}"))
+            return _json_response(Result.Err(ErrorCode.INVALID_INPUT, f"Unknown scope: {scope}"))
 
         try:
             result = await asyncio.wait_for(svc['health'].get_counters(roots=roots), timeout=TO_THREAD_TIMEOUT_S)
         except asyncio.TimeoutError:
-            result = Result.Err("TIMEOUT", "Health counters timed out")
+            result = Result.Err(ErrorCode.TIMEOUT, "Health counters timed out")
         except Exception as exc:
-            result = Result.Err("DEGRADED", f"Health counters failed: {exc}")
+            result = Result.Err(ErrorCode.DEGRADED, f"Health counters failed: {exc}")
         if result.ok:
             if isinstance(result.data, dict):
                 result.data["scope"] = scope
@@ -118,7 +118,7 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
         """
         csrf = _csrf_error(request)
         if csrf:
-            return _json_response(Result.Err("CSRF", csrf))
+            return _json_response(Result.Err(ErrorCode.CSRF, csrf))
 
         svc, error_result = await _require_services()
         if error_result:
@@ -126,7 +126,7 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
 
         settings_service = svc.get("settings")
         if not settings_service:
-            return _json_response(Result.Err("SERVICE_UNAVAILABLE", "Settings service unavailable"))
+            return _json_response(Result.Err(ErrorCode.SERVICE_UNAVAILABLE, "Settings service unavailable"))
 
         body_res = await _read_json(request)
         if not body_res.ok:
