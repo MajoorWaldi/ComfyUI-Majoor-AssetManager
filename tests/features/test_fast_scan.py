@@ -27,7 +27,16 @@ async def test_fast_scan_enriches_metadata_in_background(tmp_path: Path):
         f.write_bytes(b"not-a-real-file")
 
     # Run fast scan with background enrichment.
-        res = await index.scan_directory(str(scan_dir), recursive=False, incremental=False, source="output", root_id=None, fast=True, background_metadata=True)
+    res = await index.scan_directory(
+        str(scan_dir),
+        recursive=False,
+        incremental=False,
+        source="output",
+        root_id=None,
+        fast=True,
+        background_metadata=True,
+    )
+    assert res.ok, res.error
 
     filepaths = [str(f) for f in files]
     placeholders = ", ".join(["?"] * len(files))

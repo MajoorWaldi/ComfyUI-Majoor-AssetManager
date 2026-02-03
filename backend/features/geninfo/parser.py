@@ -40,15 +40,17 @@ def _sink_priority(node: Dict[str, Any], node_id: Optional[str] = None) -> Tuple
     attached to intermediate nodes and does not reliably reflect the final render.
     """
     ct = _lower(_node_type(node))
-    # Prefer video sinks
-    if ct in ("savevideo", "vhs_savevideo", "vhs_videocombine"):
+    
+    # Group 0: Video Sinks (Explicit & Heuristic)
+    if ct in ("savevideo", "vhs_savevideo", "vhs_videocombine") or (("save" in ct) and ("video" in ct)):
         group = 0
-    # Then image/gif sinks
-    elif ct in ("saveimage", "saveimagewebsocket", "saveanimatedwebp", "savegif"):
+    # Group 1: Image/Gif Sinks (Explicit & Heuristic)
+    elif ct in ("saveimage", "saveimagewebsocket", "saveanimatedwebp", "savegif") or (("save" in ct) and ("image" in ct)):
         group = 1
-    # Preview last
-    elif ct == "previewimage":
+    # Group 2: Preview
+    elif ct == "previewimage" or "preview" in ct:
         group = 2
+    # Group 3: Fallback
     else:
         group = 3
 
@@ -261,6 +263,14 @@ def _find_candidate_sinks(nodes_by_id: Dict[str, Dict[str, Any]]) -> List[str]:
         ct = _lower(_node_type(node))
         if ct in SINK_CLASS_TYPES:
             sinks.append(node_id)
+            continue
+            
+        # Heuristic for custom save nodes (e.g. WAS, Impact, CR, etc)
+        # Must contain "save" or "preview" AND "image" or "video"
+        if ("save" in ct or "preview" in ct) and ("image" in ct or "video" in ct):
+            sinks.append(node_id)
+            continue
+            
     return sinks
 
 
@@ -308,6 +318,16 @@ def _is_sampler(node: Dict[str, Any]) -> bool:
         return True
     if "iterativelatentupscale" in ct:
         return True
+    # Marigold depth estimation (acts as sampler for depth maps)
+    if "marigold" in ct:
+        return True
+    # Kijai Flux inference sampler
+    if "flux" in ct and ("sampler" in ct or "params" in ct):
+        return True
+    
+    # Generic "Flux" nodes that act as samplers (e.g. "Flux2")
+    if ct == "flux2" or "flux_2" in ct:
+        return True
 
     # Generic detection: any node with (steps + cfg + seed) is likely a sampler
     try:
@@ -332,7 +352,7 @@ def _is_sampler(node: Dict[str, Any]) -> bool:
                 if ins.get(k) is not None:
                     return True
             # Wan samplers often take `text_embeds` rather than conditioning.
-            if _is_link(ins.get("text_embeds")):
+            if _is_link(ins.get("text_embeds")) or _is_link(ins.get("hyvid_embeds")):
                 return True
         except (TypeError, ValueError, KeyError):
             return False
@@ -358,6 +378,9 @@ def _is_advanced_sampler(node: Dict[str, Any]) -> bool:
         # Strict check for all 4 caused issues with custom nodes that auto-provide noise/sampler.
         # "guider" + "sigmas" is the defining signature of the advanced decoupled interaction.
         if _is_link(ins.get("guider")) and _is_link(ins.get("sigmas")):
+            return True
+        # Also accept guider + sampler interaction (common if sigmas handled internally or named differently)
+        if _is_link(ins.get("guider")) and _is_link(ins.get("sampler")):
             return True
         keys = ("noise", "guider", "sampler", "sigmas")
         return all(_is_link(ins.get(k)) for k in keys)
@@ -387,7 +410,9 @@ def _extract_posneg_from_text_embeds(
                 return v.strip()
         return None
 
-    pos = _get_str("positive", "prompt", "text", "text_g", "text_l")
+    # WanVideoTextEncode uses 'positive_prompt'/'negative_prompt'
+    # HyVideoTextEncode uses 'prompt'
+    pos = _get_str("positive", "prompt", "text", "text_g", "text_l", "positive_prompt")
     neg = _get_str("negative", "negative_prompt")
 
     pos_val = (pos, f"{_node_type(node)}:{src_id}") if pos else None
@@ -629,7 +654,7 @@ def _looks_like_text_encoder(node: Dict[str, Any]) -> bool:
         ins = _inputs(node)
         if not _is_link(ins.get("clip")):
             return False
-        for key in ("text", "prompt", "text_g", "text_l"):
+        for key in ("text", "prompt", "text_g", "text_l", "instruction"):
             v = ins.get(key)
             if isinstance(v, str) and v.strip():
                 return True
@@ -651,9 +676,11 @@ def _looks_like_conditioning_text(node: Dict[str, Any]) -> bool:
         if "conditioning" not in ct and "prompt" not in ct and "textencode" not in ct:
             return False
         ins = _inputs(node)
-        for key in ("text", "prompt", "text_g", "text_l"):
+        for key in ("text", "prompt", "text_g", "text_l", "instruction"):
             v = ins.get(key)
             if _looks_like_prompt_string(v):
+                return True
+            if _is_link(v):
                 return True
         return False
     except Exception:
@@ -774,7 +801,7 @@ def _collect_texts_from_conditioning(
             continue
         ins = _inputs(node)
         candidates: List[str] = []
-        for key in ("text", "prompt", "text_g", "text_l"):
+        for key in ("text", "prompt", "text_g", "text_l", "instruction"):
             v = ins.get(key)
             if isinstance(v, str) and v.strip():
                 candidates.append(v.strip())
@@ -805,6 +832,7 @@ def _trace_model_chain(
             break
         ct = _lower(_node_type(node))
         ins = _inputs(node)
+
 
         def _first_model_string() -> Optional[str]:
             for k in (
@@ -914,7 +942,15 @@ def _trace_model_chain(
 
         # Generic "model loader" style custom nodes (e.g. WanVideoModelLoader) often expose
         # only a model path/identifier without "ckpt_name" naming.
-        if "modelloader" in ct or ("model_loader" in ct or "model-loader" in ct) or "ltxvideomodel" in ct:
+        if (
+            "modelloader" in ct 
+            or "model_loader" in ct 
+            or "model-loader" in ct
+            or "ltxvideomodel" in ct
+            or "wanvideomodel" in ct
+            or "hyvideomodel" in ct
+            or "cogvideomodel" in ct
+        ):
             raw = _first_model_string()
             name = _clean_model_id(raw)
             if name:
@@ -1407,81 +1443,115 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
     Parse generation information from a ComfyUI prompt graph (dict of nodes).
     Returns Ok(None) when not enough information is available (do-not-lie).
     """
-    workflow_meta = _extract_workflow_metadata(workflow)
+    try:
+        workflow_meta = _extract_workflow_metadata(workflow)
 
-    target_graph = prompt_graph
-    
-    # If no prompt graph provided, try to use workflow as the source graph
-    if not isinstance(target_graph, dict) or not target_graph:
-        if isinstance(workflow, dict) and "nodes" in workflow:
-            target_graph = workflow
+        target_graph = prompt_graph
+        
+        # If no prompt graph provided, try to use workflow as the source graph
+        if not isinstance(target_graph, dict) or not target_graph:
+            if isinstance(workflow, dict) and "nodes" in workflow:
+                target_graph = workflow
+            else:
+                if workflow_meta:
+                    return Result.Ok({"metadata": workflow_meta})
+                return Result.Ok(None)
+
+        nodes_by_id: Dict[str, Dict[str, Any]] = {}
+
+        # Handle standard API prompt format vs Workflow Graph format
+        # Workflow Graph format (e.g. from PNGs with only workflow)
+        if "nodes" in target_graph and isinstance(target_graph["nodes"], list):
+            for node in target_graph["nodes"]:
+                if isinstance(node, dict):
+                    nodes_by_id[str(node.get("id"))] = node
         else:
+            # API PROMPT format (default)
+            for k, v in target_graph.items():
+                if isinstance(v, dict):
+                    nodes_by_id[str(k)] = v
+
+        sinks = _find_candidate_sinks(nodes_by_id)
+        if not sinks:
             if workflow_meta:
                 return Result.Ok({"metadata": workflow_meta})
             return Result.Ok(None)
 
-    nodes_by_id: Dict[str, Dict[str, Any]] = {}
+        # Prefer "real" sinks (SaveVideo over PreviewImage, etc.)
+        sinks.sort(key=lambda nid: _sink_priority(nodes_by_id.get(nid, {}) or {}, nid))
 
-    # Handle standard API prompt format vs Workflow Graph format
-    # Workflow Graph format (e.g. from PNGs with only workflow)
-    if "nodes" in target_graph and isinstance(target_graph["nodes"], list):
-        for node in target_graph["nodes"]:
-            if isinstance(node, dict):
-                nodes_by_id[str(node.get("id"))] = node
-    else:
-        # API PROMPT format (default)
-        for k, v in target_graph.items():
-            if isinstance(v, dict):
-                nodes_by_id[str(k)] = v
+        sink_id = sinks[0]
+        sampler_id, sampler_conf = _select_primary_sampler(nodes_by_id, sink_id)
+        sampler_mode = "primary"
+        if not sampler_id:
+            sampler_id, sampler_conf = _select_advanced_sampler(nodes_by_id, sink_id)
+            sampler_mode = "advanced" if sampler_id else sampler_mode
+        if not sampler_id:
+            sampler_id, sampler_conf = _select_any_sampler(nodes_by_id)
+            sampler_mode = "global" if sampler_id else sampler_mode
+        if not sampler_id:
+            out_fallback: Dict[str, Any] = {}
+            if workflow_meta:
+                out_fallback["metadata"] = workflow_meta
+                
+            # Try extracting inputs even without a recognized sampler (e.g. format conversion)
+            input_files_fallback = _extract_input_files(nodes_by_id)
+            if input_files_fallback:
+                out_fallback["inputs"] = input_files_fallback
+                
+            if out_fallback:
+                return Result.Ok(out_fallback)
+                
+            return Result.Ok(None)
 
-    sinks = _find_candidate_sinks(nodes_by_id)
-    if not sinks:
+        # For secondary traces (VAE, etc.), compute a stable upstream set from the sink input.
+        sink = nodes_by_id.get(sink_id) or {}
+        sink_link = _pick_sink_inputs(sink)
+        sink_start_id = _walk_passthrough(nodes_by_id, sink_link) if sink_link else None
+
+        sampler_node = nodes_by_id.get(sampler_id) or {}
+        sampler_source = f"{_node_type(sampler_node)}:{sampler_id}"
+        confidence = sampler_conf
+
+        ins = _inputs(sampler_node)
+        field_sources: Dict[str, str] = {}
+        field_confidence: Dict[str, str] = {}
+    except Exception as e:
+        logger.warning(f"GenInfo parsing failed: {e}")
+        # Try to return at least workflow metadata if available
+        workflow_meta = _extract_workflow_metadata(workflow)
         if workflow_meta:
-            return Result.Ok({"metadata": workflow_meta})
+             return Result.Ok({"metadata": workflow_meta, "_error": str(e)})
         return Result.Ok(None)
-
-    # Prefer "real" sinks (SaveVideo over PreviewImage, etc.)
-    sinks.sort(key=lambda nid: _sink_priority(nodes_by_id.get(nid, {}) or {}, nid))
-
-    sink_id = sinks[0]
-    sampler_id, sampler_conf = _select_primary_sampler(nodes_by_id, sink_id)
-    sampler_mode = "primary"
-    if not sampler_id:
-        sampler_id, sampler_conf = _select_advanced_sampler(nodes_by_id, sink_id)
-        sampler_mode = "advanced" if sampler_id else sampler_mode
-    if not sampler_id:
-        sampler_id, sampler_conf = _select_any_sampler(nodes_by_id)
-        sampler_mode = "global" if sampler_id else sampler_mode
-    if not sampler_id:
-        out_fallback: Dict[str, Any] = {}
-        if workflow_meta:
-            out_fallback["metadata"] = workflow_meta
-            
-        # Try extracting inputs even without a recognized sampler (e.g. format conversion)
-        input_files_fallback = _extract_input_files(nodes_by_id)
-        if input_files_fallback:
-            out_fallback["inputs"] = input_files_fallback
-            
-        if out_fallback:
-            return Result.Ok(out_fallback)
-            
-        return Result.Ok(None)
-
-    # For secondary traces (VAE, etc.), compute a stable upstream set from the sink input.
-    sink = nodes_by_id.get(sink_id) or {}
-    sink_link = _pick_sink_inputs(sink)
-    sink_start_id = _walk_passthrough(nodes_by_id, sink_link) if sink_link else None
-
-    sampler_node = nodes_by_id.get(sampler_id) or {}
-    sampler_source = f"{_node_type(sampler_node)}:{sampler_id}"
-    confidence = sampler_conf
-
-    ins = _inputs(sampler_node)
-    field_sources: Dict[str, str] = {}
-    field_confidence: Dict[str, str] = {}
 
     # Advanced sampler pipelines (Flux/SD3): derive fields from orchestrator dependencies.
     advanced = _is_advanced_sampler(sampler_node)
+
+    # Qwen2-VL captioning workflows often don't have a sampler, but result in string output.
+    # If sink usage is text-based (rare for image gen tool, but possibly valid for caption), skip.
+
+    # Detect Marigold (Depth) - often no sampler, just an estimator node or inserted in pipe.
+    # If the sink comes from a Marigold node, treat it as the "sampler".
+    if not sampler_id:
+        for nid, val in nodes_by_id.items():
+            ct_lower = _lower(_node_type(val))
+            if "marigold" in ct_lower:
+                 # Marigold acts as the processor
+                 sampler_id = nid
+                 # Marigold usually takes 'image' input, not latent.
+                 # Metadata to extract: seed, denoise_steps, ensemble_size.
+                 break
+            # Qwen/Instruction nodes acted as sinks/processors
+            if "instruction" in ct_lower and "qwen" in ct_lower:
+                 sampler_id = nid
+                 # Needs special handling for prompt extraction later
+                 break
+    
+    # Ensure sampler_node object is up to date if we just found an ID in the fallback
+    if sampler_id and (not sampler_node or str(sampler_node.get("id")) != str(sampler_id)):
+         sampler_node = nodes_by_id.get(sampler_id) or {}
+         ins = _inputs(sampler_node)
+         confidence = "low" # Fallback confidence
 
     # Prompts
     pos_val: Optional[Tuple[str, str]] = None
@@ -1491,9 +1561,22 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
     guider_cfg_source: Optional[str] = None
     guider_model_link: Optional[Any] = None
 
+    # Handle Qwen Instruction Prompts (stored directly on the node)
+    if sampler_node and "instruction" in _lower(_node_type(sampler_node)) and "qwen" in _lower(_node_type(sampler_node)):
+        p = ins.get("instruction") or ins.get("text")
+        if isinstance(p, str) and p.strip():
+            pos_val = (p.strip(), f"{_node_type(sampler_node)}:{sampler_id}:instruction")
+
+    # FluxKohyaInferenceSampler (Kijai) - stores prompt directly
+    if "flux" in _lower(_node_type(sampler_node)) and "trainer" in _lower(_node_type(sampler_node)):
+        p = ins.get("prompt")
+        if isinstance(p, str) and p.strip():
+            pos_val = (p.strip(), f"{_node_type(sampler_node)}:{sampler_id}:prompt")
+
     # Wan/video stacks: prompts are often encoded into text embeds rather than conditioning.
-    if _is_link(ins.get("text_embeds")):
-        p, n = _extract_posneg_from_text_embeds(nodes_by_id, ins.get("text_embeds"))
+    if _is_link(ins.get("text_embeds")) or _is_link(ins.get("hyvid_embeds")):
+        link = ins.get("text_embeds") or ins.get("hyvid_embeds")
+        p, n = _extract_posneg_from_text_embeds(nodes_by_id, link)
         pos_val = pos_val or p
         neg_val = neg_val or n
 
@@ -1585,9 +1668,15 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
 
     # Sampler params
     sampler_name = _scalar(ins.get("sampler_name")) or _scalar(ins.get("sampler"))
+    
+    # Check if this node class itself implies a specific sampler (Marigold/Depth)
+    if not sampler_name and "marigold" in _lower(_node_type(sampler_node)):
+        sampler_name = _node_type(sampler_node)
+        
     scheduler = _scalar(ins.get("scheduler"))
-    steps = _scalar(ins.get("steps"))
-    cfg = _scalar(ins.get("cfg")) or _scalar(ins.get("cfg_scale")) or _scalar(ins.get("guidance")) or _scalar(ins.get("guidance_scale"))
+    steps = _scalar(ins.get("steps")) or _scalar(ins.get("denoise_steps")) # Marigold uses denoise_steps
+    # embedded_guidance_scale is used by HunyuanVideoSampler
+    cfg = _scalar(ins.get("cfg")) or _scalar(ins.get("cfg_scale")) or _scalar(ins.get("guidance")) or _scalar(ins.get("guidance_scale")) or _scalar(ins.get("embedded_guidance_scale"))
     denoise = _scalar(ins.get("denoise"))
     seed_val = _scalar(ins.get("seed"))
     if seed_val is None and _is_link(ins.get("seed")):
@@ -1771,6 +1860,8 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
 
     # Do-not-lie: if nothing useful extracted besides engine, return None.
     if len(out.keys()) <= 1:
+        if workflow_meta:
+            return Result.Ok({"metadata": workflow_meta})
         return Result.Ok(None)
 
     return Result.Ok(out)

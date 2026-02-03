@@ -15,7 +15,9 @@ from ...config import (
     SEARCH_MAX_TOKENS,
     SEARCH_MAX_TOKEN_LENGTH,
     SEARCH_MAX_BATCH_IDS,
-    SEARCH_MAX_FILEPATH_LOOKUP
+    SEARCH_MAX_FILEPATH_LOOKUP,
+    SEARCH_MAX_LIMIT,
+    SEARCH_MAX_OFFSET,
 )
 
 
@@ -131,6 +133,9 @@ class IndexSearcher:
         """
         if not query or not query.strip():
             return Result.Err("EMPTY_QUERY", "Search query cannot be empty")
+
+        limit = max(0, min(SEARCH_MAX_LIMIT, int(limit)))
+        offset = max(0, min(SEARCH_MAX_OFFSET, int(offset)))
 
         validation = self._validate_search_input(query)
         if validation and not validation.ok:
@@ -342,6 +347,9 @@ class IndexSearcher:
             return Result.Err("INVALID_INPUT", "Missing or invalid roots")
 
         # Reuse the existing search logic but inject a filepath prefix constraint.
+        limit = max(0, min(SEARCH_MAX_LIMIT, int(limit)))
+        offset = max(0, min(SEARCH_MAX_OFFSET, int(offset)))
+
         if not query or not query.strip():
             return Result.Err("EMPTY_QUERY", "Search query cannot be empty")
 

@@ -56,6 +56,10 @@ export function normalizeGenerationMetadata(raw) {
                 if (size.height !== undefined) mapped.height = size.height;
             }
 
+            if (geninfo.engine && typeof geninfo.engine === "object") {
+                mapped.engine = geninfo.engine;
+            }
+
             if (Object.keys(mapped).length) return mapped;
         }
 

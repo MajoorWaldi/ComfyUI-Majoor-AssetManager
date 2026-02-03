@@ -139,11 +139,13 @@ export function createGenerationSection(asset) {
         const ckpt = pickModelName(models.checkpoint);
         const unet = pickModelName(models.unet);
         const diffusion = pickModelName(models.diffusion);
+        const upscaler = pickModelName(models.upscaler);
         const clip = pickModelName(models.clip);
         const vae = pickModelName(models.vae);
         if (ckpt) modelData.push({ label: "Checkpoint", value: ckpt });
         if (unet) modelData.push({ label: "UNet", value: unet });
         if (diffusion) modelData.push({ label: "Diffusion", value: diffusion });
+        if (upscaler) modelData.push({ label: "Upscaler", value: upscaler });
         if (clip) modelData.push({ label: "CLIP", value: clip });
         if (vae) modelData.push({ label: "VAE", value: vae });
     } else if (metadata.model || metadata.checkpoint) {

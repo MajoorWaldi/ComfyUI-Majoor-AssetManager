@@ -45,6 +45,19 @@ class IndexEventHandler(FileSystemEventHandler):
             p = Path(path_str)
             if p.name.startswith(".") or not p.name:
                 return False
+            
+            # Ignore SQLite database files and journals to prevent feedback loops
+            # when the DB is located within the watched directory.
+            name_lower = p.name.lower()
+            if (name_lower.endswith(".db") or 
+                name_lower.endswith(".db-journal") or 
+                name_lower.endswith(".db-shm") or 
+                name_lower.endswith(".db-wal") or
+                name_lower.endswith(".sqlite") or
+                name_lower.endswith(".sqlite3") or
+                "-journal" in name_lower):
+                return False
+
             # Ignore common temp extensions and partial downloads
             if p.suffix.lower() in {".tmp", ".crdownload", ".part", ".lock", ".aria2"}:
                 return False

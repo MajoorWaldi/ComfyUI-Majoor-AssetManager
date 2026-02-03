@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from ...shared import get_logger, Result
+from shared.scan_throttle import mark_directory_indexed
 from ...adapters.db.sqlite import Sqlite
 from ...adapters.db.schema import table_has_column
 from ...routes.registry import PromptServer
@@ -107,6 +108,8 @@ class IndexService:
                 PromptServer.instance.send_sync("mjr-scan-complete", result.data)
             except Exception as e:
                 logger.debug("Failed to emit scan-complete event: %s", e)
+            if not fast:
+                mark_directory_indexed(directory, source, root_id, metadata_complete=True)
 
         # Handle background enrichment if requested
         if result.ok and fast and background_metadata:
@@ -149,6 +152,7 @@ class IndexService:
                 PromptServer.instance.send_sync("mjr-scan-complete", res.data)
             except Exception as e:
                 logger.debug("Failed to emit scan-complete event: %s", e)
+            mark_directory_indexed(base_dir, source, root_id)
         return res
 
     async def remove_file(self, filepath: str) -> Result[bool]:
@@ -161,14 +165,13 @@ class IndexService:
         Returns:
             Result indicating success
         """
-        try:
-            # ON DELETE CASCADE handles asset_metadata, scan_journal, etc.
-            res = await self.db.aexecute("DELETE FROM assets WHERE filepath = ?", (str(filepath),))
-            if res.ok:
-                logger.debug(f"Removed from index: {filepath}")
-            return Result.Ok(True)
-        except Exception as e:
-            return Result.Err("DB_ERROR", str(e))
+        # ON DELETE CASCADE handles asset_metadata, scan_journal, etc.
+        res = await self.db.aexecute("DELETE FROM assets WHERE filepath = ?", (str(filepath),))
+        if not res.ok:
+            logger.warning("Failed to remove asset from index (%s): %s", filepath, res.error)
+            return Result.Err("DB_ERROR", res.error or "Failed to delete asset")
+        logger.debug(f"Removed from index: {filepath}")
+        return Result.Ok(True)
 
     # ==================== Search Operations ====================
 

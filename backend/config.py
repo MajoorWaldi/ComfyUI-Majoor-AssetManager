@@ -67,7 +67,8 @@ def _env_int(name: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
 
-ENABLE_FILE_WATCHER = env_bool("MAJOOR_ENABLE_FILE_WATCHER", False)
+# [CHANGED] Default to True to enable real-time updates out-of-the-box
+ENABLE_FILE_WATCHER = env_bool("MAJOOR_ENABLE_FILE_WATCHER", True)
 WATCHER_INTERVAL_SECONDS = env_float("MAJOOR_WATCHER_INTERVAL", 15.0)
 WATCHER_JOIN_TIMEOUT = env_float("MAJOOR_WATCHER_JOIN_TIMEOUT", 5.0)
 WATCHER_PATHS = []
@@ -98,6 +99,9 @@ MAX_METADATA_JSON_BYTES = _env_int("MAJOOR_MAX_METADATA_JSON_BYTES", 2 * 1024 * 
 # Background scan / filesystem listing tuning
 BG_SCAN_FAILURE_HISTORY_MAX = _env_int("MAJOOR_BG_SCAN_FAILURE_HISTORY_MAX", 50)
 SCAN_PENDING_MAX = _env_int("MAJOOR_SCAN_PENDING_MAX", 64)
+MANUAL_BG_SCAN_GRACE_SECONDS = env_float("MAJOOR_MANUAL_BG_SCAN_GRACE_SECONDS", 30.0)
+SEARCH_MAX_LIMIT = _env_int("MAJOOR_SEARCH_MAX_LIMIT", 500)
+SEARCH_MAX_OFFSET = _env_int("MAJOOR_SEARCH_MAX_OFFSET", 100_000)
 
 # Filesystem listing cache (used by filesystem fallback search/list)
 FS_LIST_CACHE_MAX = _env_int("MAJOOR_FS_LIST_CACHE_MAX", 32)

@@ -266,12 +266,36 @@ class IndexScanner:
             Result with indexing statistics
         """
         async with self._scan_lock:
+            # Filter unsupported files to prevent indexing internal files (DBs, etc.)
+            filtered_paths = []
+            for p in paths:
+                try:
+                    ext = p.suffix.lower() if p.suffix else ""
+                    if ext and _EXT_TO_KIND:
+                        if _EXT_TO_KIND.get(ext, "unknown") != "unknown":
+                            filtered_paths.append(p)
+                            continue
+                    if classify_file(str(p)) != "unknown":
+                        filtered_paths.append(p)
+                except Exception:
+                    pass
+            paths = filtered_paths
+            
+            if not paths:
+                return Result.Ok({
+                    "scanned": 0, "added": 0, "updated": 0, "skipped": 0, "errors": 0,
+                    "start_time": datetime.now().isoformat(),
+                    "end_time": datetime.now().isoformat()
+                })
+
             scan_id = str(uuid4())
             self._current_scan_id = scan_id
             scan_start = time.perf_counter()
 
+            # Reduce log noise for single-file indexing (common in watchers)
+            start_log_level = logging.DEBUG if len(paths) == 1 else logging.INFO
             self._log_scan_event(
-                logging.INFO,
+                start_log_level,
                 "Starting file list index",
                 file_count=len(paths),
                 base_dir=base_dir,
@@ -329,8 +353,12 @@ class IndexScanner:
                 # for single-file indexing causes unnecessary grid reloads/flicker.
                 await MetadataHelpers.set_metadata_value(self.db, "last_index_end", stats["end_time"])
 
+                # Only log completion at INFO if meaningful changes occurred
+                has_changes = stats["added"] > 0 or stats["updated"] > 0 or stats["errors"] > 0
+                complete_log_level = logging.INFO if has_changes else logging.DEBUG
+
                 self._log_scan_event(
-                    logging.INFO,
+                    complete_log_level,
                     "File list index complete",
                     duration_seconds=duration,
                     scanned=stats["scanned"],
