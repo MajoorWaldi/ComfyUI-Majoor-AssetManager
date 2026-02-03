@@ -153,6 +153,7 @@ CREATE INDEX IF NOT EXISTS idx_metadata_quality_workflow ON asset_metadata(metad
 -- Performance Audit Additions
 CREATE INDEX IF NOT EXISTS idx_assets_source_mtime_desc ON assets(source, mtime DESC);
 CREATE INDEX IF NOT EXISTS idx_asset_metadata_has_workflow_true ON asset_metadata(has_workflow) WHERE has_workflow = 1;
+CREATE INDEX IF NOT EXISTS idx_asset_metadata_has_generation_data_true ON asset_metadata(has_generation_data) WHERE has_generation_data = 1;
 CREATE INDEX IF NOT EXISTS idx_assets_list_cover ON assets(source, mtime DESC, id, filename, filepath, kind);
 
 CREATE INDEX IF NOT EXISTS idx_scan_journal_dir ON scan_journal(dir_path);

@@ -438,6 +438,21 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         onToggleDetails: () => {
             sidebarController?.toggleDetails?.();
         },
+        onFocusSearch: () => {
+            try {
+                searchInputEl?.focus?.();
+                // Move cursor to end for immediate typing.
+                const len = searchInputEl?.value?.length || 0;
+                searchInputEl?.setSelectionRange?.(len, len);
+            } catch {}
+        },
+        onClearSearch: () => {
+            try {
+                if (!searchInputEl) return;
+                searchInputEl.value = "";
+                searchInputEl.dispatchEvent?.(new Event("input", { bubbles: true }));
+            } catch {}
+        },
         getScanContext: () => ({
             scope: state.scope,
             customRootId: state.customRootId

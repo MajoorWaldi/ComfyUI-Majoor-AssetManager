@@ -210,6 +210,12 @@ def _validate_and_repair_column_name(column: str) -> Tuple[bool, Optional[str]]:
     return False, None
 
 
+def _asset_lock_key(asset_id: Any) -> str:
+    if asset_id is None:
+        return "asset:__null__"
+    return f"asset:{str(asset_id)}"
+
+
 class _AsyncLoopThread:
     def __init__(self):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -305,6 +311,8 @@ class Sqlite:
         self._tx_state_lock = threading.Lock()
         # Thread-local storage for sync transactions (caller thread).
         self._tx_local = threading.local()
+        self._asset_locks: Dict[str, asyncio.Lock] = {}
+        self._asset_locks_lock = threading.Lock()
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
@@ -398,6 +406,28 @@ class Sqlite:
             self._initialized = True
         if self._write_lock is None:
             self._write_lock = asyncio.Lock()
+
+    def _get_or_create_asset_lock(self, asset_id: Any) -> asyncio.Lock:
+        key = _asset_lock_key(asset_id)
+        with self._asset_locks_lock:
+            lock = self._asset_locks.get(key)
+            if lock:
+                return lock
+            lock = asyncio.Lock()
+            self._asset_locks[key] = lock
+            return lock
+
+    @asynccontextmanager
+    async def lock_for_asset(self, asset_id: Any):
+        """
+        Async context manager that serializes work per asset.
+        """
+        lock = self._get_or_create_asset_lock(asset_id)
+        await lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
         logger.info("Database initialized: %s", self.db_path)
 
     def _init_db(self):

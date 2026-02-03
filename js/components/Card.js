@@ -18,7 +18,7 @@ import { APP_CONFIG } from "../app/config.js";
  * @property {number} [rating] - 0 to 5
  * @property {Array<string>|string|null} [tags] - Array of strings or JSON string
  * @property {boolean} [has_workflow]
- * @property {boolean} [has_generation_metadata]
+ * @property {boolean} [has_generation_data]
  * @property {boolean} [has_unknown_nodes]
  * @property {number} [width]
  * @property {number} [height]
@@ -72,6 +72,8 @@ const getVideoThumbManager = () => {
 
     const playing = new Set();
     const prepared = new Set();
+    let cleanupTimer = null;
+    let removeVisibilityListener = null;
 
     const pruneSets = () => {
         try {
@@ -254,28 +256,33 @@ const getVideoThumbManager = () => {
     };
     try {
         document.addEventListener("visibilitychange", onVisibility);
+        removeVisibilityListener = () => {
+            try {
+                document.removeEventListener("visibilitychange", onVisibility);
+            } catch {}
+            removeVisibilityListener = null;
+        };
         // Periodic cleanup for videos detached from DOM (memory leak prevention)
-        setInterval(() => {
-             // 1. Prune sets
-             pruneSets();
-             
-             // 2. Extra safety: Check if playing videos are still in DOM
-             // If Card was removed by virtual scroll but pause() didn't fire, we catch it here.
-             const checkSet = (set, isPlaying) => {
-                 for (const v of Array.from(set)) {
-                     if (!v || !v.isConnected) {
-                         set.delete(v);
-                         if (isPlaying) stopVideo(v);
-                         else {
-                             // Just unbind
-                             try { observer?.unobserve?.(v); } catch {}
-                         }
-                     }
-                 }
-             };
-             checkSet(playing, true);
-             checkSet(prepared, false);
-             
+        cleanupTimer = setInterval(() => {
+            // 1. Prune sets
+            pruneSets();
+
+            // 2. Extra safety: Check if playing videos are still in DOM
+            // If Card was removed by virtual scroll but pause() didn't fire, we catch it here.
+            const checkSet = (set, isPlaying) => {
+                for (const v of Array.from(set)) {
+                    if (!v || !v.isConnected) {
+                        set.delete(v);
+                        if (isPlaying) stopVideo(v);
+                        else {
+                            // Just unbind
+                            try { observer?.unobserve?.(v); } catch {}
+                        }
+                    }
+                }
+            };
+            checkSet(playing, true);
+            checkSet(prepared, false);
         }, 10_000);
     } catch (e) {
         console.debug("[Majoor] Video cleanup error:", e);
@@ -395,10 +402,24 @@ const getVideoThumbManager = () => {
                     thumb._mjrHoverCleanup = null;
                 };
             } catch {}
+        },
+        dispose() {
+            try {
+                if (cleanupTimer) clearInterval(cleanupTimer);
+            } catch {}
+            cleanupTimer = null;
+            try {
+                removeVisibilityListener?.();
+            } catch {}
+            try {
+                playing.clear();
+                prepared.clear();
+            } catch {}
         }
     };
 
     try {
+        window.addEventListener?.("unload", () => api.dispose());
         window[VIDEO_THUMBS_KEY] = api;
     } catch {}
     return api;

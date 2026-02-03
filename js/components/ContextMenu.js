@@ -192,7 +192,7 @@ export function showContextMenu(x, y, asset, allAssets, currentIndex, selectedAs
     menu.appendChild(openViewer);
 
     // --- WORKFLOW ACTIONS ---
-    if (asset.has_workflow || asset.has_generation_metadata) {
+    if (asset.has_workflow || asset.has_generation_data) {
         // [CustomScripts Feature] Load Workflow directly
         const loadWf = createMenuItem("Load Workflow", "pi pi-sitemap", null, async () => {
             const payload = {

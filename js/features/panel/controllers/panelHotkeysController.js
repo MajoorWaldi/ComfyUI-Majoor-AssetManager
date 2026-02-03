@@ -15,6 +15,8 @@ export function createPanelHotkeysController({
     onTriggerScan,
     getScanContext,
     onToggleDetails,
+    onFocusSearch,
+    onClearSearch,
     allowListKeys,
 } = {}) {
     let panelFocused = false;
@@ -79,6 +81,28 @@ export function createPanelHotkeysController({
                 try {
                     const ctx = typeof getScanContext === "function" ? getScanContext() : null;
                     onTriggerScan?.(ctx);
+                } catch {}
+                return;
+            }
+
+            // Ctrl/Cmd+F or Ctrl/Cmd+K focuses the search box (matching docs/SHORTCUTS & HOTKEYS guides).
+            if ((lower === "f" || lower === "k") && (event.ctrlKey || event.metaKey)) {
+                event.preventDefault();
+                event.stopPropagation();
+                event.stopImmediatePropagation?.();
+                try {
+                    onFocusSearch?.();
+                } catch {}
+                return;
+            }
+
+            // Ctrl/Cmd+H clears the search box.
+            if (lower === "h" && (event.ctrlKey || event.metaKey)) {
+                event.preventDefault();
+                event.stopPropagation();
+                event.stopImmediatePropagation?.();
+                try {
+                    onClearSearch?.();
                 } catch {}
                 return;
             }

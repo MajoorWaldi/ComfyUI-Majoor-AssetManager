@@ -12,9 +12,25 @@ import {
     showMenuAt,
     MENU_Z_INDEX,
     setMenuSessionCleanup,
+    cleanupMenu,
 } from "../../components/contextmenu/MenuCore.js";
 import { hideMenu, clearMenu } from "../../components/contextmenu/MenuCore.js";
 import { showAddToCollectionMenu } from "../collections/contextmenu/addToCollectionMenu.js";
+
+/**
+ * Viewer-specific shortcut displays
+ * These match the shortcuts defined in keyboard.js for the viewer
+ */
+const VIEWER_SHORTCUTS = {
+    COPY_PATH: "Ctrl+Shift+C",
+    DOWNLOAD: "Ctrl+S",
+    OPEN_IN_FOLDER: "Ctrl+Shift+E",
+    ADD_TO_COLLECTION: "B",
+    EDIT_TAGS: "T",
+    RATING_SUBMENU: "1-5",
+    RENAME: "F2",
+    DELETE: "Del",
+};
 
 const MENU_SELECTOR = ".mjr-viewer-context-menu";
 const POPOVER_SELECTOR = ".mjr-viewer-popover";
@@ -211,7 +227,7 @@ export function bindViewerContextMenu({
         );
 
         menu.appendChild(
-            createItem("Copy file path", "pi pi-copy", null, withClose(async () => {
+            createItem("Copy file path", "pi pi-copy", VIEWER_SHORTCUTS.COPY_PATH, withClose(async () => {
                 const p = asset?.filepath ? String(asset.filepath) : "";
                 if (!p) {
                     comfyToast("No file path available for this asset.", "error");
@@ -229,7 +245,7 @@ export function bindViewerContextMenu({
 
         // Download Original
         menu.appendChild(
-            createItem("Download Original", "pi pi-download", null, withClose(() => {
+            createItem("Download Original", "pi pi-download", VIEWER_SHORTCUTS.DOWNLOAD, withClose(() => {
                 if (!asset || !asset.filepath) return;
 
                 const url = buildDownloadURL(asset.filepath);
@@ -244,7 +260,7 @@ export function bindViewerContextMenu({
         );
 
         menu.appendChild(
-            createItem("Open in Folder", "pi pi-folder-open", null, withClose(async () => {
+            createItem("Open in Folder", "pi pi-folder-open", VIEWER_SHORTCUTS.OPEN_IN_FOLDER, withClose(async () => {
                 if (!asset?.id) return;
                 const res = await openInFolder(asset.id);
                 if (!res?.ok) {
@@ -256,7 +272,7 @@ export function bindViewerContextMenu({
         );
 
         menu.appendChild(
-            createItem("Add to collection...", "pi pi-bookmark", null, withClose(async () => {
+            createItem("Add to collection...", "pi pi-bookmark", VIEWER_SHORTCUTS.ADD_TO_COLLECTION, withClose(async () => {
                 try {
                     await showAddToCollectionMenu({ x: e.clientX, y: e.clientY, assets: [asset] });
                 } catch (err) {
@@ -269,24 +285,30 @@ export function bindViewerContextMenu({
 
         menu.appendChild(separator());
 
-        menu.appendChild(createItem("Edit Tags...", "pi pi-tags", null, withClose(() => {
+        menu.appendChild(createItem("Edit Tags...", "pi pi-tags", VIEWER_SHORTCUTS.EDIT_TAGS, withClose(() => {
             showTagsPopover(e.clientX + 6, e.clientY + 6, asset, onAssetChanged);
         })));
 
         menu.appendChild(separator());
 
-        const ratingRoot = createItem("Set rating", "pi pi-star", "›", () => {}, { disabled: !asset?.id });
+        const ratingRoot = createItem("Set rating", "pi pi-star", VIEWER_SHORTCUTS.RATING_SUBMENU + " ›", () => {}, { disabled: !asset?.id });
         ratingRoot.style.cursor = !asset?.id ? "default" : "pointer";
         menu.appendChild(ratingRoot);
 
         let hideTimer = null;
         const ratingSubmenu = getOrCreateRatingSubmenu();
+        ratingRoot.dataset.mjrHasSubmenu = "true";
+        ratingRoot._mjrSubmenuTarget = ratingSubmenu;
         // Prevent listener buildup across repeated opens (submenu is reused).
         try {
             ratingSubmenu._mjrAbortController?.abort?.();
         } catch {}
+        try {
+            ratingRoot._mjrAbortController?.abort?.();
+        } catch {}
         const ratingAC = new AbortController();
         ratingSubmenu._mjrAbortController = ratingAC;
+        ratingRoot._mjrAbortController = ratingAC;
 
         const closeRatingSubmenu = () => {
             try {
@@ -371,7 +393,7 @@ export function bindViewerContextMenu({
 
         // Rename option
         menu.appendChild(
-            createItem("Rename...", "pi pi-pencil", null, withClose(async () => {
+            createItem("Rename...", "pi pi-pencil", VIEWER_SHORTCUTS.RENAME, withClose(async () => {
                 if (!asset?.id) return;
 
                 const currentName = asset.filename || "";
@@ -398,7 +420,7 @@ export function bindViewerContextMenu({
 
         // Delete option
         menu.appendChild(
-            createItem("Delete...", "pi pi-trash", null, withClose(async () => {
+            createItem("Delete...", "pi pi-trash", VIEWER_SHORTCUTS.DELETE, withClose(async () => {
                 if (!asset?.id) return;
 
                 // Confirmation removed as per user request
@@ -442,7 +464,7 @@ export function bindViewerContextMenu({
             _ratingDebounceTimers.clear();
         } catch {}
         try {
-            menu.remove?.();
+            cleanupMenu(menu);
         } catch {}
         try {
             overlayEl._mjrViewerContextMenuBound = false;

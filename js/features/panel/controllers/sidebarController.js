@@ -231,13 +231,12 @@ export function bindSidebarOpen({
         try {
             const nextHasWorkflow = updatedAsset?.has_workflow ?? updatedAsset?.hasWorkflow ?? asset.has_workflow;
             const nextHasGen =
-                updatedAsset?.has_generation_metadata ??
                 updatedAsset?.has_generation_data ??
                 updatedAsset?.hasGenerationData ??
-                asset.has_generation_metadata;
+                asset.has_generation_data;
 
             if (nextHasWorkflow !== undefined) asset.has_workflow = nextHasWorkflow;
-            if (nextHasGen !== undefined) asset.has_generation_metadata = nextHasGen;
+            if (nextHasGen !== undefined) asset.has_generation_data = nextHasGen;
 
             const oldDot = card.querySelector(".mjr-workflow-dot");
             const newDot = createWorkflowDot(asset);

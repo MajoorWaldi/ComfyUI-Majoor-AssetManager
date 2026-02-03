@@ -7,8 +7,9 @@ import json
 from typing import Dict, Any, Tuple, Optional
 
 from ...config import MAX_METADATA_JSON_BYTES
-from ...shared import Result, ErrorCode
+from ...shared import Result
 from ...adapters.db.sqlite import Sqlite
+from ..metadata.parsing_utils import looks_like_comfyui_workflow
 
 MAX_TAG_LENGTH = 100
 
@@ -80,7 +81,7 @@ class MetadataHelpers:
         if metadata_result and metadata_result.ok and metadata_result.data:
             meta = metadata_result.data
             has_workflow = bool(
-                meta.get("workflow") or
+                (meta.get("workflow") and looks_like_comfyui_workflow(meta.get("workflow"))) or
                 meta.get("parameters")
             )
             has_generation_data = bool(
@@ -336,30 +337,31 @@ class MetadataHelpers:
         Returns:
             True if metadata was refreshed, False otherwise
         """
-        result = await db.aquery(
-            "SELECT has_workflow, has_generation_data, metadata_raw FROM asset_metadata WHERE asset_id = ?",
-            (asset_id,)
-        )
-        if not result.ok:
-            return False
+        async with db.lock_for_asset(asset_id):
+            result = await db.aquery(
+                "SELECT has_workflow, has_generation_data, metadata_raw FROM asset_metadata WHERE asset_id = ?",
+                (asset_id,)
+            )
+            if not result.ok:
+                return False
 
-        current = result.data[0] if result.data else None
-        new_has_workflow, new_has_generation_data, _, new_metadata_raw = MetadataHelpers.prepare_metadata_fields(metadata_result)
+            current = result.data[0] if result.data else None
+            new_has_workflow, new_has_generation_data, _, new_metadata_raw = MetadataHelpers.prepare_metadata_fields(metadata_result)
 
-        current_has_workflow = current["has_workflow"] if current else 0
-        current_has_generation = current["has_generation_data"] if current else 0
-        current_raw = current["metadata_raw"] if current else ""
+            current_has_workflow = current["has_workflow"] if current else 0
+            current_has_generation = current["has_generation_data"] if current else 0
+            current_raw = current["metadata_raw"] if current else ""
 
-        if (current_has_workflow == (1 if new_has_workflow else 0) and
-                current_has_generation == (1 if new_has_generation_data else 0) and
-                current_raw == new_metadata_raw):
-            return False
+            if (current_has_workflow == (1 if new_has_workflow else 0) and
+                    current_has_generation == (1 if new_has_generation_data else 0) and
+                    current_raw == new_metadata_raw):
+                return False
 
-        write_result = await MetadataHelpers.write_asset_metadata_row(db, asset_id, metadata_result)
-        if write_result.ok:
-            # We assume write_journal_fn is async now
-            await write_journal_fn(filepath, base_dir, state_hash, mtime, size)
-        return write_result.ok
+            write_result = await MetadataHelpers.write_asset_metadata_row(db, asset_id, metadata_result)
+            if write_result.ok:
+                # We assume write_journal_fn is async now
+                await write_journal_fn(filepath, base_dir, state_hash, mtime, size)
+            return write_result.ok
 
     @staticmethod
     async def retrieve_cached_metadata(db: Sqlite, filepath: str, state_hash: str) -> Optional[Result[Dict[str, Any]]]:

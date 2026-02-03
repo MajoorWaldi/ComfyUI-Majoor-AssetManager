@@ -38,6 +38,8 @@ SEARCH_CHUNK_MAX = 500
 SEARCH_MERGE_TRIM_START = 256
 SEARCH_MERGE_TRIM_RATIO = 2
 SEARCH_MAX_BATCH_IDS = 200
+AUTOCOMPLETE_RATE_LIMIT_MAX_REQUESTS = 40
+AUTOCOMPLETE_RATE_LIMIT_WINDOW_SECONDS = 60
 
 
 def _date_bounds_for_range(range_name, reference=None):
@@ -87,6 +89,21 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
         except Exception:
             limit = 10
         limit = max(1, min(50, limit))
+
+        allowed, retry_after = _check_rate_limit(
+            request,
+            "autocomplete",
+            max_requests=AUTOCOMPLETE_RATE_LIMIT_MAX_REQUESTS,
+            window_seconds=AUTOCOMPLETE_RATE_LIMIT_WINDOW_SECONDS,
+        )
+        if not allowed:
+            return _json_response(
+                Result.Err(
+                    "RATE_LIMITED",
+                    "Rate limit exceeded. Please wait before retrying.",
+                    retry_after=retry_after,
+                )
+            )
 
         services, error = await _require_services()
         if error:

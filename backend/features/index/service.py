@@ -18,7 +18,6 @@ from ...shared import get_logger, Result
 from shared.scan_throttle import mark_directory_indexed
 from ...adapters.db.sqlite import Sqlite
 from ...adapters.db.schema import table_has_column
-from ...routes.registry import PromptServer
 from ..metadata import MetadataService
 from ..geninfo.parser import parse_geninfo_from_prompt
 from .scanner import IndexScanner
@@ -105,6 +104,7 @@ class IndexService:
         if result.ok:
             try:
                 # Notify frontend of scan completion
+                from ...routes.registry import PromptServer
                 PromptServer.instance.send_sync("mjr-scan-complete", result.data)
             except Exception as e:
                 logger.debug("Failed to emit scan-complete event: %s", e)
@@ -149,6 +149,7 @@ class IndexService:
         if res.ok:
             try:
                 # Notify frontend (useful for drag-drop staging updates)
+                from ...routes.registry import PromptServer
                 PromptServer.instance.send_sync("mjr-scan-complete", res.data)
             except Exception as e:
                 logger.debug("Failed to emit scan-complete event: %s", e)

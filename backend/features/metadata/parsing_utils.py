@@ -140,7 +140,7 @@ def looks_like_comfyui_workflow(value: Optional[Dict[str, Any]]) -> bool:
             valid_nodes += 1
             continue
 
-    min_required = max(2, len(sample) // 2)
+    min_required = max(1, len(sample) // 2)
     return valid_nodes >= min_required
 
 

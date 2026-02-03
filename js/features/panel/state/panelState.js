@@ -1,4 +1,5 @@
 const STORAGE_KEY = "mjr_panel_state";
+let _lastSavedSerialized = "";
 
 function loadPanelState() {
     try {
@@ -14,7 +15,10 @@ function savePanelState(state) {
         // Don't persist transient stats
         delete toSave.lastGridCount;
         delete toSave.lastGridTotal;
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+        const serialized = JSON.stringify(toSave);
+        if (serialized === _lastSavedSerialized) return;
+        _lastSavedSerialized = serialized;
+        localStorage.setItem(STORAGE_KEY, serialized);
     } catch {}
 }
 
@@ -52,7 +56,7 @@ export function createPanelState() {
         debounceTimer = setTimeout(() => {
             savePanelState(targetState);
             debounceTimer = null;
-        }, 500);
+        }, 750);
     };
 
     const storageHandler = (event) => {

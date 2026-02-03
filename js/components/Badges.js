@@ -128,13 +128,13 @@ export function createWorkflowDot(asset) {
     let color = "var(--mjr-status-neutral, #666)";
     let title = "Not parsed yet";
 
-    if (asset.has_workflow && asset.has_generation_metadata) {
+    if (asset.has_workflow && asset.has_generation_data) {
         color = "var(--mjr-status-success, #4CAF50)";
-        title = "Complete: Workflow + Generation metadata";
-    } else if (asset.has_workflow || asset.has_generation_metadata) {
+        title = "Complete: Workflow + Generation data";
+    } else if (asset.has_workflow || asset.has_generation_data) {
         color = "var(--mjr-status-warning, #FF9800)";
-        title = asset.has_workflow ? "Partial: Workflow only" : "Partial: Generation metadata only";
-    } else if (asset.has_workflow === false || asset.has_generation_metadata === false) {
+        title = asset.has_workflow ? "Partial: Workflow only" : "Partial: Generation data only";
+    } else if (asset.has_workflow === false || asset.has_generation_data === false) {
         color = "var(--mjr-status-error, #f44336)";
         title = "No workflow or generation data";
     }

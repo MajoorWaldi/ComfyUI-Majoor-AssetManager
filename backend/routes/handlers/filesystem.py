@@ -300,7 +300,6 @@ async def _fs_cache_get_or_build(
                     "tags": [],
                     "has_workflow": 0,
                     "has_generation_data": 0,
-                    "has_generation_metadata": 0,
                     "type": asset_type,
                     "root_id": root_id,
                 }
@@ -409,12 +408,8 @@ async def _list_filesystem_assets(
                         asset["rating"] = int(db_row.get("rating") or 0)
                         asset["tags"] = db_row.get("tags") or []
                         asset["has_workflow"] = int(db_row.get("has_workflow") or 0)
-                        has_gen = db_row.get("has_generation_data")
-                        if has_gen is None:
-                            has_gen = db_row.get("has_generation_metadata")
-                        has_gen = int(has_gen or 0)
+                        has_gen = int(db_row.get("has_generation_data") or 0)
                         asset["has_generation_data"] = has_gen
-                        asset["has_generation_metadata"] = has_gen
                         # Prefer stored root_id if present (custom)
                         if db_row.get("root_id"):
                             asset["root_id"] = db_row.get("root_id")
