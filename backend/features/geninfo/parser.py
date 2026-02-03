@@ -7,6 +7,8 @@ without "guessing" across unrelated nodes.
 
 from __future__ import annotations
 
+import os
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -14,10 +16,9 @@ from ...shared import Result, get_logger
 
 logger = get_logger(__name__)
 
-DEFAULT_MAX_GRAPH_NODES = 5000
-DEFAULT_MAX_LINK_NODES = 200
-
-_PROMPT_TEXT_RE = None
+DEFAULT_MAX_GRAPH_NODES = int(os.environ.get("MJR_MAX_GRAPH_NODES", "5000"))
+DEFAULT_MAX_LINK_NODES = int(os.environ.get("MJR_MAX_LINK_NODES", "200"))
+DEFAULT_MAX_GRAPH_DEPTH = int(os.environ.get("MJR_MAX_GRAPH_DEPTH", "100"))
 
 
 SINK_CLASS_TYPES: Set[str] = {
@@ -275,21 +276,38 @@ def _find_candidate_sinks(nodes_by_id: Dict[str, Dict[str, Any]]) -> List[str]:
 
 
 def _collect_upstream_nodes(
-    nodes_by_id: Dict[str, Dict[str, Any]], start_node_id: str, max_nodes: int = DEFAULT_MAX_GRAPH_NODES
+    nodes_by_id: Dict[str, Dict[str, Any]],
+    start_node_id: str,
+    max_nodes: int = DEFAULT_MAX_GRAPH_NODES,
+    max_depth: int = DEFAULT_MAX_GRAPH_DEPTH
 ) -> Dict[str, int]:
     """
     BFS upstream from a node id, returning node->distance.
+
+    Args:
+        nodes_by_id: Dictionary of node_id -> node data
+        start_node_id: Starting node for traversal
+        max_nodes: Maximum number of nodes to visit
+        max_depth: Maximum depth to traverse (prevents DoS)
     """
     dist: Dict[str, int] = {}
-    q: List[Tuple[str, int]] = [(start_node_id, 0)]
+    q: deque[Tuple[str, int]] = deque([(start_node_id, 0)])
+
     while q and len(dist) < max_nodes:
-        nid, d = q.pop(0)
+        nid, d = q.popleft()
+
+        # Depth limit check
+        if d > max_depth:
+            continue
+
         if nid in dist:
             continue
         dist[nid] = d
+
         node = nodes_by_id.get(nid)
         if not isinstance(node, dict):
             continue
+
         for v in _inputs(node).values():
             if not _is_link(v):
                 continue
@@ -688,19 +706,30 @@ def _looks_like_conditioning_text(node: Dict[str, Any]) -> bool:
 
 
 def _collect_text_encoder_nodes_from_conditioning(
-    nodes_by_id: Dict[str, Dict[str, Any]], start_link: Any, max_nodes: int = DEFAULT_MAX_LINK_NODES, branch: Optional[str] = None
+    nodes_by_id: Dict[str, Dict[str, Any]],
+    start_link: Any,
+    max_nodes: int = DEFAULT_MAX_LINK_NODES,
+    max_depth: int = DEFAULT_MAX_GRAPH_DEPTH,
+    branch: Optional[str] = None
 ) -> List[str]:
     """
     DFS upstream from a conditioning link, collecting "text-encoder-like" node ids.
     Traversal expands only through nodes that look like conditioning composition or
     reroute-ish passthrough nodes.
+
+    Args:
+        nodes_by_id: Node dictionary
+        start_link: Starting link to trace
+        max_nodes: Maximum nodes to visit
+        max_depth: Maximum traversal depth
+        branch: Optional branch hint ("positive" or "negative")
     """
     start_id = _walk_passthrough(nodes_by_id, start_link)
     if not start_id:
         return []
 
     visited: Set[str] = set()
-    stack: List[str] = [start_id]
+    stack: List[Tuple[str, int]] = [(start_id, 0)]
     found: List[str] = []
 
     def _should_expand(node: Dict[str, Any]) -> bool:
@@ -734,7 +763,12 @@ def _collect_text_encoder_nodes_from_conditioning(
         return False
 
     while stack and len(visited) < max_nodes:
-        nid = stack.pop()
+        nid, depth = stack.pop()
+
+        # Enforce depth limit
+        if depth > max_depth:
+            continue
+
         if nid in visited:
             continue
         visited.add(nid)
@@ -760,7 +794,7 @@ def _collect_text_encoder_nodes_from_conditioning(
             v = ins.get(branch)
             src_id = _walk_passthrough(nodes_by_id, v)
             if src_id and src_id not in visited:
-                stack.append(src_id)
+                stack.append((src_id, depth + 1))
             continue
 
         for k, v in ins.items():
@@ -773,7 +807,7 @@ def _collect_text_encoder_nodes_from_conditioning(
             if _is_link(v):
                 src_id = _walk_passthrough(nodes_by_id, v)
                 if src_id and src_id not in visited:
-                    stack.append(src_id)
+                    stack.append((src_id, depth + 1))
 
     # Stable ordering: node id is usually numeric
     def _nid_key(x: str) -> Tuple[int, str]:
@@ -1443,86 +1477,132 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
     Parse generation information from a ComfyUI prompt graph (dict of nodes).
     Returns Ok(None) when not enough information is available (do-not-lie).
     """
+    # Extract workflow metadata (safe operation)
+    workflow_meta = _extract_workflow_metadata(workflow)
+
+    # Validate and normalize input graph
     try:
-        workflow_meta = _extract_workflow_metadata(workflow)
+        nodes_by_id = _normalize_graph_input(prompt_graph, workflow)
+    except ValueError:
+        if workflow_meta:
+            return Result.Ok({"metadata": workflow_meta})
+        return Result.Ok(None)
 
-        target_graph = prompt_graph
-        
-        # If no prompt graph provided, try to use workflow as the source graph
-        if not isinstance(target_graph, dict) or not target_graph:
-            if isinstance(workflow, dict) and "nodes" in workflow:
-                target_graph = workflow
-            else:
-                if workflow_meta:
-                    return Result.Ok({"metadata": workflow_meta})
-                return Result.Ok(None)
+    if not nodes_by_id:
+        if workflow_meta:
+            return Result.Ok({"metadata": workflow_meta})
+        return Result.Ok(None)
 
-        nodes_by_id: Dict[str, Dict[str, Any]] = {}
-
-        # Handle standard API prompt format vs Workflow Graph format
-        # Workflow Graph format (e.g. from PNGs with only workflow)
-        if "nodes" in target_graph and isinstance(target_graph["nodes"], list):
-            for node in target_graph["nodes"]:
-                if isinstance(node, dict):
-                    nodes_by_id[str(node.get("id"))] = node
-        else:
-            # API PROMPT format (default)
-            for k, v in target_graph.items():
-                if isinstance(v, dict):
-                    nodes_by_id[str(k)] = v
-
+    # Find sink nodes
+    try:
         sinks = _find_candidate_sinks(nodes_by_id)
-        if not sinks:
-            if workflow_meta:
-                return Result.Ok({"metadata": workflow_meta})
-            return Result.Ok(None)
+    except Exception as e:
+        logger.warning(f"Sink detection failed: {e}")
+        sinks = []
 
-        # Prefer "real" sinks (SaveVideo over PreviewImage, etc.)
+    if not sinks:
+        if workflow_meta:
+            return Result.Ok({"metadata": workflow_meta})
+        return Result.Ok(None)
+
+    # Prefer "real" sinks (SaveVideo over PreviewImage, etc.)
+    try:
         sinks.sort(key=lambda nid: _sink_priority(nodes_by_id.get(nid, {}) or {}, nid))
 
         sink_id = sinks[0]
         sampler_id, sampler_conf = _select_primary_sampler(nodes_by_id, sink_id)
-        sampler_mode = "primary"
-        if not sampler_id:
-            sampler_id, sampler_conf = _select_advanced_sampler(nodes_by_id, sink_id)
-            sampler_mode = "advanced" if sampler_id else sampler_mode
-        if not sampler_id:
-            sampler_id, sampler_conf = _select_any_sampler(nodes_by_id)
-            sampler_mode = "global" if sampler_id else sampler_mode
-        if not sampler_id:
-            out_fallback: Dict[str, Any] = {}
-            if workflow_meta:
-                out_fallback["metadata"] = workflow_meta
-                
-            # Try extracting inputs even without a recognized sampler (e.g. format conversion)
-            input_files_fallback = _extract_input_files(nodes_by_id)
-            if input_files_fallback:
-                out_fallback["inputs"] = input_files_fallback
-                
-            if out_fallback:
-                return Result.Ok(out_fallback)
-                
-            return Result.Ok(None)
+        
+        # ... logic continues ...
+        # Since I'm refactoring the monolithic block, I'll call a helper for the core logic
+        # OR I can inline the rest if it's manageable. The main issue was the huge try/except.
+        # Let's delegate the rest of extraction to a helper or just protect the extraction part.
+        
+        return _extract_geninfo(nodes_by_id, sinks, workflow_meta)
 
-        # For secondary traces (VAE, etc.), compute a stable upstream set from the sink input.
-        sink = nodes_by_id.get(sink_id) or {}
-        sink_link = _pick_sink_inputs(sink)
-        sink_start_id = _walk_passthrough(nodes_by_id, sink_link) if sink_link else None
-
-        sampler_node = nodes_by_id.get(sampler_id) or {}
-        sampler_source = f"{_node_type(sampler_node)}:{sampler_id}"
-        confidence = sampler_conf
-
-        ins = _inputs(sampler_node)
-        field_sources: Dict[str, str] = {}
-        field_confidence: Dict[str, str] = {}
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError) as e:
         logger.warning(f"GenInfo parsing failed: {e}")
-        # Try to return at least workflow metadata if available
-        workflow_meta = _extract_workflow_metadata(workflow)
         if workflow_meta:
-             return Result.Ok({"metadata": workflow_meta, "_error": str(e)})
+            return Result.Ok({"metadata": workflow_meta})
         return Result.Ok(None)
+    except Exception as e:
+        # Unexpected error - log with full traceback for debugging
+        logger.exception(f"Unexpected error in GenInfo parsing: {e}")
+        if workflow_meta:
+            return Result.Ok({"metadata": workflow_meta})
+        return Result.Ok(None)
+
+def _normalize_graph_input(prompt_graph: Any, workflow: Any) -> Optional[Dict[str, Dict[str, Any]]]:
+    """Normalize prompt graph or workflow into nodes_by_id dict."""
+    target_graph = prompt_graph
+
+    if not isinstance(target_graph, dict) or not target_graph:
+        if isinstance(workflow, dict) and "nodes" in workflow:
+            target_graph = workflow
+        else:
+            return None
+
+    nodes_by_id: Dict[str, Dict[str, Any]] = {}
+
+    if "nodes" in target_graph and isinstance(target_graph["nodes"], list):
+        for node in target_graph["nodes"]:
+            if isinstance(node, dict):
+                nodes_by_id[str(node.get("id"))] = node
+    else:
+        for k, v in target_graph.items():
+            if isinstance(v, dict):
+                nodes_by_id[str(k)] = v
+
+    return nodes_by_id if nodes_by_id else None
+
+def _extract_geninfo(nodes_by_id: Dict[str, Any], sinks: List[str], workflow_meta: Optional[Dict]) -> Result:
+    sink_id = sinks[0]
+    sampler_id, sampler_conf = _select_primary_sampler(nodes_by_id, sink_id)
+    sampler_mode = "primary"
+    
+    if not sampler_id:
+        sampler_id, sampler_conf = _select_advanced_sampler(nodes_by_id, sink_id)
+        sampler_mode = "advanced" if sampler_id else sampler_mode
+    
+    if not sampler_id:
+        sampler_id, sampler_conf = _select_any_sampler(nodes_by_id)
+        sampler_mode = "global" if sampler_id else sampler_mode
+
+    # Marigold / Qwen detection
+    if not sampler_id:
+        for nid, val in nodes_by_id.items():
+            ct_lower = _lower(_node_type(val))
+            if "marigold" in ct_lower:
+                 sampler_id = nid
+                 break
+            if "instruction" in ct_lower and "qwen" in ct_lower:
+                 sampler_id = nid
+                 break
+
+    if not sampler_id:
+        out_fallback: Dict[str, Any] = {}
+        if workflow_meta:
+            out_fallback["metadata"] = workflow_meta
+            
+        input_files_fallback = _extract_input_files(nodes_by_id)
+        if input_files_fallback:
+            out_fallback["inputs"] = input_files_fallback
+            
+        if out_fallback:
+            return Result.Ok(out_fallback)
+        return Result.Ok(None)
+
+    # For secondary traces (VAE, etc.), compute a stable upstream set from the sink input.
+    sink = nodes_by_id.get(sink_id) or {}
+    sink_link = _pick_sink_inputs(sink)
+    sink_start_id = _walk_passthrough(nodes_by_id, sink_link) if sink_link else None
+
+    sampler_node = nodes_by_id.get(sampler_id) or {}
+    sampler_source = f"{_node_type(sampler_node)}:{sampler_id}"
+    confidence = sampler_conf
+
+    ins = _inputs(sampler_node)
+    field_sources: Dict[str, str] = {}
+    field_confidence: Dict[str, str] = {}
 
     # Advanced sampler pipelines (Flux/SD3): derive fields from orchestrator dependencies.
     advanced = _is_advanced_sampler(sampler_node)

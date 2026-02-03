@@ -539,43 +539,37 @@ class MetadataService:
 
         from ...shared import classify_file
 
-        # Group files by kind to optimize tool invocations
-        images = []
-        videos = []
-        audios = []
-        others = []
+        def _group_existing_paths(paths: list[str]):
+            images: list[str] = []
+            videos: list[str] = []
+            audios: list[str] = []
+            others: list[str] = []
+            for path in paths:
+                if not os.path.exists(path):
+                    continue
+                kind = classify_file(path)
+                if kind == "image":
+                    images.append(path)
+                elif kind == "video":
+                    videos.append(path)
+                elif kind == "audio":
+                    audios.append(path)
+                else:
+                    others.append(path)
+            return images, videos, audios, others
 
-        for path in file_paths:
-            if not os.path.exists(path):
-                continue
-            kind = classify_file(path)
-            if kind == "image":
-                images.append(path)
-            elif kind == "video":
-                videos.append(path)
-            elif kind == "audio":
-                audios.append(path)
-            else:
-                others.append(path)
+        images, videos, audios, others = _group_existing_paths(file_paths)
 
-        results = {}
-
+        results: Dict[str, Result[Dict[str, Any]]] = {}
         probe_mode = await self._resolve_probe_mode(probe_mode_override)
 
-        exif_targets = []
-        ffprobe_targets = []
-        seen_exif = set()
-        seen_ffprobe = set()
-
-        # 2. Schedule remaining files for tools
+        # Schedule tool targets (dedupe to avoid duplicate subprocess work).
+        exif_targets: list[str] = []
+        ffprobe_targets: list[str] = []
+        seen_exif: set[str] = set()
+        seen_ffprobe: set[str] = set()
 
         for path in [*images, *videos, *audios]:
-            # NOTE: We do not check 'if path in results' here anymore for images, because we forced them to fall through.
-            # But technically 'results' is empty for images now.
-            if path in results:
-                continue
-
-
             backends = pick_probe_backend(path, settings_override=probe_mode)
             if "exiftool" in backends and path not in seen_exif:
                 seen_exif.add(path)
@@ -584,24 +578,28 @@ class MetadataService:
                 seen_ffprobe.add(path)
                 ffprobe_targets.append(path)
 
-        # Batch ExifTool for targets that requested it
-        exif_results = {}
-        if exif_targets:
-            exif_results = self.exiftool.read_batch(exif_targets)
+        exif_results: Dict[str, Result[Dict[str, Any]]] = self.exiftool.read_batch(exif_targets) if exif_targets else {}
+        ffprobe_results: Dict[str, Result[Dict[str, Any]]] = self.ffprobe.read_batch(ffprobe_targets) if ffprobe_targets else {}
 
-        # Batch FFProbe for videos only when enabled
-        ffprobe_results = {}
-        if ffprobe_targets:
-            ffprobe_results = self.ffprobe.read_batch(ffprobe_targets)
+        def _exif_for(path: str) -> Optional[Dict[str, Any]]:
+            ex_res = exif_results.get(path)
+            return ex_res.data if ex_res and ex_res.ok else None
 
-        # Process images (remaining)
+        def _ffprobe_for(path: str) -> Optional[Dict[str, Any]]:
+            ff_res = ffprobe_results.get(path)
+            return ff_res.data if ff_res and ff_res.ok else None
+
+        async def _finalize_ok(path: str, combined: Dict[str, Any], metadata_result: Result[Dict[str, Any]]):
+            await self._enrich_with_geninfo_async(combined)
+            quality = metadata_result.meta.get("quality", "none")
+            results[path] = Result.Ok(combined, quality=quality)
+
+        # Images
         for path in images:
             if path in results:
                 continue
-
             ext = os.path.splitext(path)[1].lower()
-            ex_res = exif_results.get(path)
-            exif_data = ex_res.data if ex_res and ex_res.ok else None
+            exif_data = _exif_for(path)
 
             if ext == ".png":
                 metadata_result = extract_png_metadata(path, exif_data)
@@ -611,69 +609,54 @@ class MetadataService:
                 metadata_result = Result.Ok({
                     "workflow": None,
                     "prompt": None,
-                    "quality": "partial" if exif_data else "none"
+                    "quality": "partial" if exif_data else "none",
                 })
-            
+
             if metadata_result.ok:
                 combined = {
                     "file_info": self._get_file_info(path),
                     "exif": exif_data,
-                    **metadata_result.data
+                    **metadata_result.data,
                 }
-                await self._enrich_with_geninfo_async(combined)
-
-                quality = metadata_result.meta.get("quality", "none")
-                results[path] = Result.Ok(combined, quality=quality)
+                await _finalize_ok(path, combined, metadata_result)
             else:
                 results[path] = metadata_result
 
-        # Process videos
+        # Videos
         for path in videos:
             if path in results:
                 continue
-
-            ex_res = exif_results.get(path)
-            exif_data = ex_res.data if ex_res and ex_res.ok else None
-            
-            ff_res = ffprobe_results.get(path)
-            ffprobe_data = ff_res.data if ff_res and ff_res.ok else None
+            exif_data = _exif_for(path)
+            ffprobe_data = _ffprobe_for(path)
 
             metadata_result = extract_video_metadata(path, exif_data, ffprobe_data)
-
             if metadata_result.ok:
                 combined = {
                     "file_info": self._get_file_info(path),
                     "exif": exif_data,
                     "ffprobe": ffprobe_data,
-                    **metadata_result.data
+                    **metadata_result.data,
                 }
-                await self._enrich_with_geninfo_async(combined)
-
-                quality = metadata_result.meta.get("quality", "none")
-                results[path] = Result.Ok(combined, quality=quality)
+                await _finalize_ok(path, combined, metadata_result)
             else:
                 results[path] = metadata_result
 
-        # Process audio (ExifTool only)
+        # Audio (ExifTool only)
         for path in audios:
             if path in results:
                 continue
-            
-            ex_res = exif_results.get(path)
-            exif_data = ex_res.data if ex_res and ex_res.ok else None
-            
-            results[path] = Result.Ok({
-                "file_info": self._get_file_info(path),
-                "exif": exif_data,
-                "quality": "partial" if exif_data else "none"
-            }, quality="partial" if exif_data else "none")
+            exif_data = _exif_for(path)
+            quality = "partial" if exif_data else "none"
+            results[path] = Result.Ok(
+                {"file_info": self._get_file_info(path), "exif": exif_data, "quality": quality},
+                quality=quality,
+            )
 
-        # Process other files
+        # Other
         for path in others:
-            results[path] = Result.Ok({
-                "file_info": self._get_file_info(path),
-                "quality": "none"
-            }, quality="none")
+            if path in results:
+                continue
+            results[path] = Result.Ok({"file_info": self._get_file_info(path), "quality": "none"}, quality="none")
 
         return results
 

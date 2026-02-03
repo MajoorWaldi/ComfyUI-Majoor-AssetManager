@@ -11,10 +11,43 @@ from typing import Optional, Dict, Any, List
 logger = logging.getLogger(__name__)
 
 MAX_METADATA_JSON_SIZE = 10 * 1024 * 1024  # 10MB
+# 50MB Decompressed limit (Critical-003)
+MAX_DECOMPRESSED_SIZE = 50 * 1024 * 1024  
 MIN_BASE64_CANDIDATE_LEN = 80
 
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/=\s]+$")
 _AUTO1111_KV_RE = re.compile(r"(?:^|,\s*)([^:,]+):\s*")
+
+
+def _safe_zlib_decompress(data: bytes, max_size: int = MAX_DECOMPRESSED_SIZE) -> Optional[bytes]:
+    """
+    Safely decompress zlib data with size limit.
+    """
+    try:
+        decompressor = zlib.decompressobj()
+        result = bytearray()
+        
+        chunk_size = 81920 # 80KB chunks
+        offset = 0
+        
+        while offset < len(data):
+            chunk = decompressor.decompress(data[offset:offset + chunk_size])
+            if chunk:
+                result.extend(chunk)
+                if len(result) > max_size:
+                    return None
+            offset += chunk_size
+            
+        chunk = decompressor.flush()
+        if chunk:
+            result.extend(chunk)
+            
+        if len(result) > max_size:
+            return None
+            
+        return bytes(result)
+    except Exception:
+        return None
 
 
 def try_parse_json_text(text: str) -> Optional[Dict[str, Any]]:
@@ -69,10 +102,10 @@ def try_parse_json_text(text: str) -> Optional[Dict[str, Any]]:
 
     # Zlib check
     if decoded.startswith(b"x\x9c") or decoded.startswith(b"x\xda"):
-        try:
-            decoded = zlib.decompress(decoded)
-        except Exception:
-            pass
+        decompressed = _safe_zlib_decompress(decoded)
+        if decompressed is not None:
+             decoded = decompressed
+        # Fallback to usage as-is if decompression fails or is skipped (unlikely valid though)
 
     try:
         decoded_text = decoded.decode("utf-8", errors="replace").strip()

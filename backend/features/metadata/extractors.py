@@ -89,57 +89,71 @@ def _reconstruct_params_from_workflow(workflow: Dict[str, Any]) -> Dict[str, Any
         return s_widgets[0]
 
     def find_upstream_text(start_node, depth=0, seen=None, context=None):
+        """Find prompt-ish text upstream with semantic filtering.
+
+        Converted to an iterative traversal to avoid relying on Python recursion
+        limits on deep or cyclic graphs.
         """
-        Recursively find text from upstream nodes with semantic filtering.
-        context: 'positive' or 'negative' (regulates which inputs we follow)
-        """
-        if not start_node or depth > 8: 
+        if not start_node:
             return []
-        
-        node_id = start_node.get("id")
-        if seen is None: seen = set()
-        if node_id in seen: return []
-        seen.add(node_id)
-        
+
+        if seen is None:
+            seen = set()
+
+        # Allow deeper traversal than before without recursion risk.
+        max_depth = 32
+
         found_texts = []
-        node_type = str(start_node.get("type", "")).lower()
+        stack = [(start_node, depth)]
 
-        
-        # 1. Widgets in this node
-        # We assume if a node has text widgets, it contributes to the prompt.
-        # But we must be careful with Loaders (filenames).
-        if "loader" not in node_type and "checkpoint" not in node_type and "loadimage" not in node_type:
-             txt = get_node_text(start_node, context)
-             if txt:
-                 found_texts.append(txt)
+        while stack:
+            node, d = stack.pop()
+            if not node or d > max_depth:
+                continue
 
-        # 2. Recurse Upstream
-        inputs = start_node.get("inputs", [])
-        for inp in inputs:
-            link_id = inp.get("link")
-            if not link_id: continue
-            
-            # Semantic Filtering based on Input Name
-            name = str(inp.get("name", "")).lower()
-            
-            # If we are strictly tracing Positive, avoid explicitly Negative paths
-            if context == "positive":
-                if "negative" in name: continue
-                
-            # If we are strictly tracing Negative, avoid explicitly Positive paths
-            if context == "negative":
-                if "positive" in name: continue
-            
-            # Always follow: 'text', 'string', 'clip', 'model', 'conditioning', wildcard/default
-            
-            link_info = link_lookup.get(link_id)
-            if not link_info: continue
-            
-            origin_id = link_info[0]
-            origin_node = node_map.get(origin_id)
-            if origin_node:
-                found_texts.extend(find_upstream_text(origin_node, depth + 1, seen, context))
-                
+            node_id = node.get("id")
+            if node_id is not None:
+                if node_id in seen:
+                    continue
+                seen.add(node_id)
+
+            node_type = str(node.get("type", "")).lower()
+
+            # 1. Widgets in this node
+            # We assume if a node has text widgets, it contributes to the prompt.
+            # But we must be careful with Loaders (filenames).
+            if "loader" not in node_type and "checkpoint" not in node_type and "loadimage" not in node_type:
+                txt = get_node_text(node, context)
+                if txt:
+                    found_texts.append(txt)
+
+            # 2. Walk upstream
+            inputs = node.get("inputs", [])
+            if not isinstance(inputs, list) or not inputs:
+                continue
+
+            # Use reversed order so traversal order stays close to the previous
+            # recursive implementation.
+            for inp in reversed(inputs):
+                link_id = inp.get("link")
+                if not link_id:
+                    continue
+
+                name = str(inp.get("name", "")).lower()
+                if context == "positive" and "negative" in name:
+                    continue
+                if context == "negative" and "positive" in name:
+                    continue
+
+                link_info = link_lookup.get(link_id)
+                if not link_info:
+                    continue
+
+                origin_id = link_info[0]
+                origin_node = node_map.get(origin_id)
+                if origin_node:
+                    stack.append((origin_node, d + 1))
+
         return found_texts
 
     # Detect Samplers

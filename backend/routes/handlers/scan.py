@@ -659,7 +659,8 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                              if raw:
                                  try:
                                      current_meta = json.loads(raw)
-                                 except: pass
+                                 except (json.JSONDecodeError, TypeError, ValueError):
+                                     pass
                             
                              # Merge updates
                              current_meta["generation_time_ms"] = new_time

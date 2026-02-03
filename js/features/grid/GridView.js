@@ -15,6 +15,7 @@ import { pickRootId } from "../../utils/ids.js";
 import { bindAssetDragStart } from "../dnd/DragDrop.js";
 import { loadMajoorSettings } from "../../app/settings.js";
 import { VirtualGrid } from "./VirtualGrid.js";
+import { installGridKeyboard } from "./GridKeyboard.js";
 
 /** 
  * Strict typing for State management 
@@ -389,6 +390,49 @@ export function createGridContainer() {
     try {
         bindAssetDragStart(container);
     } catch {}
+
+    // Install grid keyboard shortcuts
+    try {
+        const kbd = installGridKeyboard({
+            gridContainer: container,
+            getState: () => GRID_STATE.get(container) || {},
+            getSelectedAssets: () => {
+                try {
+                    const state = GRID_STATE.get(container);
+                    if (state?.assets) {
+                        const ids = getSelectedIdSet(container);
+                        return state.assets.filter(a => ids.has(String(a.id)));
+                    }
+                    // @ts-ignore
+                    return Array.from(container.querySelectorAll('.mjr-asset-card.is-selected')).map(c => c._mjrAsset).filter(Boolean);
+                } catch { return []; }
+            },
+            getActiveAsset: () => {
+                // @ts-ignore
+                return document.activeElement?.closest?.('.mjr-asset-card')?._mjrAsset || null;
+            },
+            onAssetChanged: (asset) => {
+                 if (!asset?.id) return;
+                 const id = String(asset.id);
+                 const cards = Array.from(container.querySelectorAll(`.mjr-asset-card`));
+                 for (const card of cards) {
+                     // @ts-ignore
+                     if (String(card?._mjrAsset?.id) === id) {
+                         // @ts-ignore
+                         _updateCardRatingTagsBadges(card, asset.rating, asset.tags);
+                     }
+                 }
+            },
+            onOpenDetails: () => {
+                 safeDispatchCustomEvent('mjr:open-sidebar', { tab: 'details' });
+            }
+        });
+        kbd.bind();
+        // @ts-ignore
+        container._mjrGridKeyboard = kbd;
+    } catch (e) {
+        console.error("Failed to install grid keyboard", e);
+    }
 
     // Bind double-click to open viewer
     container.addEventListener('dblclick', (e) => {

@@ -209,9 +209,18 @@ export function installGridKeyboard({
         if (globalThis?._mjrHotkeysState?.suspended) return;
 
         // Skip if grid not visible/focused
-        if (!gridContainer.contains(document.activeElement) && document.activeElement !== document.body) {
-            // Allow if a card is focused
-            if (!document.activeElement?.closest?.('.mjr-asset-card')) {
+        // Allow if focus is:
+        // 1. Inside grid (contains active)
+        // 2. On grid parent wrapper (active contains grid)
+        // 3. On body (no specific focus)
+        // 4. On a card (explicit check though covered by 1 usually)
+        if (document.activeElement !== document.body) {
+            const active = document.activeElement;
+            const inGrid = gridContainer.contains(active);
+            const wrapsGrid = active && active.contains && active.contains(gridContainer);
+            const isCard = active?.closest?.('.mjr-asset-card');
+
+            if (!inGrid && !wrapsGrid && !isCard) {
                 return;
             }
         }

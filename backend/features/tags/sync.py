@@ -27,9 +27,20 @@ WIN_SHELL_DEFAULT_RATING_COL_IDX = 14
 WIN_SHELL_DEFAULT_TAGS_COL_IDX = 21
 
 
+# Windows Property System stores ratings as a pseudo-percent (0..99).
+# Empirically, Explorer and common handlers map stars roughly like this:
+# 0★ -> 0, 1★ -> 1, 2★ -> 25, 3★ -> 50, 4★ -> 75, 5★ -> 99.
+WIN_RATING_PERCENT_MAP = {0: 0, 1: 1, 2: 25, 3: 50, 4: 75, 5: 99}
+
+
 def _windows_rating_percent(stars: int) -> int:
+    """Convert 0..5 stars into Windows RatingPercent/SharedUserRating.
+
+    Windows does not consistently use 0..100; many handlers top out at 99 for
+    5 stars. We keep this mapping stable for interop with Explorer.
+    """
     stars = max(0, min(5, int(stars or 0)))
-    return {0: 0, 1: 1, 2: 25, 3: 50, 4: 75, 5: 99}[stars]
+    return WIN_RATING_PERCENT_MAP[stars]
 
 
 def _normalize_tags(tags: List[str]) -> List[str]:
