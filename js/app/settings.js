@@ -787,7 +787,7 @@ export const registerMajoorSettings = (app, onApplied) => {
             id: `${SETTINGS_PREFIX}.Maintenance.ResetIndexRun`,
             category: cat("Maintenance", "Reset Index Now"),
             name: "⚠️ Reset Index Now",
-            tooltip: "Delete database & rescan (requires 'Allow Reset Index' enabled above)",
+            tooltip: "Delete assets.sqlite (+ -wal/-shm) & rescan (requires 'Allow Reset Index')",
             type: "boolean",
             defaultValue: false,
             onChange: async (value) => {
@@ -830,17 +830,29 @@ export const registerMajoorSettings = (app, onApplied) => {
                     return;
                 }
 
-                if (!confirm("Are you SURE you want to delete the index database? This cannot be undone. A full rescan will start.")) {
+                if (!confirm("Are you SURE you want to DELETE the index database (assets.sqlite + WAL/SHM)? This cannot be undone. A full rescan will start.")) {
                     const s = app.ui.settings.settingAry.find(s => s.id === `${SETTINGS_PREFIX}.Maintenance.ResetIndexRun`);
                     if (s) s.value = false;
                     return;
                 }
 
                 console.log("[Majoor] Requesting Index Reset...");
-                comfyToast({ severity: 'info', summary: 'Resetting...', detail: 'Deleting database and restarting scan.' }, 'info');
+                comfyToast({ severity: 'info', summary: 'Resetting...', detail: 'Deleting DB files and restarting scan.' }, 'info');
 
                 try {
-                    const res = await resetIndex();
+                    const res = await resetIndex({
+                        scope: "all",
+                        reindex: true,
+                        hard_reset_db: true,
+                        clear_scan_journal: true,
+                        clear_metadata_cache: true,
+                        clear_asset_metadata: true,
+                        clear_assets: true,
+                        rebuild_fts: true,
+                        incremental: false,
+                        fast: true,
+                        background_metadata: true,
+                    });
                     if (res.ok) {
                         console.log("[Majoor] Index Reset SUCCESS:", res.data);
                         comfyToast({ 

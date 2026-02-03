@@ -152,6 +152,7 @@ export function createStatusIndicator() {
             const res = await resetIndex({
                 scope: "all",
                 reindex: true,
+                hard_reset_db: true,
                 clear_scan_journal: true,
                 clear_metadata_cache: true,
                 clear_asset_metadata: true,

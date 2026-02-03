@@ -755,6 +755,20 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
         fast = _bool_option(("fast",), True)
         background_metadata = _bool_option(("background_metadata", "backgroundMetadata"), True)
 
+        # Hard reset deletes and recreates the SQLite DB files (assets.sqlite, -wal, -shm).
+        # This matches the "Reset Index Now" maintenance intent.
+        hard_reset_db = _bool_option(
+            (
+                "hard_reset_db",
+                "hardResetDb",
+                "delete_db_files",
+                "deleteDbFiles",
+                "delete_db",
+                "deleteDb",
+            ),
+            False,
+        )
+
         target_roots: list[dict[str, str | None]] = []
         try:
             if scope in ("output", "outputs"):
@@ -794,7 +808,96 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
         if not db:
             return _json_response(Result.Err("SERVICE_UNAVAILABLE", "Database service unavailable"))
 
+        # Best-effort coordination with concurrent scans.
+        # Do NOT hold the scan lock while invoking scan_directory() (it also uses the same lock).
+        scan_lock = None
+        try:
+            index_svc = svc.get("index")
+            scan_lock = getattr(index_svc, "_scan_lock", None)
+        except Exception:
+            scan_lock = None
+
         cache_prefixes: list[str] | None = None if scope == "all" else [entry["path"] for entry in target_roots]
+
+        # If the caller is effectively requesting a full wipe (the usual UI path),
+        # treat it as a hard reset by default when scope=all.
+        implied_full_clear = bool(clear_scan_journal and clear_metadata_cache and clear_asset_metadata and clear_assets_table)
+        should_hard_reset_db = bool(scope == "all" and (hard_reset_db or implied_full_clear))
+
+        if should_hard_reset_db:
+            # 1) Hard reset DB files (includes -wal/-shm) using adapter logic (Windows-safe).
+            try:
+                if scan_lock is not None and hasattr(scan_lock, "__aenter__"):
+                    async with scan_lock:
+                        reset_res = await db.areset()
+                else:
+                    reset_res = await db.areset()
+            except Exception as exc:
+                logger.exception("Hard reset DB failed")
+                return _json_response(Result.Err("RESET_FAILED", f"Hard reset failed: {exc}"))
+
+            if not reset_res.ok:
+                return _json_response(reset_res)
+
+            cleared = {
+                "scan_journal": None,
+                "metadata_cache": None,
+                "asset_metadata": None,
+                "assets": None,
+                "hard_reset_db": True,
+                "file_ops": (reset_res.meta or {}),
+            }
+
+            # 2) Optionally reindex after reset.
+            scan_details: list[dict[str, Any]] = []
+            totals = {key: 0 for key in ("scanned", "added", "updated", "skipped", "errors")}
+            if reindex:
+                if not svc.get("index"):
+                    return _json_response(Result.Err("SERVICE_UNAVAILABLE", "Index service unavailable"))
+                for target in target_roots:
+                    try:
+                        result = await asyncio.wait_for(
+                            svc['index'].scan_directory(
+                                target["path"],
+                                True,
+                                incremental,
+                                target["source"],
+                                target.get("root_id"),
+                                fast,
+                                background_metadata,
+                            ),
+                            timeout=TO_THREAD_TIMEOUT_S,
+                        )
+                    except asyncio.TimeoutError:
+                        return _json_response(Result.Err("TIMEOUT", "Index reset scan timed out"))
+                    except Exception as exc:
+                        logger.exception("Index reset scan failed")
+                        return _json_response(Result.Err("RESET_FAILED", f"Index reset scan failed: {exc}"))
+
+                    if not result.ok:
+                        return _json_response(result)
+
+                    stats = result.data or {}
+                    counts = {key: int(stats.get(key) or 0) for key in totals}
+                    for key in totals:
+                        totals[key] += counts[key]
+                    scan_details.append(
+                        {
+                            "source": target["source"],
+                            "root_id": target.get("root_id"),
+                            **counts,
+                        }
+                    )
+
+            scan_summary = {
+                "scope": scope,
+                "reindex": bool(reindex),
+                "details": scan_details,
+                **totals,
+            }
+
+            # No need to VACUUM or rebuild FTS here: db.areset() reinitializes schema + indexes.
+            return _json_response(Result.Ok({"cleared": cleared, "scan_summary": scan_summary, "rebuild_fts": None}))
 
         async def _clear_table(table: str, prefixes: list[str] | None) -> Result[int]:
             total_deleted = 0
@@ -818,27 +921,81 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                 total_deleted += int(res.data or 0)
             return Result.Ok(total_deleted)
 
+        async def _clear_assets(prefixes: list[str] | None) -> Result[int]:
+            # Deleting from assets cascades to asset_metadata/scan_journal/metadata_cache.
+            return await _clear_table("assets", prefixes)
+
+        async def _clear_asset_metadata(prefixes: list[str] | None) -> Result[int]:
+            total_deleted = 0
+            if prefixes is None:
+                res = await db.aexecute("DELETE FROM asset_metadata")
+                if not res.ok:
+                    return res
+                return Result.Ok(int(res.data or 0))
+
+            for prefix in prefixes:
+                try:
+                    normalized = str(Path(prefix).resolve(strict=False))
+                except Exception:
+                    return Result.Err("INVALID_INPUT", f"Invalid path for metadata clearing: {prefix}")
+                like = normalized.rstrip(os.path.sep) + os.path.sep + "%"
+                res = await db.aexecute(
+                    """
+                    DELETE FROM asset_metadata
+                    WHERE asset_id IN (
+                        SELECT id FROM assets
+                        WHERE filepath = ? OR filepath LIKE ?
+                    )
+                    """,
+                    (normalized, like),
+                )
+                if not res.ok:
+                    return res
+                total_deleted += int(res.data or 0)
+            return Result.Ok(total_deleted)
+
         cleared = {"scan_journal": 0, "metadata_cache": 0, "asset_metadata": 0, "assets": 0}
-        if clear_scan_journal:
-            res = await _clear_table("scan_journal", cache_prefixes)
-            if not res.ok:
-                return _json_response(res)
-            cleared["scan_journal"] = int(res.data or 0)
-        if clear_metadata_cache:
-            res = await _clear_table("metadata_cache", cache_prefixes)
-            if not res.ok:
-                return _json_response(res)
-            cleared["metadata_cache"] = int(res.data or 0)
-        if clear_asset_metadata:
-            res = await db.aexecute("DELETE FROM asset_metadata")
-            if not res.ok:
-                return _json_response(res)
-            cleared["asset_metadata"] = int(res.data or 0)
-        if clear_assets_table:
-            res = await db.aexecute("DELETE FROM assets")
-            if not res.ok:
-                return _json_response(res)
-            cleared["assets"] = int(res.data or 0)
+
+        async def _do_clears() -> Result[dict]:
+            # Make clears atomic and resistant to concurrent writers.
+            async with db.atransaction(mode="immediate"):
+                if clear_scan_journal:
+                    res = await _clear_table("scan_journal", cache_prefixes)
+                    if not res.ok:
+                        return res
+                    cleared["scan_journal"] = int(res.data or 0)
+                if clear_metadata_cache:
+                    res = await _clear_table("metadata_cache", cache_prefixes)
+                    if not res.ok:
+                        return res
+                    cleared["metadata_cache"] = int(res.data or 0)
+
+                # IMPORTANT: scope-aware clears.
+                # Previous implementation cleared the entire tables, even for output/custom scope.
+                if clear_asset_metadata:
+                    res = await _clear_asset_metadata(cache_prefixes)
+                    if not res.ok:
+                        return res
+                    cleared["asset_metadata"] = int(res.data or 0)
+                if clear_assets_table:
+                    res = await _clear_assets(cache_prefixes)
+                    if not res.ok:
+                        return res
+                    cleared["assets"] = int(res.data or 0)
+            return Result.Ok(cleared)
+
+        try:
+            if scan_lock is not None and hasattr(scan_lock, "__aenter__"):
+                async with scan_lock:
+                    res = await _do_clears()
+            else:
+                res = await _do_clears()
+        except Exception as exc:
+            logger.exception("Index reset clear phase failed")
+            return _json_response(Result.Err("RESET_FAILED", f"Index reset failed during clear phase: {exc}"))
+
+        if not res.ok:
+            return _json_response(res)
 
         # FULL RESET CLEANUP: VACUUM and Physical Files
         if scope == "all" and (clear_scan_journal or clear_metadata_cache):
@@ -857,6 +1014,9 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                         if item.name.startswith("assets.sqlite"):
                             continue
                         if item == COLLECTIONS_DIR_PATH:
+                            continue
+                        # Preserve user configuration/state stored in the index directory.
+                        if item.name == "custom_roots.json":
                             continue
 
                         try:
@@ -917,7 +1077,12 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
 
         rebuild_status = None
         if rebuild_fts_flag:
-            rebuild_result = await rebuild_fts(db)
+            try:
+                async with db.atransaction(mode="immediate"):
+                    rebuild_result = await rebuild_fts(db)
+            except Exception as exc:
+                logger.exception("FTS rebuild failed during index reset")
+                return _json_response(Result.Err("DB_ERROR", f"FTS rebuild failed: {exc}"))
             if not rebuild_result.ok:
                 return _json_response(rebuild_result)
             rebuild_status = True
