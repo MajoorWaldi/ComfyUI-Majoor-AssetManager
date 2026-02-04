@@ -7,7 +7,9 @@ import os
 import time
 import threading
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from queue import Empty, Queue
 from typing import List, Dict, Any, Iterable, Optional
 from datetime import datetime
 from uuid import uuid4
@@ -29,6 +31,10 @@ from .metadata_helpers import MetadataHelpers
 
 
 logger = get_logger(__name__)
+
+# Single-thread executor to ensure the directory walk generator is never advanced from
+# different threads (which can cause subtle corruption / deadlocks).
+_FS_WALK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mjr-fs-walk")
 
 MAX_TRANSACTION_BATCH_SIZE = 500
 MAX_SCAN_JOURNAL_LOOKUP = 5000
@@ -137,39 +143,102 @@ class IndexScanner:
                 return int(SCAN_BATCH_XL)
 
             try:
-                # Stream batches to keep memory bounded for very large directories.
-                file_iter = self._iter_files(dir_path, recursive)
+                # IMPORTANT: os.walk() / Path.iterdir() are blocking and can freeze aiohttp.
+                # Walk the filesystem in a dedicated thread and consume results in batches.
+                loop = asyncio.get_running_loop()
+                stop_event = threading.Event()
+                q: "Queue[Optional[Path]]" = Queue(maxsize=max(1000, int(SCAN_BATCH_XL) * 4))
+
+                def _walk_and_put() -> None:
+                    try:
+                        for fp in self._iter_files(dir_path, recursive):
+                            if stop_event.is_set():
+                                break
+                            try:
+                                q.put(fp)
+                            except Exception:
+                                break
+                    except Exception:
+                        pass
+                    finally:
+                        try:
+                            q.put(None)
+                        except Exception:
+                            pass
+
+                walk_future = loop.run_in_executor(_FS_WALK_EXECUTOR, _walk_and_put)
+
+                def _get_many(max_items: int) -> list[Optional[Path]]:
+                    items: list[Optional[Path]] = []
+                    try:
+                        first = q.get()
+                    except Exception:
+                        return items
+                    items.append(first)
+                    # Drain without blocking.
+                    try:
+                        while len(items) < max(1, int(max_items or 1)):
+                            try:
+                                items.append(q.get_nowait())
+                            except Empty:
+                                break
+                    except Exception:
+                        pass
+                    return items
+
                 batch: List[Path] = []
-                for file_path in file_iter:
-                    batch.append(file_path)
-                    stats["scanned"] += 1
-                    if len(batch) < _stream_batch_target(stats["scanned"]):
-                        continue
+                done = False
+                try:
+                    while not done:
+                        target = _stream_batch_target(stats["scanned"])
+                        pulled = await asyncio.to_thread(_get_many, target)
+                        if not pulled:
+                            # Yield and try again.
+                            await asyncio.sleep(0)
+                            continue
 
-                    await self._scan_stream_batch(
-                        batch=batch,
-                        base_dir=directory,
-                        incremental=incremental,
-                        source=source,
-                        root_id=root_id,
-                        fast=fast,
-                        stats=stats,
-                        to_enrich=to_enrich,
-                    )
-                    batch = []
+                        for file_path in pulled:
+                            if file_path is None:
+                                done = True
+                                break
 
-                if batch:
-                    await self._scan_stream_batch(
-                        batch=batch,
-                        base_dir=directory,
-                        incremental=incremental,
-                        source=source,
-                        root_id=root_id,
-                        fast=fast,
-                        stats=stats,
-                        to_enrich=to_enrich,
-                    )
-                    batch = []
+                            batch.append(file_path)
+                            stats["scanned"] += 1
+
+                            if len(batch) >= _stream_batch_target(stats["scanned"]):
+                                await self._scan_stream_batch(
+                                    batch=batch,
+                                    base_dir=directory,
+                                    incremental=incremental,
+                                    source=source,
+                                    root_id=root_id,
+                                    fast=fast,
+                                    stats=stats,
+                                    to_enrich=to_enrich,
+                                )
+                                batch = []
+
+                    if batch:
+                        await self._scan_stream_batch(
+                            batch=batch,
+                            base_dir=directory,
+                            incremental=incremental,
+                            source=source,
+                            root_id=root_id,
+                            fast=fast,
+                            stats=stats,
+                            to_enrich=to_enrich,
+                        )
+                        batch = []
+                except asyncio.CancelledError:
+                    stop_event.set()
+                    raise
+                finally:
+                    stop_event.set()
+                    try:
+                        await asyncio.wait_for(walk_future, timeout=2.0)
+                    except Exception:
+                        pass
             finally:
                 stats["end_time"] = datetime.now().isoformat()
                 duration = time.perf_counter() - scan_start

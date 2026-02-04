@@ -63,19 +63,32 @@ async def _kickoff_background_scan(
     try:
         key = f"{source}|{str(root_id or '')}|{str(directory)}"
         now = time.time()
+
+        def _peek_entry(k: str) -> tuple[float, bool]:
+            try:
+                e = _BACKGROUND_SCAN_LAST.get(k)
+                if isinstance(e, dict):
+                    last_v = float(e.get("last") or 0.0)
+                    in_prog = bool(e.get("in_progress"))
+                    return last_v, in_prog
+                if isinstance(e, (int, float)):
+                    return float(e), False
+            except Exception:
+                pass
+            return 0.0, False
         
-        entry = _ensure_background_entry(key)
-        if entry["in_progress"]:
+        last_seen, in_progress = _peek_entry(key)
+        if in_progress:
             return
-        if now - entry["last"] < min_interval_seconds:
+        if now - last_seen < min_interval_seconds:
             return
 
         async with _BACKGROUND_SCAN_LOCK:
              # Double-check under lock
-            entry = _ensure_background_entry(key)
-            if entry["in_progress"]:
+            last_seen, in_progress = _peek_entry(key)
+            if in_progress:
                 return
-            if now - entry["last"] < min_interval_seconds:
+            if now - last_seen < min_interval_seconds:
                 return
 
             job = {
@@ -99,9 +112,9 @@ async def _kickoff_background_scan(
                 # Enforce max pending size
                 while len(_SCAN_PENDING) > _SCAN_PENDING_MAX:
                     _SCAN_PENDING.popitem(last=False)
-            
-            entry["last"] = now
-            entry["in_progress"] = False
+
+            # Only mark as enqueued once we've successfully updated _SCAN_PENDING.
+            _BACKGROUND_SCAN_LAST[key] = {"last": now, "in_progress": False}
 
     except Exception:
         return
