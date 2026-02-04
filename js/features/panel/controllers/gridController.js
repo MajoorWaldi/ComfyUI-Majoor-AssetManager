@@ -1,3 +1,5 @@
+import { t } from "../../../app/i18n.js";
+
 export function createGridController({ gridContainer, loadAssets, loadAssetsFromList, getCollectionAssets, disposeGrid, getQuery, state }) {
     const reloadGrid = async () => {
         // Expose the current query on the container so external listeners (ComfyUI executed events)
@@ -35,7 +37,7 @@ export function createGridController({ gridContainer, loadAssets, loadAssetsFrom
             gridContainer.innerHTML = "";
             const p = document.createElement("p");
             p.className = "mjr-muted";
-            p.textContent = "Add a custom folder to browse.";
+            p.textContent = t("msg.addCustomFolder");
             gridContainer.appendChild(p);
             try {
                 state.lastGridCount = 0;

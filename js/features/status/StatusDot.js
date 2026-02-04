@@ -6,17 +6,18 @@ import { get, getToolsStatus, post, resetIndex } from "../../api/client.js";
 import { ENDPOINTS } from "../../api/endpoints.js";
 import { APP_CONFIG } from "../../app/config.js";
 import { comfyToast } from "../../app/toast.js";
+import { t } from "../../app/i18n.js";
 
 const TOOL_CAPABILITIES = [
     {
         key: "exiftool",
-        label: "ExifTool metadata",
-        hint: "PNG/WEBP workflow data (uses ExifTool)"
+        labelKey: "tool.exiftool",
+        hintKey: "tool.exiftool.hint"
     },
     {
         key: "ffprobe",
-        label: "FFprobe video stats",
-        hint: "Video duration, FPS, and resolution (uses FFprobe)"
+        labelKey: "tool.ffprobe",
+        hintKey: "tool.ffprobe.hint"
     }
 ];
 
@@ -79,7 +80,7 @@ export function createStatusIndicator() {
     indicator.textContent = "▾";
 
     titleSpan.appendChild(indicator);
-    titleSpan.appendChild(document.createTextNode("Index Status"));
+    titleSpan.appendChild(document.createTextNode(t("status.indexStatus", "Index Status")));
 
     header.appendChild(statusDot);
     header.appendChild(titleSpan);
@@ -93,13 +94,13 @@ export function createStatusIndicator() {
     const statusText = document.createElement("div");
     statusText.id = "mjr-status-text";
     statusText.style.cssText = "font-size: 12px; opacity: 0.8;";
-    statusText.textContent = "Checking...";
+    statusText.textContent = t("status.checking");
 
     // Capabilities section
     const capabilities = document.createElement("div");
     capabilities.id = "mjr-status-capabilities";
     capabilities.style.cssText = "font-size: 11px; opacity: 0.75; margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap;";
-    capabilities.textContent = "Capabilities: checking...";
+    capabilities.textContent = t("status.discoveringTools");
 
     body.appendChild(statusText);
     body.appendChild(capabilities);
@@ -107,7 +108,7 @@ export function createStatusIndicator() {
     const toolsStatus = document.createElement("div");
     toolsStatus.id = "mjr-tools-status";
     toolsStatus.style.cssText = "font-size: 11px; opacity: 0.7; margin-top: 10px;";
-    toolsStatus.textContent = "Tool status: checking...";
+    toolsStatus.textContent = t("status.toolStatusChecking", "Tool status: checking...");
     body.appendChild(toolsStatus);
 
     const actionsRow = document.createElement("div");
@@ -115,8 +116,8 @@ export function createStatusIndicator() {
 
     const resetBtn = document.createElement("button");
     resetBtn.type = "button";
-    resetBtn.textContent = "Reset index";
-    resetBtn.title = "Reset index cache (requires allowResetIndex in settings).";
+    resetBtn.textContent = t("btn.resetIndex");
+    resetBtn.title = t("status.resetIndexHint", "Reset index cache (requires allowResetIndex in settings).");
     resetBtn.style.cssText = `
         padding: 5px 12px;
         font-size: 11px;
@@ -138,11 +139,11 @@ export function createStatusIndicator() {
     resetBtn.onclick = async (event) => {
         event.stopPropagation();
         
-        comfyToast("Reset triggered: Reindexing all files...", "warning", 3000);
+        comfyToast(t("toast.resetTriggered"), "warning", 3000);
 
         const originalText = resetBtn.textContent;
         resetBtn.disabled = true;
-        resetBtn.textContent = "Resetting...";
+        resetBtn.textContent = t("btn.resetting");
         
         // Status indicator feedback
         const prevColor = statusDot.style.background;
@@ -161,14 +162,14 @@ export function createStatusIndicator() {
             });
             if (res?.ok) {
                 statusDot.style.background = "var(--mjr-status-success, #4CAF50)"; // Green (success)
-                comfyToast("Index reset started. Files will be reindexed in the background.", "success");
+                comfyToast(t("toast.resetStarted"), "success");
             } else {
                 statusDot.style.background = "var(--mjr-status-error, #f44336)"; // Red (error)
-                comfyToast(res?.error || "Failed to reset index.", "error");
+                comfyToast(res?.error || t("toast.resetFailed"), "error");
             }
         } catch (error) {
             statusDot.style.background = "var(--mjr-status-error, #f44336)"; // Red (error)
-            comfyToast(error?.message || "Reset index failed.", "error");
+            comfyToast(error?.message || t("toast.resetFailed"), "error");
         } finally {
             resetBtn.disabled = false;
             resetBtn.textContent = originalText;
@@ -230,7 +231,7 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
     if (!roots) {
         const configResult = await get(ENDPOINTS.CONFIG);
         if (!configResult.ok) {
-            statusText.textContent = "Error: Failed to get config";
+            statusText.textContent = t("status.errorGetConfig");
             return;
         }
         roots = { output_directory: configResult.data.output_directory };
@@ -238,12 +239,12 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
 
     const scopeLabel =
         desiredScope === "all"
-            ? "Inputs + Outputs"
+            ? t("scope.all", "Inputs + Outputs")
             : desiredScope === "input"
-            ? "Inputs"
+            ? t("scope.input", "Inputs")
             : desiredScope === "custom"
-            ? "Custom"
-            : "Outputs";
+            ? t("scope.custom", "Custom")
+            : t("scope.output", "Outputs");
 
     let detail = "";
     if (desiredScope === "input") detail = roots?.input_directory ? ` (${roots.input_directory})` : "";
@@ -255,7 +256,7 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
 
     // Show scanning status
     statusDot.style.background = "var(--mjr-status-warning, #FFA726)"; // Orange
-    setStatusWithHint(statusText, `Scanning ${scopeLabel}${detail}...`, "This may take a while");
+    setStatusWithHint(statusText, t("status.scanningScope", `Scanning ${scopeLabel}${detail}...`, { scope: scopeLabel, detail }), t("status.scanningHint", "This may take a while"));
 
     const payload = {
         scope: desiredScope,
@@ -267,7 +268,7 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
     if (desiredScope === "custom") {
         if (!desiredCustomRootId) {
             statusDot.style.background = "var(--mjr-status-error, #f44336)";
-            statusText.textContent = "Select a custom folder first";
+            statusText.textContent = t("status.selectCustomFolder");
             return;
         }
         payload.custom_root_id = desiredCustomRootId;
@@ -281,8 +282,8 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
         statusDot.style.background = "var(--mjr-status-success, #4CAF50)"; // Green
         setStatusWithHint(
             statusText,
-            "Scan complete!",
-            `Added: ${stats.added || 0}  -  Updated: ${stats.updated || 0}  -  Skipped: ${stats.skipped || 0}`
+            t("toast.scanComplete"),
+            t("status.scanStats", `Added: ${stats.added || 0}  -  Updated: ${stats.updated || 0}  -  Skipped: ${stats.skipped || 0}`, { added: stats.added || 0, updated: stats.updated || 0, skipped: stats.skipped || 0 })
         );
 
         // Refresh status after 2 seconds
@@ -291,7 +292,7 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
         }, 2000);
     } else {
         statusDot.style.background = "var(--mjr-status-error, #f44336)"; // Red
-        setStatusLines(statusText, [`Scan failed: ${scanResult.error || "Unknown error"}`]);
+        setStatusLines(statusText, [t("toast.scanFailed") + `: ${scanResult.error || "Unknown error"}`]);
 
         // Restore status after 3 seconds
         setTimeout(() => {
@@ -312,7 +313,7 @@ function createCapabilityBadge(label, available, hint) {
         border: 1px solid rgba(255, 255, 255, 0.1);
     `;
     badge.textContent = `${available ? "✅" : "❌"} ${label}`;
-    badge.title = available ? `${label} available` : hint || `${label} unavailable`;
+    badge.title = available ? t("status.toolAvailable", `${label} available`, { tool: label }) : hint || t("status.toolUnavailable", `${label} unavailable`, { tool: label });
     badge.style.opacity = available ? "1" : "0.75";
     return badge;
 }
@@ -321,7 +322,7 @@ function renderCapabilities(section, toolAvailability = {}, toolPaths = {}) {
     if (!section) return;
     section.replaceChildren();
     if (!toolAvailability || Object.keys(toolAvailability).length === 0) {
-        section.textContent = "Capabilities: discovering tools...";
+        section.textContent = t("status.discoveringTools");
         return;
     }
 
@@ -331,9 +332,11 @@ function renderCapabilities(section, toolAvailability = {}, toolPaths = {}) {
     wrapper.style.gap = "10px";
     wrapper.style.alignItems = "flex-start";
 
-    TOOL_CAPABILITIES.forEach(({ key, label, hint }) => {
+    TOOL_CAPABILITIES.forEach(({ key, labelKey, hintKey }) => {
         const available = Boolean(toolAvailability[key]);
         const path = toolPaths[key];
+        const label = t(labelKey, key);
+        const hint = t(hintKey, "");
         wrapper.appendChild(createCapabilityNode({ label, hint }, available, path));
     });
 
@@ -349,17 +352,18 @@ function renderToolsStatusLine(section, toolStatus = null, fallbackAvailability 
 
     const hasFallback = fallbackAvailability && Object.keys(fallbackAvailability).length > 0;
     if (!toolStatus && !hasFallback) {
-        container.textContent = "Tool status: checking...";
+        container.textContent = t("status.toolStatusChecking", "Tool status: checking...");
         return;
     }
 
-    const segments = TOOL_CAPABILITIES.map(({ key, label }) => {
+    const segments = TOOL_CAPABILITIES.map(({ key, labelKey }) => {
+        const label = t(labelKey, key);
         const availability =
             toolStatus && key in toolStatus ? toolStatus[key] : undefined;
         const fallback = key in fallbackAvailability ? fallbackAvailability[key] : undefined;
         const available = availability !== undefined ? availability : fallback;
         const statusText =
-            available === null || available === undefined ? "unknown" : available ? "available" : "missing";
+            available === null || available === undefined ? t("status.unknown", "unknown") : available ? t("status.available", "available") : t("status.missing", "missing");
         const version = toolStatus?.versions?.[key];
         return version ? `${label}: ${statusText} - ${version}` : `${label}: ${statusText}`;
     });
@@ -387,7 +391,7 @@ function createCapabilityNode({ label, hint }, available, path) {
     pathLine.style.fontSize = "10px";
     pathLine.style.opacity = "0.7";
     pathLine.style.wordBreak = "break-all";
-    pathLine.textContent = `Path: ${path ? path : "auto / not configured"}`;
+    pathLine.textContent = t("status.path", "Path") + `: ${path ? path : t("status.pathAuto", "auto / not configured")}`;
     container.appendChild(pathLine);
 
     return container;
@@ -448,20 +452,20 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
 
         const scopeLabel =
             desiredScope === "all"
-                ? "All (Inputs + Outputs)"
+                ? t("scope.allFull", "All (Inputs + Outputs)")
                 : desiredScope === "input"
-                ? "Inputs"
+                ? t("scope.input", "Inputs")
                 : desiredScope === "custom"
-                ? "Custom"
-                : "Outputs";
+                ? t("scope.custom", "Custom")
+                : t("scope.output", "Outputs");
 
         if (totalAssets === 0) {
             // No assets indexed - yellow
             statusDot.style.background = "var(--mjr-status-warning, #FFA726)";
             setStatusWithHint(
                 statusText,
-                `No assets indexed yet (${scopeLabel})`,
-                "Click the dot to start a scan"
+                t("status.noAssets", `No assets indexed yet (${scopeLabel})`, { scope: scopeLabel }),
+                t("status.clickToScan", "Click the dot to start a scan")
             );
         } else {
             // Assets indexed - green
@@ -469,11 +473,11 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
             setStatusLines(
                 statusText,
                 [
-                    `${totalAssets.toLocaleString()} assets indexed (${scopeLabel})`,
-                    `Images: ${counters.images || 0}  -  Videos: ${counters.videos || 0}`,
-                    `With workflows: ${withWorkflows}  -  Generation data: ${withGenerationData}`,
+                    t("status.assetsIndexed", `${totalAssets.toLocaleString()} assets indexed (${scopeLabel})`, { count: totalAssets.toLocaleString(), scope: scopeLabel }),
+                    t("status.imagesVideos", `Images: ${counters.images || 0}  -  Videos: ${counters.videos || 0}`, { images: counters.images || 0, videos: counters.videos || 0 }),
+                    t("status.withWorkflows", `With workflows: ${withWorkflows}  -  Generation data: ${withGenerationData}`, { workflows: withWorkflows, gendata: withGenerationData }),
                 ],
-                `Last scan: ${lastScanText}`
+                t("status.lastScan", `Last scan: ${lastScanText}`, { date: lastScanText })
             );
         }
         return counters;
@@ -485,11 +489,11 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
         if (result?.code === "INVALID_RESPONSE" && result?.status === 404) {
             setStatusWithHint(
                 statusText,
-                "Majoor API endpoints not found (404)",
-                "Backend routes are not loaded. Restart ComfyUI and check the terminal for Majoor import errors."
+                t("status.apiNotFound", "Majoor API endpoints not found (404)"),
+                t("status.apiNotFoundHint", "Backend routes are not loaded. Restart ComfyUI and check the terminal for Majoor import errors.")
             );
         } else {
-            setStatusLines(statusText, [result.error || "Error checking status"]);
+            setStatusLines(statusText, [result.error || t("status.errorChecking", "Error checking status")]);
         }
         if (result.code === "SERVICE_UNAVAILABLE") {
             const retryBtn = createRetryButton(statusDot, statusText, capabilitiesSection);
@@ -502,7 +506,7 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
 
 function createRetryButton(statusDot, statusText, capabilitiesSection = null) {
     const button = document.createElement("button");
-    button.textContent = "Retry services";
+    button.textContent = t("btn.retryServices");
     button.style.cssText = `
         padding: 4px 10px;
         margin-top: 6px;
@@ -516,15 +520,15 @@ function createRetryButton(statusDot, statusText, capabilitiesSection = null) {
 
     button.onclick = async () => {
         button.disabled = true;
-        button.textContent = "Retrying...";
+        button.textContent = t("btn.retrying");
         const retryResult = await post(ENDPOINTS.RETRY_SERVICES, {});
         button.disabled = false;
-        button.textContent = "Retry services";
+        button.textContent = t("btn.retryServices");
         if (retryResult.ok) {
             const target = typeof getScanTarget === "function" ? getScanTarget() : null;
             updateStatus(statusDot, statusText, capabilitiesSection, target);
         } else {
-            setStatusLines(statusText, [retryResult.error || "Retry failed"]);
+            setStatusLines(statusText, [retryResult.error || t("status.retryFailed", "Retry failed")]);
             statusText.appendChild(document.createElement("br"));
             statusText.appendChild(button);
         }
@@ -622,6 +626,6 @@ export function setupStatusPolling(
             const target = typeof getScanTarget === "function" ? getScanTarget() : null;
             triggerScan(statusDot, statusText, capabilitiesSection, target);
         };
-        statusDotEl.title = "Click to scan";
+        statusDotEl.title = t("status.clickToScan", "Click to scan");
     }
 }

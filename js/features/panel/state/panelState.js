@@ -47,7 +47,10 @@ export function createPanelState() {
         // Selection state (source of truth) for durable selection across grid re-renders.
         // Stored as strings because DOM dataset values are strings.
         activeAssetId: saved.activeAssetId || "",
-        selectedAssetIds: saved.selectedAssetIds || []
+        selectedAssetIds: saved.selectedAssetIds || [],
+        
+        // Sidebar open state for restoring across panel close/reopen.
+        sidebarOpen: saved.sidebarOpen || false
     };
     
     let debounceTimer = null;

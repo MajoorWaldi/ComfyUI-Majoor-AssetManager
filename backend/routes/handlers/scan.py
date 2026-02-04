@@ -648,7 +648,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                      
                      if q_res.ok and q_res.data:
                          import json
-                         update_params = []
+                         upsert_params = []
                          
                          for row in q_res.data:
                              asset_id = row["id"]
@@ -666,11 +666,17 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                              current_meta["generation_time_ms"] = new_time
                              new_json = json.dumps(current_meta, ensure_ascii=False)
                              
-                             update_params.append((new_json, asset_id))
+                             upsert_params.append((asset_id, new_json))
                          
-                         # D. Bulk Update
-                         if update_params:
-                             await db_adapter.aexecutemany("UPDATE asset_metadata SET metadata_raw = ? WHERE asset_id = ?", update_params)
+                         # D. Bulk Upsert (INSERT or UPDATE)
+                         # Use ON CONFLICT to handle both new and existing rows
+                         if upsert_params:
+                             await db_adapter.aexecutemany("""
+                                 INSERT INTO asset_metadata (asset_id, metadata_raw)
+                                 VALUES (?, ?)
+                                 ON CONFLICT(asset_id) DO UPDATE SET
+                                     metadata_raw = excluded.metadata_raw
+                             """, upsert_params)
                      
                      # Cleanup
                      await db_adapter.aexecute("DROP TABLE IF EXISTS temp_gen_updates")

@@ -553,14 +553,14 @@ export function createAssetCard(asset) {
     }
 
     // Generation Time (EXPERIMENTAL)
-    // Needs custom node to populate 'generation_time_ms' in metadata
-    // or parse it from prompt parameters if 'Time: 12.5s' is present
-    const rawGenTime =
-        asset.metadata?.generation_time_ms ?? asset.generation_time_ms ?? asset.metadata?.generation_time ?? 0;
-    const genTimeMs = Number.isFinite(Number(rawGenTime)) ? Number(rawGenTime) : 0;
-    // Fallback: Check if we have prompt params with time
-    // For now we only render if explicitly set in metadata to avoid confusing video duration with gen time
-    if (genTimeMs && genTimeMs > 0) {
+    // Uses 'generation_time_ms' from entry.js (workflow execution duration in milliseconds)
+    // NOTE: Do NOT use 'generation_time' (EXIF date string) for this - that's a different field!
+    const rawGenTime = asset.generation_time_ms ?? asset.metadata?.generation_time_ms ?? 0;
+    const genTimeMs = Number.isFinite(Number(rawGenTime)) && Number(rawGenTime) > 0 ? Number(rawGenTime) : 0;
+    
+    // Only show if we have a valid duration in milliseconds (not a date string)
+    // Sanity check: generation time should be < 24 hours (86400000 ms) to avoid confusing with timestamps
+    if (genTimeMs > 0 && genTimeMs < 86400000) {
         const genTimeSpan = document.createElement("span");
         genTimeSpan.classList.add("mjr-meta-gentime");
         genTimeSpan.style.color = "#aaaaaa";

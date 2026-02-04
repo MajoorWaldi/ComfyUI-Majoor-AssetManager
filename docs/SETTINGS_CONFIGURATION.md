@@ -44,8 +44,7 @@ Settings are primarily adjusted through the user interface:
 
 ## Performance Settings
 
-### Auto-Scan Options
-- **Auto-scan on Open**: Automatically scan when opening the Assets Manager
+### Auto-Scan on Startup
 - **Auto-scan on Startup**: Automatically scan when ComfyUI starts
 - **Default**: Usually Disabled to save resources
 - **Impact**: Ensures fresh index but uses system resources

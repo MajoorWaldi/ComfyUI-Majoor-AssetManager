@@ -7,19 +7,20 @@ import { ENDPOINTS } from "../api/endpoints.js";
 import { APP_CONFIG } from "./config.js";
 
 // Auto-scan state (once per session)
-let autoScanDone = false;
+let startupScanDone = false;
 
 /**
- * Trigger auto-scan on first render
+ * Trigger background scan as soon as the ComfyUI frontend loads (if enabled).
+ * This helps warming the DB before the Assets Manager panel is opened.
  */
-export async function triggerAutoScan(options = {}) {
+export async function triggerStartupScan() {
     if (!APP_CONFIG || typeof APP_CONFIG !== "object") return;
-    const force = !!options.force;
-    if (autoScanDone || (!APP_CONFIG.AUTO_SCAN_ENABLED && !force)) return;
-    autoScanDone = true;
+    if (!APP_CONFIG.AUTO_SCAN_ON_STARTUP) return;
+    if (startupScanDone) return;
+    startupScanDone = true;
 
     try {
-        console.log("📂 Majoor [ℹ️]: Starting auto-scan of output directory...");
+        console.log("📂 Majoor [ℹ️]: Starting startup scan of output directory...");
 
         const result = await post(ENDPOINTS.SCAN, {
             recursive: true,
@@ -30,23 +31,13 @@ export async function triggerAutoScan(options = {}) {
 
         if (result.ok) {
             const stats = result.data;
-            console.log(`📂 Majoor [✅]: Auto-scan complete! Added: ${stats.added}, Updated: ${stats.updated}, Skipped: ${stats.skipped}`);
+            console.log(`📂 Majoor [✅]: Startup scan complete! Added: ${stats.added}, Updated: ${stats.updated}, Skipped: ${stats.skipped}`);
         } else {
-            console.warn("📂 Majoor [⚠️]: Auto-scan failed:", result.error);
+            console.warn("📂 Majoor [⚠️]: Startup scan failed:", result.error);
         }
     } catch (error) {
-        console.error("📂 Majoor [❌]: Auto-scan error:", error);
+        console.error("📂 Majoor [❌]: Startup scan error:", error);
     }
-}
-
-/**
- * Trigger background scan as soon as the ComfyUI frontend loads (optional).
- * This helps warming the DB before the Assets Manager panel is opened.
- */
-export async function triggerStartupScan() {
-    if (!APP_CONFIG || typeof APP_CONFIG !== "object") return;
-    if (!APP_CONFIG.AUTO_SCAN_ON_STARTUP) return;
-    return triggerAutoScan({ force: true, reason: "startup" });
 }
 
 /**

@@ -3,10 +3,10 @@
  */
 
 import { APP_CONFIG, APP_DEFAULTS } from "./config.js";
-import { getSecuritySettings, setSecuritySettings, setProbeBackendMode, resetIndex } from "../api/client.js";
+import { getSecuritySettings, setSecuritySettings, setProbeBackendMode } from "../api/client.js";
 import { comfyToast } from "./toast.js";
 import { safeDispatchCustomEvent } from "../utils/events.js";
-import { t, initI18n } from "./i18n.js";
+import { t, initI18n, setLang, getCurrentLang, getSupportedLanguages } from "./i18n.js";
 
 import { SETTINGS_KEY } from "./settingsStore.js";
 const SETTINGS_PREFIX = "Majoor";
@@ -43,7 +43,6 @@ const DEFAULT_SETTINGS = {
         hidePngSiblings: true,
     },
     autoScan: {
-        enabled: APP_DEFAULTS.AUTO_SCAN_ENABLED,
         onStartup: APP_DEFAULTS.AUTO_SCAN_ON_STARTUP,
     },
     status: {
@@ -199,7 +198,6 @@ const applySettingsToConfig = (settings) => {
         Math.min(maxPage, Number(settings.grid?.pageSize) || APP_DEFAULTS.DEFAULT_PAGE_SIZE)
     );
     APP_CONFIG.DEFAULT_PAGE_SIZE = pageSize;
-    APP_CONFIG.AUTO_SCAN_ENABLED = !!settings.autoScan?.enabled;
     APP_CONFIG.AUTO_SCAN_ON_STARTUP = !!settings.autoScan?.onStartup;
     APP_CONFIG.STATUS_POLL_INTERVAL = Math.max(1000, Number(settings.status?.pollInterval) || APP_DEFAULTS.STATUS_POLL_INTERVAL);
 
@@ -346,39 +344,7 @@ export const registerMajoorSettings = (app, onApplied) => {
         };
 
         const cat = (section, label) => [SETTINGS_CATEGORY, section, label];
-        const cardCat = (label) => [SETTINGS_CATEGORY, "Cards", label];
-
-        safeAddSetting({
-            id: `${SETTINGS_PREFIX}.Grid.MinSize`,
-            category: cat(t("cat.display"), t("setting.grid.minsize.name").replace("Majoor: ", "")),
-            name: t("setting.grid.minsize.name"),
-            tooltip: t("setting.grid.minsize.desc"),
-            type: "number",
-            defaultValue: settings.grid.minSize,
-            attrs: { min: 60, max: 600, step: 10 },
-            onChange: (value) => {
-                settings.grid.minSize = Math.max(60, Math.min(600, Math.round(Number(value) || DEFAULT_SETTINGS.grid.minSize)));
-                saveMajoorSettings(settings);
-                applySettingsToConfig(settings);
-                notifyApplied("grid.minSize");
-            },
-        });
-
-        safeAddSetting({
-            id: `${SETTINGS_PREFIX}.Grid.Gap`,
-            category: cat(t("cat.display"), t("setting.grid.gap.name").replace("Majoor: ", "")),
-            name: t("setting.grid.gap.name"),
-            tooltip: t("setting.grid.gap.desc"),
-            type: "number",
-            defaultValue: settings.grid.gap,
-            attrs: { min: 0, max: 40, step: 1 },
-            onChange: (value) => {
-                settings.grid.gap = Math.max(0, Math.min(40, Math.round(Number(value) || DEFAULT_SETTINGS.grid.gap)));
-                saveMajoorSettings(settings);
-                applySettingsToConfig(settings);
-                notifyApplied("grid.gap");
-            },
-        });
+        const cardCat = (label) => [SETTINGS_CATEGORY, t("cat.grid"), label];
 
           safeAddSetting({
               id: `${SETTINGS_PREFIX}.Grid.ShowExtBadge`,
@@ -550,7 +516,7 @@ export const registerMajoorSettings = (app, onApplied) => {
 
         safeAddSetting({
             id: `${SETTINGS_PREFIX}.Sidebar.Position`,
-            category: cat(t("cat.display"), t("setting.sidebar.pos.name").replace("Majoor: ", "")),
+            category: cat(t("cat.grid"), t("setting.sidebar.pos.name").replace("Majoor: ", "")),
             name: t("setting.sidebar.pos.name"),
             tooltip: t("setting.sidebar.pos.desc"),
             type: "combo",
@@ -566,7 +532,7 @@ export const registerMajoorSettings = (app, onApplied) => {
 
         safeAddSetting({
             id: `${SETTINGS_PREFIX}.General.HideSiblings`,
-            category: cat(t("cat.display"), t("setting.siblings.hide.name").replace("Majoor: ", "")),
+            category: cat(t("cat.grid"), t("setting.siblings.hide.name").replace("Majoor: ", "")),
             name: t("setting.siblings.hide.name"),
             tooltip: t("setting.siblings.hide.desc"),
             type: "boolean",
@@ -581,7 +547,7 @@ export const registerMajoorSettings = (app, onApplied) => {
 
         safeAddSetting({
             id: `${SETTINGS_PREFIX}.Grid.PageSize`,
-            category: cat(t("cat.navigation"), t("setting.grid.pagesize.name").replace("Majoor: ", "")),
+            category: cat(t("cat.grid"), t("setting.grid.pagesize.name").replace("Majoor: ", "")),
             name: t("setting.grid.pagesize.name"),
             tooltip: t("setting.grid.pagesize.desc"),
             type: "number",
@@ -598,7 +564,7 @@ export const registerMajoorSettings = (app, onApplied) => {
 
         safeAddSetting({
             id: `${SETTINGS_PREFIX}.InfiniteScroll.Enabled`,
-            category: cat(t("cat.navigation"), t("setting.nav.infinite.name").replace("Majoor: ", "")),
+            category: cat(t("cat.grid"), t("setting.nav.infinite.name").replace("Majoor: ", "")),
             name: t("setting.nav.infinite.name"),
             tooltip: t("setting.nav.infinite.desc"),
             type: "boolean",
@@ -645,23 +611,8 @@ export const registerMajoorSettings = (app, onApplied) => {
         });
 
         safeAddSetting({
-            id: `${SETTINGS_PREFIX}.AutoScan.Enabled`,
-            category: cat(t("cat.scan"), t("setting.scan.open.name").replace("Majoor: ", "")),
-            name: t("setting.scan.open.name"),
-            tooltip: t("setting.scan.open.desc"),
-            type: "boolean",
-            defaultValue: settings.autoScan.enabled,
-            onChange: (value) => {
-                settings.autoScan.enabled = !!value;
-                saveMajoorSettings(settings);
-                applySettingsToConfig(settings);
-                notifyApplied("autoScan.enabled");
-            },
-        });
-
-        safeAddSetting({
             id: `${SETTINGS_PREFIX}.AutoScan.OnStartup`,
-            category: cat(t("cat.scan"), t("setting.scan.startup.name").replace("Majoor: ", "")),
+            category: cat(t("cat.scanning"), t("setting.scan.startup.name").replace("Majoor: ", "")),
             name: t("setting.scan.startup.name"),
             tooltip: t("setting.scan.startup.desc"),
             type: "boolean",
@@ -677,7 +628,7 @@ export const registerMajoorSettings = (app, onApplied) => {
 
         safeAddSetting({
             id: `${SETTINGS_PREFIX}.RatingTagsSync.Enabled`,
-            category: cat(t("cat.scan"), t("setting.sync.rating.name").replace("Majoor: ", "")),
+            category: cat(t("cat.scanning"), t("setting.sync.rating.name").replace("Majoor: ", "")),
             name: t("setting.sync.rating.name"),
             tooltip: t("setting.sync.rating.desc"),
             type: "boolean",
@@ -692,7 +643,7 @@ export const registerMajoorSettings = (app, onApplied) => {
 
         safeAddSetting({
             id: `${SETTINGS_PREFIX}.Observability.Enabled`,
-            category: cat(t("cat.debug"), t("setting.obs.enabled.name").replace("Majoor: ", "")),
+            category: cat(t("cat.advanced"), t("setting.obs.enabled.name").replace("Majoor: ", "")),
             name: t("setting.obs.enabled.name"),
             tooltip: t("setting.obs.enabled.desc"),
             type: "boolean",
@@ -708,7 +659,7 @@ export const registerMajoorSettings = (app, onApplied) => {
 
         safeAddSetting({
             id: `${SETTINGS_PREFIX}.ProbeBackend.Mode`,
-            category: cat(t("cat.tools"), t("setting.probe.mode.name").replace("Majoor: ", "")),
+            category: cat(t("cat.advanced"), t("setting.probe.mode.name").replace("Majoor: ", "")),
             name: t("setting.probe.mode.name"),
             tooltip: t("setting.probe.mode.desc"),
             type: "combo",
@@ -787,96 +738,23 @@ export const registerMajoorSettings = (app, onApplied) => {
         registerSecurityToggle("allowOpenInFolder", "setting.sec.open.name", "setting.sec.open.desc");
         registerSecurityToggle("allowResetIndex", "setting.sec.reset.name", "setting.sec.reset.desc");
 
-        let resetIndexInitialized = false;
-
+        // Language setting
+        const languages = getSupportedLanguages();
+        const langOptions = languages.map(l => l.code);
+        const langLabels = Object.fromEntries(languages.map(l => [l.code, l.name]));
         safeAddSetting({
-            id: `${SETTINGS_PREFIX}.Maintenance.ResetIndexRun`,
-            category: cat("Maintenance", "Reset Index Now"),
-            name: "⚠️ Reset Index Now",
-            tooltip: "Delete assets.sqlite (+ -wal/-shm) & rescan (requires 'Allow Reset Index')",
-            type: "boolean",
-            defaultValue: false,
-            onChange: async (value) => {
-                if (!resetIndexInitialized) {
-                    resetIndexInitialized = true;
-                    if (!value) return;
-                }
-                if (!value) return;
-
-                // Hack to ensure this setting is never persisted as true
-                // We use localStorage directly to revert it because ComfyUI saves settings automatically.
-                setTimeout(() => {
-                   const s = app.ui.settings.settingAry.find(s => s.id === `${SETTINGS_PREFIX}.Maintenance.ResetIndexRun`);
-                   if (s) { 
-                       s.value = false;
-                       // Also try to update localStorage directly if ComfyUI uses it
-                       try {
-                           const comfySettings = JSON.parse(localStorage.getItem("Comfy.Settings") || "{}");
-                           comfySettings[`${SETTINGS_PREFIX}.Maintenance.ResetIndexRun`] = false;
-                           localStorage.setItem("Comfy.Settings", JSON.stringify(comfySettings));
-                       } catch(e) {}
-                   }
-                }, 100);
-
-                // Check if this looks like a page-load auto-trigger (e.g. no user interaction)
-                // Since we can't easily detect that, the localStorage reversion above is the primary fix.
-                // But as a secondary guard: delay execution slightly and check if the value is still likely intended.
-                
-                const allowed = settings.security?.allowResetIndex;
-                if (!allowed) {
-                    comfyToast({ 
-                        severity: 'error', 
-                        summary: 'Permission Denied', 
-                        detail: 'Please enable "Allow Reset Index" in Security settings first.' 
-                    }, 'error');
-                    console.warn("[Majoor] Reset Index blocked: Security setting 'allowResetIndex' is OFF.");
-                    // Force visual reset immediately
-                    const s = app.ui.settings.settingAry.find(s => s.id === `${SETTINGS_PREFIX}.Maintenance.ResetIndexRun`);
-                    if (s) s.value = false;
-                    return;
-                }
-
-                if (!confirm("Are you SURE you want to DELETE the index database (assets.sqlite + WAL/SHM)? This cannot be undone. A full rescan will start.")) {
-                    const s = app.ui.settings.settingAry.find(s => s.id === `${SETTINGS_PREFIX}.Maintenance.ResetIndexRun`);
-                    if (s) s.value = false;
-                    return;
-                }
-
-                console.log("[Majoor] Requesting Index Reset...");
-                comfyToast({ severity: 'info', summary: 'Resetting...', detail: 'Deleting DB files and restarting scan.' }, 'info');
-
-                try {
-                    const res = await resetIndex({
-                        scope: "all",
-                        reindex: true,
-                        hard_reset_db: true,
-                        clear_scan_journal: true,
-                        clear_metadata_cache: true,
-                        clear_asset_metadata: true,
-                        clear_assets: true,
-                        rebuild_fts: true,
-                        incremental: false,
-                        fast: true,
-                        background_metadata: true,
-                    });
-                    if (res.ok) {
-                        console.log("[Majoor] Index Reset SUCCESS:", res.data);
-                        comfyToast({ 
-                            severity: 'success', 
-                            summary: 'Index Reset', 
-                            detail: 'Database deleted. Rescan started in background.' 
-                        }, 'success');
-                    } else {
-                        console.error("[Majoor] Index Reset FAILED:", res.error);
-                         comfyToast({ 
-                            severity: 'error', 
-                            summary: 'Reset Failed', 
-                            detail: res.error || 'Unknown error during reset' 
-                        }, 'error');
-                    }
-                } catch (err) {
-                    console.error("[Majoor] Index Reset EXCEPTION:", err);
-                    comfyToast({ severity: 'error', summary: 'Error', detail: String(err) }, 'error');
+            id: `${SETTINGS_PREFIX}.Language`,
+            category: cat(t("cat.advanced"), t("setting.language.name", "Language")),
+            name: t("setting.language.name", "Majoor: Language"),
+            tooltip: t("setting.language.desc", "Choose the language for the Assets Manager interface. Reload required to fully apply."),
+            type: "combo",
+            defaultValue: getCurrentLang(),
+            options: langOptions,
+            onChange: (value) => {
+                if (langOptions.includes(value)) {
+                    setLang(value);
+                    notifyApplied("language");
+                    comfyToast(t("toast.languageChanged", "Language changed. Reload the page for full effect."), "info", 4000);
                 }
             },
         });

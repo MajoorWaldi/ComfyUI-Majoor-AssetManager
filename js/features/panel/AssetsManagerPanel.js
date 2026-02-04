@@ -1,4 +1,4 @@
-import { triggerAutoScan } from "../../app/bootstrap.js";
+
 import { comfyConfirm, comfyPrompt } from "../../app/dialogs.js";
 import { comfyToast } from "../../app/toast.js";
 import { createStatusIndicator, setupStatusPolling, triggerScan } from "../status/StatusDot.js";
@@ -45,8 +45,6 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     } else {
         container.classList.remove("mjr-assets-manager");
     }
-
-    triggerAutoScan();
 
     // Cleanup previous instance before re-render to prevent listener leaks
     try {
@@ -139,14 +137,8 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         position: relative;
     `;
 
-    // Restore persistent scroll position
-    if (state.scrollTop > 0) {
-        requestAnimationFrame(() => {
-            try {
-                gridWrapper.scrollTop = state.scrollTop;
-            } catch {}
-        });
-    }
+    // NOTE: Scroll restoration is done AFTER grid loads (see initialLoadPromise below).
+    // Restoring scroll on an empty grid would be useless.
     
     let _scrollTimer = null;
     gridWrapper.addEventListener("scroll", () => {
@@ -644,6 +636,56 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     });
 
     const initialLoadPromise = gridController.reloadGrid();
+    
+    // Restore scroll, selection visuals, and sidebar AFTER grid loads.
+    const restoreUIState = async () => {
+        try {
+            await initialLoadPromise;
+        } catch {}
+
+        // Wait one frame for DOM to settle before restoring.
+        requestAnimationFrame(() => {
+            // 1. Restore scroll position
+            if (state.scrollTop > 0) {
+                try {
+                    gridWrapper.scrollTop = state.scrollTop;
+                } catch {}
+            }
+
+            // 2. Restore selection visuals on cards
+            if (state.selectedAssetIds?.length || state.activeAssetId) {
+                try {
+                    const selected = (state.selectedAssetIds || []).map(String);
+                    const activeId = String(state.activeAssetId || selected[0] || "");
+
+                    selected.forEach(id => {
+                        const card = gridContainer.querySelector(`.mjr-asset-card[data-mjr-asset-id="${CSS?.escape ? CSS.escape(id) : id}"]`);
+                        if (card) card.classList.add("is-selected");
+                    });
+
+                    if (activeId) {
+                        const activeCard = gridContainer.querySelector(`.mjr-asset-card[data-mjr-asset-id="${CSS?.escape ? CSS.escape(activeId) : activeId}"]`);
+                        if (activeCard) {
+                            activeCard.classList.add("is-active");
+                            // Scroll selection into view if not visible after scroll restore
+                            if (state.scrollTop === 0) {
+                                activeCard.scrollIntoView?.({ block: "nearest", behavior: "instant" });
+                            }
+                        }
+                    }
+                } catch {}
+            }
+
+            // 3. Restore sidebar if it was open
+            if (state.sidebarOpen && state.activeAssetId) {
+                try {
+                    sidebarController?.toggleDetails?.();
+                } catch {}
+            }
+        });
+    };
+    restoreUIState();
+
     const checkAndAutoLoad = async () => {
         try {
             await initialLoadPromise;

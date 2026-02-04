@@ -1,3 +1,5 @@
+import { t } from "../../../app/i18n.js";
+
 export function createFilterPopoverView() {
     const filterPopover = document.createElement("div");
     filterPopover.className = "mjr-popover mjr-filter-popover";
@@ -7,11 +9,11 @@ export function createFilterPopoverView() {
     kindRow.className = "mjr-popover-row";
     const kindLabel = document.createElement("div");
     kindLabel.className = "mjr-popover-label";
-    kindLabel.textContent = "Type";
+    kindLabel.textContent = t("label.type");
     const kindSelect = document.createElement("select");
     kindSelect.className = "mjr-select";
     [
-        ["", "All"],
+        ["", t("filter.all")],
         ["image", "Image"],
         ["video", "Video"],
         ["gif", "GIF"],
@@ -31,13 +33,13 @@ export function createFilterPopoverView() {
     wfRow.className = "mjr-popover-row";
     const wfLabel = document.createElement("div");
     wfLabel.className = "mjr-popover-label";
-    wfLabel.textContent = "Workflow";
+    wfLabel.textContent = t("label.workflow");
     const wfToggle = document.createElement("label");
     wfToggle.className = "mjr-popover-toggle";
     const wfCheckbox = document.createElement("input");
     wfCheckbox.type = "checkbox";
     const wfText = document.createElement("span");
-    wfText.textContent = "Only with workflow";
+    wfText.textContent = t("filter.onlyWithWorkflow");
     wfToggle.appendChild(wfCheckbox);
     wfToggle.appendChild(wfText);
     wfRow.appendChild(wfLabel);
@@ -47,15 +49,15 @@ export function createFilterPopoverView() {
     ratingRow.className = "mjr-popover-row";
     const ratingLabel = document.createElement("div");
     ratingLabel.className = "mjr-popover-label";
-    ratingLabel.textContent = "Rating";
+    ratingLabel.textContent = t("label.rating");
     const ratingSelect = document.createElement("select");
     ratingSelect.className = "mjr-select";
     [
-        [0, "Any"],
-        [1, "★ 1"],
-        [2, "★ 2"],
-        [3, "★ 3"],
-        [4, "★ 4"],
+        [0, t("filter.anyRating")],
+        [1, "★ 1+"],
+        [2, "★ 2+"],
+        [3, "★ 3+"],
+        [4, "★ 4+"],
         [5, "★ 5"],
     ].forEach(([val, text]) => {
         const opt = document.createElement("option");
@@ -70,14 +72,14 @@ export function createFilterPopoverView() {
     dateRow.className = "mjr-popover-row";
     const dateLabel = document.createElement("div");
     dateLabel.className = "mjr-popover-label";
-    dateLabel.textContent = "Date range";
+    dateLabel.textContent = t("label.dateRange");
     const dateRangeSelect = document.createElement("select");
     dateRangeSelect.className = "mjr-select";
     [
-        ["", "Any"],
-        ["today", "Today"],
-        ["this_week", "This week"],
-        ["this_month", "This month"],
+        ["", t("filter.anytime")],
+        ["today", t("filter.today")],
+        ["this_week", t("filter.thisWeek")],
+        ["this_month", t("filter.thisMonth")],
     ].forEach(([val, text]) => {
         const opt = document.createElement("option");
         opt.value = val;
@@ -91,7 +93,7 @@ export function createFilterPopoverView() {
     agendaRow.className = "mjr-popover-row";
     const agendaLabel = document.createElement("div");
     agendaLabel.className = "mjr-popover-label";
-    agendaLabel.textContent = "Agenda";
+    agendaLabel.textContent = t("label.agenda");
     agendaRow.appendChild(agendaLabel);
 
     // Keep a hidden input as the "source of truth" for existing controllers (change events, etc.).

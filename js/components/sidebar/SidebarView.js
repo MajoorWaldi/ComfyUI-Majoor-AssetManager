@@ -276,20 +276,11 @@ export function closeSidebar(sidebar) {
     sidebar._currentFetchAbortController?.abort?.();
     sidebar._currentFetchAbortController = null;
 
+    // Dispatch event so controllers can update their state
     try {
-        if (sidebar._closeTimer) clearTimeout(sidebar._closeTimer);
+        sidebar.dispatchEvent?.(new CustomEvent("mjr:sidebar-closed", { bubbles: true }));
     } catch {}
 
-    const closeSeq = sidebar._requestSeq;
-    sidebar._closeTimer = setTimeout(() => {
-        if (sidebar._requestSeq !== closeSeq) return;
-        if (sidebar.classList.contains("is-open")) return;
-        cleanupMinimapSections(sidebar);
-        sidebar.innerHTML = "";
-        if (sidebar._placeholder) {
-            sidebar.appendChild(sidebar._placeholder);
-        }
-    }, 300);
 }
 
 // Raw metadata is now available as a toggle inside WorkflowMinimapSection.
