@@ -47,6 +47,13 @@ let rtHydrateSeenPruneBudget = 0;
 // RT_HYDRATE_STATE remains as the per-grid state map
 const RT_HYDRATE_STATE = new WeakMap(); // gridContainer -> { queue, inflight, seen, active, lastPruneAt }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Upsert Batching - Accumulate upserts and flush once for performance
+// ─────────────────────────────────────────────────────────────────────────────
+const UPSERT_BATCH_DEBOUNCE_MS = 50;     // Debounce window for batch flush
+const UPSERT_BATCH_MAX_SIZE = 50;        // Max items before forced flush
+const UPSERT_BATCH_STATE = new WeakMap(); // gridContainer -> { pending: Map<id, asset>, timer: number|null }
+
 // Temporary debug logging for grid + infinite scroll.
 // Enable at runtime from the browser console:
 //   globalThis._mjrDebugGrid = true
@@ -1714,60 +1721,124 @@ function findAssetElement(gridContainer, assetId) {
 }
 
 /**
+ * Get or create upsert batch state for a grid
+ */
+function _getUpsertBatchState(gridContainer) {
+    let s = UPSERT_BATCH_STATE.get(gridContainer);
+    if (!s) {
+        s = { pending: new Map(), timer: null, flushing: false };
+        UPSERT_BATCH_STATE.set(gridContainer, s);
+    }
+    return s;
+}
+
+/**
+ * Flush all pending upserts in one batch (single setItems call)
+ */
+function _flushUpsertBatch(gridContainer) {
+    const batchState = UPSERT_BATCH_STATE.get(gridContainer);
+    if (!batchState || batchState.pending.size === 0) return;
+    if (batchState.flushing) return; // Prevent re-entrancy
+    
+    batchState.flushing = true;
+    if (batchState.timer) {
+        clearTimeout(batchState.timer);
+        batchState.timer = null;
+    }
+
+    const state = getOrCreateState(gridContainer);
+    const vg = ensureVirtualGrid(gridContainer, state);
+    
+    try {
+        // Process all pending assets
+        let modified = false;
+        
+        for (const [assetId, asset] of batchState.pending.entries()) {
+            const key = assetKey(asset);
+            const existingIndex = state.assets.findIndex(a => String(a.id) === assetId);
+
+            if (existingIndex > -1) {
+                // Update existing
+                const existingAsset = state.assets[existingIndex];
+                const collision = existingAsset._mjrNameCollision;
+                const collisionCount = existingAsset._mjrNameCollisionCount;
+                
+                Object.assign(existingAsset, asset);
+                
+                if (collision && !asset._mjrNameCollision) {
+                    existingAsset._mjrNameCollision = true;
+                    existingAsset._mjrNameCollisionCount = collisionCount;
+                }
+                state.assets[existingIndex] = { ...existingAsset };
+                modified = true;
+            } else {
+                if (!state.seenKeys.has(key)) {
+                    const sortKey = gridContainer.dataset.mjrSort || "mtime_desc";
+                    const insertPos = findInsertPosition(state.assets, asset, sortKey);
+
+                    state.seenKeys.add(key);
+                    
+                    if (insertPos === -1) {
+                        state.assets.push(asset);
+                    } else {
+                        state.assets.splice(insertPos, 0, asset);
+                    }
+                    modified = true;
+                }
+            }
+        }
+
+        // Single setItems call for all changes
+        if (modified && vg) {
+            vg.setItems(state.assets);
+        }
+    } catch (err) {
+        console.warn("📂 Majoor [⚠️] Upsert batch flush error:", err);
+    } finally {
+        batchState.pending.clear();
+        batchState.flushing = false;
+    }
+}
+
+/**
  * Update or insert a single asset in the grid (Live Update).
+ * Uses batching to avoid multiple setItems calls in rapid succession.
  * @param {HTMLElement} gridContainer 
  * @param {Object} asset The new or updated asset data
- * @returns {boolean} True if state was modified
+ * @returns {boolean} True if asset was queued for update
  */
 export function upsertAsset(gridContainer, asset) {
     if (!asset || !asset.id) return false;
 
     const state = getOrCreateState(gridContainer);
     const assetId = String(asset.id);
-    const key = assetKey(asset);
-
+    
     const vg = ensureVirtualGrid(gridContainer, state);
     if (!vg) return false;
 
-    // Check if asset already exists in DATA
-    const existingIndex = state.assets.findIndex(a => String(a.id) === assetId);
+    // Add to batch
+    const batchState = _getUpsertBatchState(gridContainer);
+    batchState.pending.set(assetId, asset);
 
-    if (existingIndex > -1) {
-        // Update existing
-        const existingAsset = state.assets[existingIndex];
-        
-        // Preserve computed properties if not in new asset
-        const collision = existingAsset._mjrNameCollision;
-        const collisionCount = existingAsset._mjrNameCollisionCount;
-        
-        Object.assign(existingAsset, asset);
-        
-        if (collision && !asset._mjrNameCollision) {
-             existingAsset._mjrNameCollision = true;
-             existingAsset._mjrNameCollisionCount = collisionCount;
-        }
-
-        // Force virtual grid update by creating new identity
-        state.assets[existingIndex] = { ...existingAsset };
-        vg.setItems(state.assets);
-        return true;
-    } else {
-        if (state.seenKeys.has(key)) return false;
-
-        const sortKey = gridContainer.dataset.mjrSort || "mtime_desc";
-        const insertPos = findInsertPosition(state.assets, asset, sortKey);
-
-        state.seenKeys.add(key);
-        
-        if (insertPos === -1) {
-            state.assets.push(asset);
-        } else {
-            state.assets.splice(insertPos, 0, asset);
-        }
-
-        vg.setItems(state.assets);
-        return true;
+    // Schedule flush with debounce, or flush immediately if batch is large
+    if (batchState.pending.size >= UPSERT_BATCH_MAX_SIZE) {
+        _flushUpsertBatch(gridContainer);
+    } else if (!batchState.timer && !batchState.flushing) {
+        batchState.timer = setTimeout(() => {
+            batchState.timer = null;
+            _flushUpsertBatch(gridContainer);
+        }, UPSERT_BATCH_DEBOUNCE_MS);
     }
+
+    return true;
+}
+
+/**
+ * Force flush any pending upsert batch (call before operations that need up-to-date grid)
+ * @param {HTMLElement} gridContainer 
+ */
+export function flushUpsertBatch(gridContainer) {
+    _flushUpsertBatch(gridContainer);
 }
 
 /**

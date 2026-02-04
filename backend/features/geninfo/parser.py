@@ -1452,6 +1452,64 @@ def _extract_input_files(nodes_by_id: Dict[str, Any]) -> List[Dict[str, Any]]:
     return inputs
 
 
+def _collect_all_prompts_from_sinks(
+    nodes_by_id: Dict[str, Any],
+    sinks: List[str],
+    max_sinks: int = 20
+) -> Tuple[List[str], List[str]]:
+    """
+    Collect all distinct positive and negative prompts from multiple sinks.
+    
+    For multi-output workflows (like batch generation with different prompts),
+    this gathers all unique prompts to show the user what variants were generated.
+    
+    Returns:
+        (all_positive_prompts, all_negative_prompts) - deduplicated lists
+    """
+    all_positive: List[str] = []
+    all_negative: List[str] = []
+    seen_pos: Set[str] = set()
+    seen_neg: Set[str] = set()
+    
+    for sink_id in sinks[:max_sinks]:
+        try:
+            # Try primary sampler first
+            sampler_id, _ = _select_primary_sampler(nodes_by_id, sink_id)
+            if not sampler_id:
+                sampler_id, _ = _select_advanced_sampler(nodes_by_id, sink_id)
+            if not sampler_id:
+                continue
+                
+            sampler_node = nodes_by_id.get(sampler_id)
+            if not isinstance(sampler_node, dict):
+                continue
+            
+            ins = _inputs(sampler_node)
+            
+            # Extract positive prompt
+            if _is_link(ins.get("positive")):
+                items = _collect_texts_from_conditioning(nodes_by_id, ins.get("positive"), branch="positive")
+                for text, _ in items:
+                    t = text.strip()
+                    if t and t not in seen_pos:
+                        seen_pos.add(t)
+                        all_positive.append(t)
+            
+            # Extract negative prompt
+            if _is_link(ins.get("negative")):
+                items = _collect_texts_from_conditioning(nodes_by_id, ins.get("negative"), branch="negative")
+                for text, _ in items:
+                    t = text.strip()
+                    if t and t not in seen_neg:
+                        seen_neg.add(t)
+                        all_negative.append(t)
+                        
+        except Exception:
+            continue
+    
+    return all_positive, all_negative
+
+
 def _determine_workflow_type(nodes_by_id: Dict[str, Any], sink_node_id: str, sampler_id: Optional[str]) -> str:
     """
     Classify: T2I, I2I, T2V, I2V, V2V
@@ -1635,7 +1693,15 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
         return Result.Ok(None)
 
 def _normalize_graph_input(prompt_graph: Any, workflow: Any) -> Optional[Dict[str, Dict[str, Any]]]:
-    """Normalize prompt graph or workflow into nodes_by_id dict."""
+    """Normalize prompt graph or workflow into nodes_by_id dict.
+    
+    Handles both ComfyUI prompt-graph format and LiteGraph workflow format.
+    LiteGraph format has:
+      - nodes: list of {id, type, inputs: [{name, link}], widgets_values: [...]}
+      - links: list of [link_id, src_node, src_slot, tgt_node, tgt_slot, type]
+    Prompt-graph format has:
+      - dict with node_id as key: {class_type, inputs: {name: value}}
+    """
     target_graph = prompt_graph
 
     if not isinstance(target_graph, dict) or not target_graph:
@@ -1647,10 +1713,86 @@ def _normalize_graph_input(prompt_graph: Any, workflow: Any) -> Optional[Dict[st
     nodes_by_id: Dict[str, Dict[str, Any]] = {}
 
     if "nodes" in target_graph and isinstance(target_graph["nodes"], list):
+        # LiteGraph format - need to convert inputs list to dict and apply widgets_values
+        links = target_graph.get("links", [])
+        
+        # Build link map: link_id -> (src_node_id, src_slot)
+        link_to_source: Dict[int, Tuple[int, int]] = {}
+        for link in links:
+            if isinstance(link, list) and len(link) >= 3:
+                link_id, src_node, src_slot = link[0], link[1], link[2]
+                link_to_source[link_id] = (src_node, src_slot)
+        
         for node in target_graph["nodes"]:
             if isinstance(node, dict):
-                nodes_by_id[str(node.get("id"))] = node
+                node_id = str(node.get("id"))
+                # Convert LiteGraph node to prompt-graph-like format
+                converted = {
+                    "class_type": node.get("type"),
+                    "type": node.get("type"),  # Keep both for compatibility
+                    "id": node.get("id"),
+                    "inputs": {},
+                    # Preserve original fields for other parsers
+                    "widgets_values": node.get("widgets_values"),
+                    "outputs": node.get("outputs"),
+                    "properties": node.get("properties"),
+                    "title": node.get("title"),
+                    "mode": node.get("mode"),
+                }
+                
+                raw_inputs = node.get("inputs", [])
+                widgets_values = node.get("widgets_values", [])
+                
+                # Build inputs dict from:
+                # 1. Links (for connected inputs) -> store as ["node_id", slot]
+                # 2. widgets_values (for widget inputs)
+                # Note: widgets_values can be a list or a dict (e.g., VHS nodes use dict)
+                widgets_list = widgets_values if isinstance(widgets_values, list) else []
+                
+                if isinstance(raw_inputs, list):
+                    widget_idx = 0
+                    for inp in raw_inputs:
+                        if isinstance(inp, dict):
+                            name = inp.get("name")
+                            if not name:
+                                continue
+                            link_id = inp.get("link")
+                            if link_id is not None and link_id in link_to_source:
+                                # Connected input - store as [source_node_id, source_slot]
+                                src_node_id, src_slot = link_to_source[link_id]
+                                converted["inputs"][name] = [str(src_node_id), src_slot]
+                            elif "widget" in inp:
+                                # Widget input - try to get value from widgets_values
+                                # LiteGraph stores widget values in order they appear
+                                if widget_idx < len(widgets_list):
+                                    converted["inputs"][name] = widgets_list[widget_idx]
+                                widget_idx += 1
+                elif isinstance(raw_inputs, dict):
+                    # Already in dict format (shouldn't happen for LiteGraph but handle it)
+                    converted["inputs"] = raw_inputs
+                
+                # Handle widgets_values as dict (VHS and some other nodes)
+                if isinstance(widgets_values, dict):
+                    for k, v in widgets_values.items():
+                        if k not in converted["inputs"]:
+                            converted["inputs"][k] = v
+                
+                # Also copy widgets_values to inputs if they have meaningful names
+                # This helps with nodes that have prompts in widgets but no widget definition
+                if widgets_list:
+                    # For text encoder nodes, widgets_values[0] is usually the text
+                    node_type_lower = _lower(node.get("type"))
+                    if "text" not in converted["inputs"]:
+                        if any(x in node_type_lower for x in ["primitive", "string", "text", "encode"]):
+                            for wv in widgets_list:
+                                if isinstance(wv, str) and len(wv.strip()) > 10:
+                                    converted["inputs"]["text"] = wv
+                                    converted["inputs"]["value"] = wv
+                                    break
+                
+                nodes_by_id[node_id] = converted
     else:
+        # Prompt-graph format - use as-is
         for k, v in target_graph.items():
             if isinstance(v, dict):
                 nodes_by_id[str(k)] = v
@@ -2040,6 +2182,16 @@ def _extract_geninfo(nodes_by_id: Dict[str, Any], sinks: List[str], workflow_met
     input_files = _extract_input_files(nodes_by_id)
     if input_files:
         out["inputs"] = input_files
+
+    # For multi-output workflows, collect all distinct prompts
+    # This helps users see all variations when a workflow generates multiple outputs
+    if len(sinks) > 1:
+        all_pos, all_neg = _collect_all_prompts_from_sinks(nodes_by_id, sinks)
+        # Only add if there are multiple distinct prompts
+        if len(all_pos) > 1:
+            out["all_positive_prompts"] = all_pos
+        if len(all_neg) > 1:
+            out["all_negative_prompts"] = all_neg
 
     # Do-not-lie: if nothing useful extracted besides engine, return None.
     if len(out.keys()) <= 1:

@@ -127,6 +127,64 @@ export function createGenerationSection(asset) {
         container.appendChild(createInfoBox("Negative Prompt", cleaned.negative, "#F44336"));
     }
 
+    // Multi-output workflows: Show all distinct prompts
+    if (metadata.all_positive_prompts && Array.isArray(metadata.all_positive_prompts) && metadata.all_positive_prompts.length > 1) {
+        const multiBox = document.createElement("div");
+        multiBox.style.cssText = `
+            background: rgba(0,0,0,0.3);
+            border-left: 3px solid #FF9800;
+            border-radius: 6px;
+            padding: 12px;
+            margin-top: 4px;
+        `;
+        
+        const header = document.createElement("div");
+        header.textContent = `All Prompts (${metadata.all_positive_prompts.length} variants)`;
+        header.title = "This workflow generates multiple outputs with different prompts";
+        header.style.cssText = `
+             font-size: 11px;
+             font-weight: 600;
+             color: #FF9800;
+             text-transform: uppercase;
+             letter-spacing: 0.5px;
+             margin-bottom: 8px;
+             cursor: pointer;
+        `;
+        
+        const list = document.createElement("div");
+        list.style.cssText = "display: none; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto;";
+        
+        metadata.all_positive_prompts.forEach((p, i) => {
+            const item = document.createElement("div");
+            item.style.cssText = `
+                font-size: 11px;
+                color: #ddd;
+                padding: 6px 8px;
+                background: rgba(255,255,255,0.05);
+                border-radius: 4px;
+                word-break: break-word;
+            `;
+            item.textContent = `${i + 1}. ${p}`;
+            item.title = `Variant ${i + 1}: ${p}`;
+            list.appendChild(item);
+        });
+        
+        // Toggle expand/collapse
+        let expanded = false;
+        header.onclick = () => {
+            expanded = !expanded;
+            list.style.display = expanded ? "flex" : "none";
+            header.textContent = expanded 
+                ? `All Prompts (${metadata.all_positive_prompts.length} variants) ▲` 
+                : `All Prompts (${metadata.all_positive_prompts.length} variants) ▼`;
+        };
+        header.textContent += " ▼";
+        
+        multiBox.appendChild(header);
+        multiBox.appendChild(list);
+        container.appendChild(multiBox);
+    }
+
     const modelData = [];
     const models = metadata.models && typeof metadata.models === "object" ? metadata.models : null;
     const pickModelName = (m) => {

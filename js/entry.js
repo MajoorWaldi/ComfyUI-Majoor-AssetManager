@@ -8,7 +8,7 @@ import { testAPI, triggerStartupScan } from "./app/bootstrap.js";
 import { ensureStyleLoaded } from "./app/style.js";
 import { registerMajoorSettings } from "./app/settings.js";
 import { initDragDrop } from "./features/dnd/DragDrop.js";
-import { loadAssets, upsertAsset, captureAnchor, restoreAnchor, isAtBottom, scrollToBottom } from "./features/grid/GridView.js";
+import { loadAssets, upsertAsset, captureAnchor, restoreAnchor, isAtBottom, scrollToBottom, flushUpsertBatch } from "./features/grid/GridView.js";
 import { renderAssetsManager, getActiveGridContainer } from "./features/panel/AssetsManagerPanel.js";
 import { extractOutputFiles } from "./utils/extractOutputFiles.js";
 import { post, get } from "./api/client.js";
@@ -24,6 +24,13 @@ const UI_BOOT_DELAY_MS = 1500;
 const RAF_STABILIZE_FRAMES = 2;
 const AUTO_REFRESH_DEBOUNCE_MS = 500;
 const AUTO_INSERT_FETCH_LIMIT = 50;
+
+// Queue limits to prevent memory exhaustion and UI freeze
+const PENDING_FILES_MAX = 200;           // Max files in queue before dropping oldest
+const EXECUTION_STARTS_MAX = 50;         // Max tracked prompt IDs
+const EXECUTION_STARTS_TTL_MS = 300000;  // 5 min TTL for orphan cleanup
+const PROCESS_QUEUE_DEBOUNCE_MS = 100;   // Debounce queue processing
+const PROCESS_QUEUE_BATCH_MAX = 20;      // Max files per batch to avoid long blocking
 
 const _raf = () =>
     new Promise((resolve) => {
@@ -178,12 +185,37 @@ app.registerExtension({
             api._mjrPendingFiles = api._mjrPendingFiles || [];
             api._mjrProcessingQueue = false; // Mutex for async processing
             api._mjrExecutionStarts = api._mjrExecutionStarts || new Map();
+            api._mjrProcessQueueTimer = null; // Debounce timer
+            api._mjrLastQueueProcess = 0;     // Last process timestamp
+
+            // Cleanup old execution starts to prevent memory leak
+            const cleanupExecutionStarts = () => {
+                try {
+                    if (!api._mjrExecutionStarts || api._mjrExecutionStarts.size === 0) return;
+                    const now = Date.now();
+                    const toDelete = [];
+                    for (const [id, ts] of api._mjrExecutionStarts.entries()) {
+                        if (now - ts > EXECUTION_STARTS_TTL_MS) {
+                            toDelete.push(id);
+                        }
+                    }
+                    for (const id of toDelete) {
+                        api._mjrExecutionStarts.delete(id);
+                    }
+                    // Also limit size
+                    while (api._mjrExecutionStarts.size > EXECUTION_STARTS_MAX) {
+                        const oldest = api._mjrExecutionStarts.keys().next().value;
+                        if (oldest) api._mjrExecutionStarts.delete(oldest);
+                    }
+                } catch {}
+            };
 
             // Listen for execution start to effectively measure generation time
             const onExecutionStart = (event) => {
                 const promptId = event?.detail?.prompt_id;
                 if (promptId) {
                     api._mjrExecutionStarts.set(promptId, Date.now());
+                    cleanupExecutionStarts();
                 }
             };
             api.addEventListener("execution_start", onExecutionStart);
@@ -194,10 +226,11 @@ app.registerExtension({
                 if (api._mjrPendingFiles.length === 0) return;
 
                 api._mjrProcessingQueue = true;
+                api._mjrLastQueueProcess = Date.now();
                 
-                // Grab current batch
-                const batch = [...api._mjrPendingFiles];
-                api._mjrPendingFiles = []; 
+                // Grab current batch (limited size to avoid blocking UI)
+                const batchSize = Math.min(api._mjrPendingFiles.length, PROCESS_QUEUE_BATCH_MAX);
+                const batch = api._mjrPendingFiles.splice(0, batchSize);
 
                 try {
                     // 1. Index the files (backend)
@@ -247,11 +280,14 @@ app.registerExtension({
 
                         const result = await get(url);
                         if (result?.ok && Array.isArray(result.data?.assets)) {
+                            // Batch upserts to avoid multiple setItems calls
                             for (const asset of result.data.assets) {
                                 try {
                                     upsertAsset(latestGrid, asset);
                                 } catch {}
                             }
+                            // Flush the batch before scroll operations
+                            flushUpsertBatch(latestGrid);
                         }
 
                         // Auto-scroll logic
@@ -268,12 +304,27 @@ app.registerExtension({
                 } finally {
                     api._mjrProcessingQueue = false;
                     
-                    // If new files arrived while we were working, go again immediately
+                    // If new files arrived while we were working, schedule next batch with debounce
                     if (api._mjrPendingFiles.length > 0) {
-                         // Small yield to UI thread before looping
-                         setTimeout(processFileQueue, 16); 
+                         // Yield to UI thread with debounce to prevent tight loops
+                         if (api._mjrProcessQueueTimer) clearTimeout(api._mjrProcessQueueTimer);
+                         api._mjrProcessQueueTimer = setTimeout(() => {
+                             api._mjrProcessQueueTimer = null;
+                             processFileQueue();
+                         }, PROCESS_QUEUE_DEBOUNCE_MS);
                     }
                 }
+            };
+            
+            // Debounced queue trigger
+            const scheduleProcessQueue = () => {
+                if (api._mjrProcessQueueTimer) return; // Already scheduled
+                if (api._mjrProcessingQueue) return;   // Already processing
+                
+                api._mjrProcessQueueTimer = setTimeout(() => {
+                    api._mjrProcessQueueTimer = null;
+                    processFileQueue();
+                }, PROCESS_QUEUE_DEBOUNCE_MS);
             };
 
             api._mjrExecutedHandler = async (event) => {
@@ -286,12 +337,8 @@ app.registerExtension({
                 const promptId = detail?.prompt_id;
 
                 const grid = getActiveGridContainer();
-                if (!output) return; // Even if grid is hidden, we might want to buffer? No, save resources.
+                if (!output) return;
                 
-                // Note: Image Feed logic doesn't require grid, but we need it for `upsertAsset`.
-                // If grid is not present, we still index? Yes, useful for consistency.
-                // But `processFileQueue` checks for grid before fetching.
-
                 const hasMedia = output.images || output.gifs || output.videos;
                 if (!hasMedia) return;
 
@@ -313,11 +360,16 @@ app.registerExtension({
                     }
                 }
 
-                // Add to batch
+                // Add to batch with size limit
                 api._mjrPendingFiles.push(...newFiles);
+                
+                // Enforce queue size limit (drop oldest if overflow)
+                while (api._mjrPendingFiles.length > PENDING_FILES_MAX) {
+                    api._mjrPendingFiles.shift();
+                }
 
-                // Trigger processing (Debounce removed: Queue Pattern used instead)
-                processFileQueue();
+                // Trigger processing with debounce
+                scheduleProcessQueue();
             };
 
             // Bind to multiple event names across ComfyUI variants.

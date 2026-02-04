@@ -36,7 +36,18 @@ import { bindGridContextMenu } from "../contextmenu/GridContextMenu.js";
 let _activeGridContainer = null;
 
 export function getActiveGridContainer() {
-    return _activeGridContainer;
+    // First try the cached reference
+    if (_activeGridContainer && _activeGridContainer.isConnected) {
+        return _activeGridContainer;
+    }
+    // Fallback: try to find it in the DOM by ID or class
+    try {
+        const grid = document.getElementById("mjr-assets-grid") || document.querySelector(".mjr-grid");
+        if (grid && grid.isConnected) {
+            return grid;
+        }
+    } catch {}
+    return null;
 }
 
 export async function renderAssetsManager(container, { useComfyThemeUI = true } = {}) {

@@ -50,6 +50,14 @@ export function normalizeGenerationMetadata(raw) {
                 mapped.inputs = inputs;
             }
 
+            // Multi-output workflow prompts
+            if (Array.isArray(geninfo.all_positive_prompts) && geninfo.all_positive_prompts.length > 1) {
+                mapped.all_positive_prompts = geninfo.all_positive_prompts;
+            }
+            if (Array.isArray(geninfo.all_negative_prompts) && geninfo.all_negative_prompts.length > 1) {
+                mapped.all_negative_prompts = geninfo.all_negative_prompts;
+            }
+
             const size = geninfo.size || null;
             if (size && typeof size === "object") {
                 if (size.width !== undefined) mapped.width = size.width;
