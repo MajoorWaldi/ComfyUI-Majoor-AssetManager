@@ -81,8 +81,11 @@ export function createViewerToolbar({
     modeButtons.style.cssText = "display: flex; gap: 6px;";
 
     const singleBtn = createModeButton("Single", VIEWER_MODES.SINGLE);
+    singleBtn.title = "Single view mode (1 image)";
     const abBtn = createModeButton("A/B", VIEWER_MODES.AB_COMPARE);
+    abBtn.title = "A/B compare mode (overlay two images)";
     const sideBtn = createModeButton("Side", VIEWER_MODES.SIDE_BY_SIDE);
+    sideBtn.title = "Side-by-side comparison mode";
 
     modeButtons.appendChild(singleBtn);
     modeButtons.appendChild(abBtn);
@@ -341,6 +344,7 @@ export function createViewerToolbar({
         { value: "a", label: "Alpha" },
         { value: "l", label: "Luma" },
     ]);
+    channelsSelect.title = "View individual color channels or luminance";
 
     const exposureCtl = createRange("Exposure (EV)", { min: -10, max: 10, step: 0.1, value: 0 });
     const gammaCtl = createRange("Gamma", { min: 0.1, max: 3.0, step: 0.01, value: 1.0 });
@@ -455,6 +459,7 @@ export function createViewerToolbar({
         { value: "wave", label: "Waveform" },
         { value: "both", label: "Both" },
     ]);
+    scopesSelect.title = "Show analysis scopes (histogram/waveform)";
     const gridToggle = createToggle("Grid", "Grid (G)", { iconClass: "pi-th-large", accentRgb: ACCENT.overlay });
     const gridModeSelect = createSelect("Grid Overlay", [
         { value: 0, label: "Off" },
@@ -463,6 +468,7 @@ export function createViewerToolbar({
         { value: 3, label: "Safe" },
         { value: 4, label: "Golden" },
     ]);
+    gridModeSelect.title = "Choose grid overlay type (rule of thirds, center, etc.)";
     const maskToggle = createToggle("Mask", "Format mask (dim outside)", { iconClass: "pi-stop", accentRgb: ACCENT.overlay });
     const formatSelect = createSelect("Format", [
         { value: "image", label: "Image" },
@@ -472,6 +478,7 @@ export function createViewerToolbar({
         { value: "2.39", label: "2.39" },
         { value: "9:16", label: "9:16" },
     ]);
+    formatSelect.title = "Choose aspect ratio for format mask overlay";
     const maskOpacityCtl = createRange("Mask Opacity", { min: 0, max: 0.9, step: 0.05, value: 0.65 });
     const probeToggle = createToggle("Probe", "Pixel Probe (I)", { iconClass: "pi-eye", accentRgb: ACCENT.probe });
     const loupeToggle = createToggle("Loupe", "Loupe (L)", { iconClass: "pi-search-plus", accentRgb: ACCENT.loupe });
@@ -491,6 +498,7 @@ export function createViewerToolbar({
         { value: "multiply", label: "Multiply" },
         { value: "screen", label: "Screen" },
     ]);
+    compareModeSelect.title = "Choose how to blend/compare the two images";
 
     const resetGradeBtn = createIconButton("Reset", "Reset Exposure/Gamma/Channel");
     resetGradeBtn.style.height = "26px";

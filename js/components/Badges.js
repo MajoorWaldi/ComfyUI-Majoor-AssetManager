@@ -89,6 +89,7 @@ export function createFileBadge(filename, kind, nameCollision = false) {
     }
 
     badge.textContent = ext + (nameCollision ? "+" : "");
+    badge.title = nameCollision ? `${ext} file (duplicate filename in view)` : `${ext} file`;
     badge.style.cssText = `
         position: absolute;
         top: 6px;
@@ -100,7 +101,7 @@ export function createFileBadge(filename, kind, nameCollision = false) {
         background: ${bgColor};
         color: white;
         text-transform: uppercase;
-        pointer-events: none;
+        pointer-events: auto;
         z-index: 10;
         letter-spacing: 0.5px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.3);
@@ -171,6 +172,7 @@ export function createRatingBadge(rating) {
 
     const badge = document.createElement("div");
     badge.className = "mjr-rating-badge";
+    badge.title = `Rating: ${ratingValue} star${ratingValue > 1 ? "s" : ""}`;
     badge.style.cssText = `
         position: absolute;
         top: 6px;
@@ -214,6 +216,7 @@ export function createTagsBadge(tags) {
     }
 
     badge.textContent = tags.join(", ");
+    badge.title = `Tags: ${tags.join(", ")}`;
     badge.style.cssText = `
         position: absolute;
         bottom: 6px;

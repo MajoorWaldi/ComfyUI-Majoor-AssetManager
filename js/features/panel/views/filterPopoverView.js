@@ -12,6 +12,7 @@ export function createFilterPopoverView() {
     kindLabel.textContent = t("label.type");
     const kindSelect = document.createElement("select");
     kindSelect.className = "mjr-select";
+    kindSelect.title = "Filter by file type";
     [
         ["", t("filter.all")],
         ["image", "Image"],
@@ -36,6 +37,7 @@ export function createFilterPopoverView() {
     wfLabel.textContent = t("label.workflow");
     const wfToggle = document.createElement("label");
     wfToggle.className = "mjr-popover-toggle";
+    wfToggle.title = "Show only assets with embedded workflow data";
     const wfCheckbox = document.createElement("input");
     wfCheckbox.type = "checkbox";
     const wfText = document.createElement("span");
@@ -52,6 +54,7 @@ export function createFilterPopoverView() {
     ratingLabel.textContent = t("label.rating");
     const ratingSelect = document.createElement("select");
     ratingSelect.className = "mjr-select";
+    ratingSelect.title = "Filter by minimum rating";
     [
         [0, t("filter.anyRating")],
         [1, "★ 1+"],
@@ -75,6 +78,7 @@ export function createFilterPopoverView() {
     dateLabel.textContent = t("label.dateRange");
     const dateRangeSelect = document.createElement("select");
     dateRangeSelect.className = "mjr-select";
+    dateRangeSelect.title = "Filter by date range";
     [
         ["", t("filter.anytime")],
         ["today", t("filter.today")],

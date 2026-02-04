@@ -27,7 +27,8 @@ function _createPill({ label, value, onClear } = {}) {
         const x = document.createElement("button");
         x.type = "button";
         x.className = "mjr-context-pill-x";
-        x.title = "Clear";
+        x.title = `Clear ${label || "filter"}`;
+        x.setAttribute("aria-label", `Clear ${label || "filter"}`);
         x.textContent = "×";
         x.addEventListener("click", (e) => {
             try {

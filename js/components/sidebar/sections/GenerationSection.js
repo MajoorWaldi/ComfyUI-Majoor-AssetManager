@@ -93,6 +93,7 @@ export function createGenerationSection(asset) {
         
         const badge = document.createElement("span");
         badge.textContent = metadata.engine.type;
+        badge.title = `Workflow engine: ${metadata.engine.type}`;
         badge.style.cssText = `
             background: #2196f3;
             color: white;
@@ -213,7 +214,7 @@ export function createGenerationSection(asset) {
         
         const seedValue = document.createElement("div");
         seedValue.textContent = String(metadata.seed);
-        seedValue.title = `Seed: ${metadata.seed} (click to copy)`;
+        seedValue.title = `Click to copy seed: ${metadata.seed}`;
         seedValue.style.cssText = `
             font-size: 18px;
             font-weight: 700;
@@ -266,6 +267,7 @@ export function createGenerationSection(asset) {
         
         const header = document.createElement("div");
         header.textContent = "Source Files";
+        header.title = "Input files used in generation (images, videos, etc.)";
         header.style.cssText = `
              font-size: 11px;
              font-weight: 600;
@@ -282,7 +284,7 @@ export function createGenerationSection(asset) {
         metadata.inputs.forEach(inp => {
             const thumb = document.createElement("div");
             thumb.style.cssText = "width: 64px; height: 64px; background: #222; border-radius: 4px; overflow: hidden; position: relative; cursor: pointer; display: flex; align-items: center; justify-content: center;";
-            thumb.title = inp.filename;
+            thumb.title = `${inp.filename} (click to open in new tab)`;
             
             const params = new URLSearchParams({
                 filename: inp.filename,
@@ -337,6 +339,7 @@ export function createGenerationSection(asset) {
             if (isVideo && !inp.role) {
                 const icon = document.createElement("div");
                 icon.innerHTML = "▶";
+                icon.title = "Video file";
                 icon.style.cssText = "position: absolute; color: white; opacity: 0.7; font-size: 16px; pointer-events: none;";
                 thumb.appendChild(icon);
             }

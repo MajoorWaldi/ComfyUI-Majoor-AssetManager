@@ -518,6 +518,7 @@ export function createAssetCard(asset) {
         const resSpan = document.createElement("span");
         resSpan.classList.add("mjr-meta-res"); // Toggled via .mjr-show-dimensions
         resSpan.textContent = `${asset.width}x${asset.height}`;
+        resSpan.title = `Resolution: ${asset.width} × ${asset.height} pixels`;
         metaRow.appendChild(resSpan);
     }
 
@@ -526,6 +527,7 @@ export function createAssetCard(asset) {
         const durSpan = document.createElement("span");
         durSpan.classList.add("mjr-meta-duration"); // Toggled via .mjr-show-dimensions
         durSpan.textContent = formatDuration(asset.duration);
+        durSpan.title = `Duration: ${formatDuration(asset.duration)}`;
         metaRow.appendChild(durSpan);
     }
     
@@ -538,6 +540,7 @@ export function createAssetCard(asset) {
             const dateSpan = document.createElement("span");
             dateSpan.classList.add("mjr-meta-date"); // Toggled via .mjr-show-date
             dateSpan.textContent = dateStr;
+            dateSpan.title = `Date: ${dateStr}`;
             metaRow.appendChild(dateSpan);
         }
         
@@ -548,6 +551,7 @@ export function createAssetCard(asset) {
              timeSpan.classList.add("mjr-meta-date"); // Reuse date toggle for now logic-wise
              timeSpan.classList.add("mjr-meta-time-val"); 
              timeSpan.textContent = timeStr;
+             timeSpan.title = `Time: ${timeStr}`;
              metaRow.appendChild(timeSpan);
         }
     }

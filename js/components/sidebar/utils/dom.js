@@ -152,6 +152,7 @@ export function createParametersBox(title, fields, accentColor) {
     fields.forEach((field) => {
         const label = document.createElement("div");
         label.textContent = field.label + ":";
+        label.title = field.tooltip || field.label;
         label.style.cssText = `
             font-size: 11px;
             color: rgba(255,255,255,0.6);
@@ -160,13 +161,23 @@ export function createParametersBox(title, fields, accentColor) {
 
         const value = document.createElement("div");
         value.textContent = String(field.value);
+        value.title = `${field.label}: ${field.value} (click to copy)`;
         value.style.cssText = `
             font-size: 12px;
             color: rgba(255,255,255,0.95);
             word-break: break-word;
             white-space: pre-wrap;
+            cursor: pointer;
             ${field.valueStyle || ""}
         `;
+        
+        value.addEventListener("click", async () => {
+            try {
+                await navigator.clipboard.writeText(String(field.value));
+                value.style.background = "rgba(76, 175, 80, 0.3)";
+                setTimeout(() => { value.style.background = ""; }, 300);
+            } catch {}
+        });
 
         grid.appendChild(label);
         grid.appendChild(value);
