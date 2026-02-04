@@ -43,8 +43,27 @@ def _build_filter_clauses(filters: Optional[Dict[str, Any]], alias: str = "a") -
         clauses.append("AND COALESCE(m.rating, 0) >= ?")
         params.append(filters["min_rating"])
     if "has_workflow" in filters:
-        clauses.append("AND COALESCE(m.has_workflow, 0) = ?")
-        params.append(1 if filters["has_workflow"] else 0)
+        # Backward-compatible: older/stale rows may have has_workflow=0 even though metadata_raw
+        # contains a workflow/prompt. Prefer not to hide such assets when filtering.
+        want_workflow = bool(filters.get("has_workflow"))
+        if want_workflow:
+            clauses.append(
+                "AND ("
+                "COALESCE(m.has_workflow, 0) = 1 "
+                "OR json_extract(m.metadata_raw, '$.workflow') IS NOT NULL "
+                "OR json_extract(m.metadata_raw, '$.prompt') IS NOT NULL "
+                "OR json_extract(m.metadata_raw, '$.parameters') IS NOT NULL"
+                ")"
+            )
+        else:
+            clauses.append(
+                "AND ("
+                "COALESCE(m.has_workflow, 0) = 0 "
+                "AND json_extract(m.metadata_raw, '$.workflow') IS NULL "
+                "AND json_extract(m.metadata_raw, '$.prompt') IS NULL "
+                "AND json_extract(m.metadata_raw, '$.parameters') IS NULL"
+                ")"
+            )
     if "mtime_start" in filters:
         clauses.append(f"AND {alias}.mtime >= ?")
         params.append(filters["mtime_start"])
@@ -685,13 +704,10 @@ class IndexSearcher:
                 m.workflow_hash,
                 COALESCE(m.has_workflow, 0) AS has_workflow,
                 COALESCE(m.has_generation_data, 0) AS has_generation_data,
-                    COALESCE(
-                        json_extract(m.metadata_raw, '$.generation_time_ms'),
-                        COALESCE(
-                            json_extract(m.metadata_raw, '$.generation_time_ms'),
-                            json_extract(m.metadata_raw, '$.generation_time')
-                        )
-                    ) as generation_time,
+                COALESCE(
+                    json_extract(m.metadata_raw, '$.generation_time_ms'),
+                    json_extract(m.metadata_raw, '$.generation_time')
+                ) AS generation_time,
                 COALESCE(m.metadata_raw, '{}') AS metadata_raw
             FROM assets a
             LEFT JOIN asset_metadata m ON m.asset_id = a.id
