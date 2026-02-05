@@ -7,6 +7,8 @@ without "guessing" across unrelated nodes.
 
 from __future__ import annotations
 
+import os
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -14,10 +16,9 @@ from ...shared import Result, get_logger
 
 logger = get_logger(__name__)
 
-DEFAULT_MAX_GRAPH_NODES = 5000
-DEFAULT_MAX_LINK_NODES = 200
-
-_PROMPT_TEXT_RE = None
+DEFAULT_MAX_GRAPH_NODES = int(os.environ.get("MJR_MAX_GRAPH_NODES", "5000"))
+DEFAULT_MAX_LINK_NODES = int(os.environ.get("MJR_MAX_LINK_NODES", "200"))
+DEFAULT_MAX_GRAPH_DEPTH = int(os.environ.get("MJR_MAX_GRAPH_DEPTH", "100"))
 
 
 SINK_CLASS_TYPES: Set[str] = {
@@ -40,15 +41,17 @@ def _sink_priority(node: Dict[str, Any], node_id: Optional[str] = None) -> Tuple
     attached to intermediate nodes and does not reliably reflect the final render.
     """
     ct = _lower(_node_type(node))
-    # Prefer video sinks
-    if ct in ("savevideo", "vhs_savevideo", "vhs_videocombine"):
+    
+    # Group 0: Video Sinks (Explicit & Heuristic)
+    if ct in ("savevideo", "vhs_savevideo", "vhs_videocombine") or (("save" in ct) and ("video" in ct)):
         group = 0
-    # Then image/gif sinks
-    elif ct in ("saveimage", "saveimagewebsocket", "saveanimatedwebp", "savegif"):
+    # Group 1: Image/Gif Sinks (Explicit & Heuristic)
+    elif ct in ("saveimage", "saveimagewebsocket", "saveanimatedwebp", "savegif") or (("save" in ct) and ("image" in ct)):
         group = 1
-    # Preview last
-    elif ct == "previewimage":
+    # Group 2: Preview
+    elif ct == "previewimage" or "preview" in ct:
         group = 2
+    # Group 3: Fallback
     else:
         group = 3
 
@@ -261,25 +264,50 @@ def _find_candidate_sinks(nodes_by_id: Dict[str, Dict[str, Any]]) -> List[str]:
         ct = _lower(_node_type(node))
         if ct in SINK_CLASS_TYPES:
             sinks.append(node_id)
+            continue
+            
+        # Heuristic for custom save nodes (e.g. WAS, Impact, CR, etc)
+        # Must contain "save" or "preview" AND "image" or "video"
+        if ("save" in ct or "preview" in ct) and ("image" in ct or "video" in ct):
+            sinks.append(node_id)
+            continue
+            
     return sinks
 
 
 def _collect_upstream_nodes(
-    nodes_by_id: Dict[str, Dict[str, Any]], start_node_id: str, max_nodes: int = DEFAULT_MAX_GRAPH_NODES
+    nodes_by_id: Dict[str, Dict[str, Any]],
+    start_node_id: str,
+    max_nodes: int = DEFAULT_MAX_GRAPH_NODES,
+    max_depth: int = DEFAULT_MAX_GRAPH_DEPTH
 ) -> Dict[str, int]:
     """
     BFS upstream from a node id, returning node->distance.
+
+    Args:
+        nodes_by_id: Dictionary of node_id -> node data
+        start_node_id: Starting node for traversal
+        max_nodes: Maximum number of nodes to visit
+        max_depth: Maximum depth to traverse (prevents DoS)
     """
     dist: Dict[str, int] = {}
-    q: List[Tuple[str, int]] = [(start_node_id, 0)]
+    q: deque[Tuple[str, int]] = deque([(start_node_id, 0)])
+
     while q and len(dist) < max_nodes:
-        nid, d = q.pop(0)
+        nid, d = q.popleft()
+
+        # Depth limit check
+        if d > max_depth:
+            continue
+
         if nid in dist:
             continue
         dist[nid] = d
+
         node = nodes_by_id.get(nid)
         if not isinstance(node, dict):
             continue
+
         for v in _inputs(node).values():
             if not _is_link(v):
                 continue
@@ -308,6 +336,16 @@ def _is_sampler(node: Dict[str, Any]) -> bool:
         return True
     if "iterativelatentupscale" in ct:
         return True
+    # Marigold depth estimation (acts as sampler for depth maps)
+    if "marigold" in ct:
+        return True
+    # Kijai Flux inference sampler
+    if "flux" in ct and ("sampler" in ct or "params" in ct):
+        return True
+    
+    # Generic "Flux" nodes that act as samplers (e.g. "Flux2")
+    if ct == "flux2" or "flux_2" in ct:
+        return True
 
     # Generic detection: any node with (steps + cfg + seed) is likely a sampler
     try:
@@ -332,7 +370,7 @@ def _is_sampler(node: Dict[str, Any]) -> bool:
                 if ins.get(k) is not None:
                     return True
             # Wan samplers often take `text_embeds` rather than conditioning.
-            if _is_link(ins.get("text_embeds")):
+            if _is_link(ins.get("text_embeds")) or _is_link(ins.get("hyvid_embeds")):
                 return True
         except (TypeError, ValueError, KeyError):
             return False
@@ -355,6 +393,13 @@ def _is_advanced_sampler(node: Dict[str, Any]) -> bool:
     try:
         ins = _inputs(node)
         # Heuristic: orchestration sampler has these link inputs.
+        # Strict check for all 4 caused issues with custom nodes that auto-provide noise/sampler.
+        # "guider" + "sigmas" is the defining signature of the advanced decoupled interaction.
+        if _is_link(ins.get("guider")) and _is_link(ins.get("sigmas")):
+            return True
+        # Also accept guider + sampler interaction (common if sigmas handled internally or named differently)
+        if _is_link(ins.get("guider")) and _is_link(ins.get("sampler")):
+            return True
         keys = ("noise", "guider", "sampler", "sigmas")
         return all(_is_link(ins.get(k)) for k in keys)
     except (TypeError, ValueError, KeyError):
@@ -383,7 +428,9 @@ def _extract_posneg_from_text_embeds(
                 return v.strip()
         return None
 
-    pos = _get_str("positive", "prompt", "text", "text_g", "text_l")
+    # WanVideoTextEncode uses 'positive_prompt'/'negative_prompt'
+    # HyVideoTextEncode uses 'prompt'
+    pos = _get_str("positive", "prompt", "text", "text_g", "text_l", "positive_prompt")
     neg = _get_str("negative", "negative_prompt")
 
     pos_val = (pos, f"{_node_type(node)}:{src_id}") if pos else None
@@ -625,7 +672,7 @@ def _looks_like_text_encoder(node: Dict[str, Any]) -> bool:
         ins = _inputs(node)
         if not _is_link(ins.get("clip")):
             return False
-        for key in ("text", "prompt", "text_g", "text_l"):
+        for key in ("text", "prompt", "text_g", "text_l", "instruction"):
             v = ins.get(key)
             if isinstance(v, str) and v.strip():
                 return True
@@ -647,9 +694,11 @@ def _looks_like_conditioning_text(node: Dict[str, Any]) -> bool:
         if "conditioning" not in ct and "prompt" not in ct and "textencode" not in ct:
             return False
         ins = _inputs(node)
-        for key in ("text", "prompt", "text_g", "text_l"):
+        for key in ("text", "prompt", "text_g", "text_l", "instruction"):
             v = ins.get(key)
             if _looks_like_prompt_string(v):
+                return True
+            if _is_link(v):
                 return True
         return False
     except Exception:
@@ -657,19 +706,30 @@ def _looks_like_conditioning_text(node: Dict[str, Any]) -> bool:
 
 
 def _collect_text_encoder_nodes_from_conditioning(
-    nodes_by_id: Dict[str, Dict[str, Any]], start_link: Any, max_nodes: int = DEFAULT_MAX_LINK_NODES, branch: Optional[str] = None
+    nodes_by_id: Dict[str, Dict[str, Any]],
+    start_link: Any,
+    max_nodes: int = DEFAULT_MAX_LINK_NODES,
+    max_depth: int = DEFAULT_MAX_GRAPH_DEPTH,
+    branch: Optional[str] = None
 ) -> List[str]:
     """
     DFS upstream from a conditioning link, collecting "text-encoder-like" node ids.
     Traversal expands only through nodes that look like conditioning composition or
     reroute-ish passthrough nodes.
+
+    Args:
+        nodes_by_id: Node dictionary
+        start_link: Starting link to trace
+        max_nodes: Maximum nodes to visit
+        max_depth: Maximum traversal depth
+        branch: Optional branch hint ("positive" or "negative")
     """
     start_id = _walk_passthrough(nodes_by_id, start_link)
     if not start_id:
         return []
 
     visited: Set[str] = set()
-    stack: List[str] = [start_id]
+    stack: List[Tuple[str, int]] = [(start_id, 0)]
     found: List[str] = []
 
     def _should_expand(node: Dict[str, Any]) -> bool:
@@ -703,7 +763,12 @@ def _collect_text_encoder_nodes_from_conditioning(
         return False
 
     while stack and len(visited) < max_nodes:
-        nid = stack.pop()
+        nid, depth = stack.pop()
+
+        # Enforce depth limit
+        if depth > max_depth:
+            continue
+
         if nid in visited:
             continue
         visited.add(nid)
@@ -729,7 +794,7 @@ def _collect_text_encoder_nodes_from_conditioning(
             v = ins.get(branch)
             src_id = _walk_passthrough(nodes_by_id, v)
             if src_id and src_id not in visited:
-                stack.append(src_id)
+                stack.append((src_id, depth + 1))
             continue
 
         for k, v in ins.items():
@@ -742,7 +807,7 @@ def _collect_text_encoder_nodes_from_conditioning(
             if _is_link(v):
                 src_id = _walk_passthrough(nodes_by_id, v)
                 if src_id and src_id not in visited:
-                    stack.append(src_id)
+                    stack.append((src_id, depth + 1))
 
     # Stable ordering: node id is usually numeric
     def _nid_key(x: str) -> Tuple[int, str]:
@@ -770,7 +835,7 @@ def _collect_texts_from_conditioning(
             continue
         ins = _inputs(node)
         candidates: List[str] = []
-        for key in ("text", "prompt", "text_g", "text_l"):
+        for key in ("text", "prompt", "text_g", "text_l", "instruction"):
             v = ins.get(key)
             if isinstance(v, str) and v.strip():
                 candidates.append(v.strip())
@@ -801,6 +866,7 @@ def _trace_model_chain(
             break
         ct = _lower(_node_type(node))
         ins = _inputs(node)
+
 
         def _first_model_string() -> Optional[str]:
             for k in (
@@ -894,9 +960,10 @@ def _trace_model_chain(
             or "unetloader" in ct
             or "loadunet" in ct
             or "unet" == ct
+            or "videomodel" in ct # Helper for LTX/Wan video models
         ):
             unet = _clean_model_id(ins.get("unet_name") or ins.get("unet"))
-            diffusion = _clean_model_id(ins.get("diffusion_name") or ins.get("diffusion") or ins.get("model_name") or ins.get("ckpt_name"))
+            diffusion = _clean_model_id(ins.get("diffusion_name") or ins.get("diffusion") or ins.get("model_name") or ins.get("ckpt_name") or ins.get("model"))
             if unet and "unet" not in models:
                 models["unet"] = {"name": unet, "confidence": confidence, "source": f"{_node_type(node)}:{node_id}"}
             if diffusion and "diffusion" not in models:
@@ -909,7 +976,15 @@ def _trace_model_chain(
 
         # Generic "model loader" style custom nodes (e.g. WanVideoModelLoader) often expose
         # only a model path/identifier without "ckpt_name" naming.
-        if "modelloader" in ct or ("model_loader" in ct or "model-loader" in ct):
+        if (
+            "modelloader" in ct 
+            or "model_loader" in ct 
+            or "model-loader" in ct
+            or "ltxvideomodel" in ct
+            or "wanvideomodel" in ct
+            or "hyvideomodel" in ct
+            or "cogvideomodel" in ct
+        ):
             raw = _first_model_string()
             name = _clean_model_id(raw)
             if name:
@@ -1113,6 +1188,55 @@ def _trace_size(nodes_by_id: Dict[str, Dict[str, Any]], latent_link: Any, confid
     return None
 
 
+def _trace_guidance_value(nodes_by_id: Dict[str, Dict[str, Any]], start_link: Any, max_hops: int = 15) -> Optional[Tuple[float, str]]:
+    """
+    Traverse conditioning chain upstream to find a node providing 'guidance' (Flux).
+    """
+    start_id = _walk_passthrough(nodes_by_id, start_link)
+    if not start_id:
+        return None
+
+    # stack: (node_id, depth)
+    stack = [(start_id, 0)]
+    visited = set()
+
+    while stack:
+        nid, depth = stack.pop()
+        if nid in visited or depth > max_hops:
+            continue
+        visited.add(nid)
+        
+        node = nodes_by_id.get(nid)
+        if not isinstance(node, dict):
+            continue
+            
+        ins = _inputs(node)
+        # Check if this node has guidance
+        g_val = _scalar(ins.get("guidance"))
+        if g_val is not None:
+             return float(g_val), f"{_node_type(node)}:{nid}"
+             
+        # Traverse upstream
+        ct = _lower(_node_type(node))
+        should_expand = False
+        
+        if _is_reroute(node):
+            should_expand = True
+        elif "conditioning" in ct or "guider" in ct or "flux" in ct:
+            should_expand = True
+        elif any("conditioning" in str(k).lower() for k in ins.keys()):
+            should_expand = True
+            
+        if should_expand:
+            # Add conditioning sources to stack
+            for k, v in ins.items():
+                if "conditioning" in str(k).lower() and _is_link(v):
+                     src = _walk_passthrough(nodes_by_id, v)
+                     if src and src not in visited:
+                         stack.append((src, depth + 1))
+    return None
+
+
 def _extract_workflow_metadata(workflow: Any) -> Dict[str, Any]:
     meta = {}
     if isinstance(workflow, dict):
@@ -1124,9 +1248,144 @@ def _extract_workflow_metadata(workflow: Any) -> Dict[str, Any]:
     return meta
 
 
+
+def _detect_input_role(nodes_by_id: Dict[str, Any], subject_node_id: str) -> str:
+    """
+    Determine how an input node is used (e.g. 'first_frame', 'last_frame', 'reference', 
+    'control_video', 'control_image', 'mask/inpaint', 'source', 'style', 'depth').
+    Performs a limited-depth BFS downstream to handle intermediate nodes (Resize, VAE, etc).
+    """
+    roles = set()
+    frontier = {str(subject_node_id)}
+    visited = {str(subject_node_id)}
+    
+    # Also check the subject node's title for hints (e.g. "FIRST_FRAME", "LAST_FRAME")
+    subject = nodes_by_id.get(str(subject_node_id)) or nodes_by_id.get(subject_node_id)
+    if isinstance(subject, dict):
+        title = _lower(subject.get("_meta", {}).get("title", "") or subject.get("title", ""))
+        filename = ""
+        ins = _inputs(subject)
+        filename = _lower(str(ins.get("image", "") or ins.get("video", "") or ""))
+        
+        # Check title/filename for first/last frame hints
+        if "first" in title or "first" in filename or "start" in title:
+            roles.add("first_frame")
+        if "last" in title or "last" in filename or "end" in title:
+            roles.add("last_frame")
+        if "control" in title:
+            roles.add("control")
+        if "mask" in title or "inpaint" in title:
+            roles.add("mask/inpaint")
+        if "depth" in title:
+            roles.add("depth")
+        if "reference" in title or "ref" in title or "style" in title:
+            roles.add("style/reference")
+    
+    # Limit depth to avoid infinite loops or massive fan-out
+    for _ in range(8): 
+        if not frontier: break
+        next_frontier = set()
+        
+        for nid, node in nodes_by_id.items():
+            if str(nid) in visited: continue 
+            if not isinstance(node, dict): continue
+            
+            # Check if 'node' inputs from 'frontier'
+            ins = _inputs(node)
+            linked = False
+            hit_input_name = ""
+            
+            for k, v in ins.items():
+                if _is_link(v):
+                    src_id, _ = _resolve_link(v)
+                    if str(src_id) in frontier:
+                        linked = True
+                        hit_input_name = str(k).lower()
+                        break
+            
+            if linked:
+                # Found a consumer
+                target_type = _lower(_node_type(node))
+                title = _lower(node.get("_meta", {}).get("title", "") or node.get("title", ""))
+                
+                # 1. High specific roles
+                if "ipadapter" in target_type:
+                    roles.add("style/reference")
+                elif "controlnet" in target_type:
+                    if subject and _lower(_node_type(subject)).find("video") >= 0:
+                        roles.add("control_video")
+                    else:
+                        roles.add("control_image")
+                elif "mask" in hit_input_name or "mask" in target_type or "inpaint" in target_type:
+                    roles.add("mask/inpaint")
+                elif "depth" in target_type or "depth" in hit_input_name:
+                    roles.add("depth")
+                
+                # 2. Video-specific nodes (WAN VACE, AnimateDiff, etc.)
+                elif "vace" in target_type or "wanvace" in target_type:
+                    # VACE uses control video/image for video generation
+                    if "control" in hit_input_name or "reference" in hit_input_name:
+                        roles.add("control_video")
+                    elif "start" in hit_input_name or "first" in hit_input_name:
+                        roles.add("first_frame")
+                    elif "end" in hit_input_name or "last" in hit_input_name:
+                        roles.add("last_frame")
+                    else:
+                        roles.add("source")
+                        
+                elif "starttoend" in target_type or "framerange" in target_type:
+                    # Nodes like WanVideoVACEStartToEndFrame
+                    if "start" in hit_input_name or "first" in hit_input_name:
+                        roles.add("first_frame")
+                    elif "end" in hit_input_name or "last" in hit_input_name:
+                        roles.add("last_frame")
+                    else:
+                        # Check if the input connects to start_image or end_image
+                        roles.add("frame_range")
+                
+                # 3. Frame position detection
+                elif "first" in hit_input_name or "start" in hit_input_name:
+                    roles.add("first_frame")
+                elif "last" in hit_input_name or "end" in hit_input_name:
+                    roles.add("last_frame")
+                elif "img2vid" in target_type or "i2v" in target_type:
+                    roles.add("source")
+
+                # 4. VAE Encode -> likely source material (I2I/I2V)
+                elif "vaeencode" in target_type:
+                    roles.add("source")
+                
+                # 5. If connected directly to sampler input (rare for images)
+                elif "sampler" in target_type:
+                     if "image" in hit_input_name or "latent" in hit_input_name:
+                         roles.add("source")
+                
+                else:
+                    # Unknown/Intermediate node (Resize, Upscale, etc.)
+                    # Add to frontier to trace what IT connects to
+                    next_frontier.add(str(nid))
+                    
+        visited.update(next_frontier)
+        frontier = next_frontier
+
+    # Priority resolution (more specific roles first)
+    if "first_frame" in roles: return "first_frame"
+    if "last_frame" in roles: return "last_frame"
+    if "mask/inpaint" in roles: return "mask/inpaint"
+    if "depth" in roles: return "depth"
+    if "control_video" in roles: return "control_video"
+    if "control_image" in roles: return "control_image"
+    if "control" in roles: return "control"
+    if "source" in roles: return "source"
+    if "style/reference" in roles: return "style/reference"
+    if "frame_range" in roles: return "frame_range"
+    
+    return "input" # Default - generic input
+
+
 def _extract_input_files(nodes_by_id: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Extract input file references (LoadImage, LoadVideo, etc).
+    Extract input file references (LoadImage, LoadVideo, etc) with usage context.
     """
     inputs = []
     seen = set()
@@ -1136,27 +1395,40 @@ def _extract_input_files(nodes_by_id: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue
             
         ntype = _lower(_node_type(node))
+        ntype_clean = ntype.replace(" ", "").replace("_", "").replace("-", "")
         
-        # Standard input nodes
-        is_image_load = "loadimage" in ntype
-        is_video_load = "loadvideo" in ntype 
+        # Standard input nodes (robust to spacing/naming variations)
+        is_image_load = "loadimage" in ntype_clean or "imageloader" in ntype_clean or "inputimage" in ntype_clean
+        is_video_load = "loadvideo" in ntype_clean or "videoloader" in ntype_clean or "inputvideo" in ntype_clean
         
+        # Also check for known specific nodes like LTX or IPAdapter that might not match above
+        if "ipadapter" in ntype_clean and "image" in ntype_clean:
+            is_image_load = True
+
         if is_image_load or is_video_load:
             ins = _inputs(node)
             
-            # 1. API Format inputs
-            filename = ins.get("image") or ins.get("video") or ins.get("filename")
+            # 1. API Format inputs (broadened search for file/path keys)
+            filename = (
+                ins.get("image") or ins.get("video") or ins.get("filename") or 
+                ins.get("file") or ins.get("media_source") or ins.get("path") or
+                ins.get("image_path") or ins.get("video_path")
+            )
             
             # 2. Workflow Format widgets_values (Heuristic)
             if not filename:
                 widgets = node.get("widgets_values")
                 if isinstance(widgets, list) and len(widgets) > 0:
-                    candidate = widgets[0]
-                    # Heuristic: Valid filenames usually have extensions or paths
-                    if isinstance(candidate, str) and (
-                        "." in candidate or "/" in candidate or "\\" in candidate
-                    ):
-                        filename = candidate
+                    # Some nodes put the file at index 0, others index 1 (like "upload" switch)
+                    # Iterate to find the first string that looks like a file path
+                    for w in widgets:
+                        if isinstance(w, str) and (
+                            "." in w or "/" in w or "\\" in w
+                        ):
+                             # Exclude simple extensions selection like "format: png"
+                             if len(w) > 4: 
+                                filename = w
+                                break
 
             if isinstance(filename, str) and filename:
                 # Deduplicate by (filename, subfolder, type)
@@ -1165,15 +1437,200 @@ def _extract_input_files(nodes_by_id: Dict[str, Any]) -> List[Dict[str, Any]]:
                 
                 if key not in seen:
                     seen.add(key)
+                    # Determine role
+                    usage = _detect_input_role(nodes_by_id, nid)
+                    
                     inputs.append({
                         "filename": filename,
                         "subfolder": subfolder,
                         "type": "video" if is_video_load else "image",
                         "node_id": nid,
-                        "folder_type": ins.get("type", "input") 
+                        "folder_type": ins.get("type", "input"),
+                        "role": usage
                     })
     
     return inputs
+
+
+def _collect_all_prompts_from_sinks(
+    nodes_by_id: Dict[str, Any],
+    sinks: List[str],
+    max_sinks: int = 20
+) -> Tuple[List[str], List[str]]:
+    """
+    Collect all distinct positive and negative prompts from multiple sinks.
+    
+    For multi-output workflows (like batch generation with different prompts),
+    this gathers all unique prompts to show the user what variants were generated.
+    
+    Returns:
+        (all_positive_prompts, all_negative_prompts) - deduplicated lists
+    """
+    all_positive: List[str] = []
+    all_negative: List[str] = []
+    seen_pos: Set[str] = set()
+    seen_neg: Set[str] = set()
+    
+    for sink_id in sinks[:max_sinks]:
+        try:
+            # Try primary sampler first
+            sampler_id, _ = _select_primary_sampler(nodes_by_id, sink_id)
+            if not sampler_id:
+                sampler_id, _ = _select_advanced_sampler(nodes_by_id, sink_id)
+            if not sampler_id:
+                continue
+                
+            sampler_node = nodes_by_id.get(sampler_id)
+            if not isinstance(sampler_node, dict):
+                continue
+            
+            ins = _inputs(sampler_node)
+            
+            # Extract positive prompt
+            if _is_link(ins.get("positive")):
+                items = _collect_texts_from_conditioning(nodes_by_id, ins.get("positive"), branch="positive")
+                for text, _ in items:
+                    t = text.strip()
+                    if t and t not in seen_pos:
+                        seen_pos.add(t)
+                        all_positive.append(t)
+            
+            # Extract negative prompt
+            if _is_link(ins.get("negative")):
+                items = _collect_texts_from_conditioning(nodes_by_id, ins.get("negative"), branch="negative")
+                for text, _ in items:
+                    t = text.strip()
+                    if t and t not in seen_neg:
+                        seen_neg.add(t)
+                        all_negative.append(t)
+                        
+        except Exception:
+            continue
+    
+    return all_positive, all_negative
+
+
+def _determine_workflow_type(nodes_by_id: Dict[str, Any], sink_node_id: str, sampler_id: Optional[str]) -> str:
+    """
+    Classify: T2I, I2I, T2V, I2V, V2V
+    
+    Improved detection:
+    - Checks latent path (EmptyLatent vs VAEEncode)
+    - Also scans for LoadImage/LoadVideo nodes feeding into VAEEncode anywhere in the graph
+      (for reference-based workflows like Flux2 Redux, IP-Adapter, ControlNet, etc.)
+    """
+    # 1. Output Type
+    sink = nodes_by_id.get(sink_node_id)
+    sink_type = _lower(_node_type(sink))
+    # Heuristic: VHS_VideoCombine, SaveAnimatedWEBP, SaveVideo -> V, SaveImage -> I
+    is_video_out = "video" in sink_type or "animate" in sink_type or "gif" in sink_type
+    suffix = "V" if is_video_out else "I"
+    
+    # 2. Input Type (Trace Latent Origin)
+    prefix = "T" # Default to Text
+    
+    # 2a. First, scan the entire graph for LoadImage/LoadVideo -> VAEEncode patterns
+    # This catches reference-based workflows (Flux2 Redux, IP-Adapter, ControlNet, etc.)
+    has_image_input = False
+    has_video_input = False
+    
+    for nid, node in nodes_by_id.items():
+        if not isinstance(node, dict):
+            continue
+        ct = _lower(_node_type(node))
+        
+        # Check for VAEEncode nodes and trace their pixel input
+        if "vaeencode" in ct:
+            vae_ins = _inputs(node)
+            pixel_link = vae_ins.get("pixels") or vae_ins.get("image")
+            if _is_link(pixel_link):
+                # Trace pixel source
+                pix_src_id = _walk_passthrough(nodes_by_id, pixel_link)
+                if pix_src_id:
+                    pix_node = nodes_by_id.get(pix_src_id)
+                    pct = _lower(_node_type(pix_node))
+                    if "loadvideo" in pct or "videoloader" in pct:
+                        has_video_input = True
+                    elif "loadimage" in pct or "imageloader" in pct:
+                        has_image_input = True
+        
+        # Also check direct LoadImage/LoadVideo that feed into conditioning nodes
+        # (IP-Adapter, ControlNet, etc. may not use VAEEncode)
+        if "loadimage" in ct or "imageloader" in ct:
+            # Check if this node's output goes to something other than preview
+            has_image_input = True
+        if "loadvideo" in ct or "videoloader" in ct:
+            has_video_input = True
+    
+    # 2b. Now check the main latent path for EmptyLatent (which would indicate pure T2X)
+    latent_is_empty = False
+    
+    if sampler_id:
+        sampler = nodes_by_id.get(sampler_id)
+        if isinstance(sampler, dict):
+            ins = _inputs(sampler)
+            # Standard KSampler 'latent_image', or 'samples' input
+            latent_link = ins.get("latent_image") or ins.get("samples") or ins.get("latent")
+            
+            if _is_link(latent_link):
+                 # Trace upstream to find if it comes from EmptyLatent (T2...) or VAEEncode (I2...)
+                 curr_id = _walk_passthrough(nodes_by_id, latent_link)
+                 hops = 0
+                 while curr_id and hops < 15:
+                     hops += 1
+                     node = nodes_by_id.get(curr_id)
+                     if not isinstance(node, dict): break
+                     ct = _lower(_node_type(node))
+                     
+                     if "emptylatent" in ct:
+                         latent_is_empty = True
+                         break
+                     if "vaeencode" in ct:
+                         # Found encoder -> I2 or V2 (main latent path)
+                         # Check what feeds the VAE
+                         vae_ins = _inputs(node)
+                         pixel_link = vae_ins.get("pixels") or vae_ins.get("image")
+                         if _is_link(pixel_link):
+                             # Trace pixel source to see if it's "LoadVideo" or "LoadImage"
+                             pix_src_id = _walk_passthrough(nodes_by_id, pixel_link)
+                             if pix_src_id:
+                                 pix_node = nodes_by_id.get(pix_src_id)
+                                 pct = _lower(_node_type(pix_node))
+                                 if "loadvideo" in pct or "videoloader" in pct:
+                                     has_video_input = True
+                                 else:
+                                     has_image_input = True
+                             else:
+                                 has_image_input = True
+                         else:
+                             has_image_input = True
+                         break
+                     
+                     # Input is latent directly (LoadLatent)
+                     if "loadlatent" in ct:
+                         has_image_input = True  # Assume loaded latent came from image
+                         break
+                         
+                     # Pass-through logic (LatentUpscale, Duplicate, etc.)
+                     found_next = False
+                     for k in ("samples", "latent", "latent_image"):
+                         if _is_link(_inputs(node).get(k)):
+                             curr_id = _walk_passthrough(nodes_by_id, _inputs(node).get(k))
+                             found_next = True
+                             break
+                     if not found_next:
+                         break
+    
+    # 3. Determine prefix based on findings
+    # Priority: V (video) > I (image) > T (text-only)
+    if has_video_input:
+        prefix = "V"
+    elif has_image_input:
+        prefix = "I"
+    else:
+        prefix = "T"
+                     
+    return f"{prefix}2{suffix}"
 
 
 def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result[Optional[Dict[str, Any]]]:
@@ -1181,64 +1638,202 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
     Parse generation information from a ComfyUI prompt graph (dict of nodes).
     Returns Ok(None) when not enough information is available (do-not-lie).
     """
+    # Extract workflow metadata (safe operation)
     workflow_meta = _extract_workflow_metadata(workflow)
 
-    target_graph = prompt_graph
-    
-    # If no prompt graph provided, try to use workflow as the source graph
-    if not isinstance(target_graph, dict) or not target_graph:
-        if isinstance(workflow, dict) and "nodes" in workflow:
-            target_graph = workflow
-        else:
-            if workflow_meta:
-                return Result.Ok({"metadata": workflow_meta})
-            return Result.Ok(None)
+    # Validate and normalize input graph
+    try:
+        nodes_by_id = _normalize_graph_input(prompt_graph, workflow)
+    except ValueError:
+        if workflow_meta:
+            return Result.Ok({"metadata": workflow_meta})
+        return Result.Ok(None)
 
-    nodes_by_id: Dict[str, Dict[str, Any]] = {}
+    if not nodes_by_id:
+        if workflow_meta:
+            return Result.Ok({"metadata": workflow_meta})
+        return Result.Ok(None)
 
-    # Handle standard API prompt format vs Workflow Graph format
-    # Workflow Graph format (e.g. from PNGs with only workflow)
-    if "nodes" in target_graph and isinstance(target_graph["nodes"], list):
-        for node in target_graph["nodes"]:
-            if isinstance(node, dict):
-                nodes_by_id[str(node.get("id"))] = node
-    else:
-        # API PROMPT format (default)
-        for k, v in target_graph.items():
-            if isinstance(v, dict):
-                nodes_by_id[str(k)] = v
+    # Find sink nodes
+    try:
+        sinks = _find_candidate_sinks(nodes_by_id)
+    except Exception as e:
+        logger.warning(f"Sink detection failed: {e}")
+        sinks = []
 
-    sinks = _find_candidate_sinks(nodes_by_id)
     if not sinks:
         if workflow_meta:
             return Result.Ok({"metadata": workflow_meta})
         return Result.Ok(None)
 
     # Prefer "real" sinks (SaveVideo over PreviewImage, etc.)
-    sinks.sort(key=lambda nid: _sink_priority(nodes_by_id.get(nid, {}) or {}, nid))
+    try:
+        sinks.sort(key=lambda nid: _sink_priority(nodes_by_id.get(nid, {}) or {}, nid))
 
+        sink_id = sinks[0]
+        sampler_id, sampler_conf = _select_primary_sampler(nodes_by_id, sink_id)
+        
+        # ... logic continues ...
+        # Since I'm refactoring the monolithic block, I'll call a helper for the core logic
+        # OR I can inline the rest if it's manageable. The main issue was the huge try/except.
+        # Let's delegate the rest of extraction to a helper or just protect the extraction part.
+        
+        return _extract_geninfo(nodes_by_id, sinks, workflow_meta)
+
+    except (ValueError, TypeError, KeyError, AttributeError) as e:
+        logger.warning(f"GenInfo parsing failed: {e}")
+        if workflow_meta:
+            return Result.Ok({"metadata": workflow_meta})
+        return Result.Ok(None)
+    except Exception as e:
+        # Unexpected error - log with full traceback for debugging
+        logger.exception(f"Unexpected error in GenInfo parsing: {e}")
+        if workflow_meta:
+            return Result.Ok({"metadata": workflow_meta})
+        return Result.Ok(None)
+
+def _normalize_graph_input(prompt_graph: Any, workflow: Any) -> Optional[Dict[str, Dict[str, Any]]]:
+    """Normalize prompt graph or workflow into nodes_by_id dict.
+    
+    Handles both ComfyUI prompt-graph format and LiteGraph workflow format.
+    LiteGraph format has:
+      - nodes: list of {id, type, inputs: [{name, link}], widgets_values: [...]}
+      - links: list of [link_id, src_node, src_slot, tgt_node, tgt_slot, type]
+    Prompt-graph format has:
+      - dict with node_id as key: {class_type, inputs: {name: value}}
+    """
+    target_graph = prompt_graph
+
+    if not isinstance(target_graph, dict) or not target_graph:
+        if isinstance(workflow, dict) and "nodes" in workflow:
+            target_graph = workflow
+        else:
+            return None
+
+    nodes_by_id: Dict[str, Dict[str, Any]] = {}
+
+    if "nodes" in target_graph and isinstance(target_graph["nodes"], list):
+        # LiteGraph format - need to convert inputs list to dict and apply widgets_values
+        links = target_graph.get("links", [])
+        
+        # Build link map: link_id -> (src_node_id, src_slot)
+        link_to_source: Dict[int, Tuple[int, int]] = {}
+        for link in links:
+            if isinstance(link, list) and len(link) >= 3:
+                link_id, src_node, src_slot = link[0], link[1], link[2]
+                link_to_source[link_id] = (src_node, src_slot)
+        
+        for node in target_graph["nodes"]:
+            if isinstance(node, dict):
+                node_id = str(node.get("id"))
+                # Convert LiteGraph node to prompt-graph-like format
+                converted = {
+                    "class_type": node.get("type"),
+                    "type": node.get("type"),  # Keep both for compatibility
+                    "id": node.get("id"),
+                    "inputs": {},
+                    # Preserve original fields for other parsers
+                    "widgets_values": node.get("widgets_values"),
+                    "outputs": node.get("outputs"),
+                    "properties": node.get("properties"),
+                    "title": node.get("title"),
+                    "mode": node.get("mode"),
+                }
+                
+                raw_inputs = node.get("inputs", [])
+                widgets_values = node.get("widgets_values", [])
+                
+                # Build inputs dict from:
+                # 1. Links (for connected inputs) -> store as ["node_id", slot]
+                # 2. widgets_values (for widget inputs)
+                # Note: widgets_values can be a list or a dict (e.g., VHS nodes use dict)
+                widgets_list = widgets_values if isinstance(widgets_values, list) else []
+                
+                if isinstance(raw_inputs, list):
+                    widget_idx = 0
+                    for inp in raw_inputs:
+                        if isinstance(inp, dict):
+                            name = inp.get("name")
+                            if not name:
+                                continue
+                            link_id = inp.get("link")
+                            if link_id is not None and link_id in link_to_source:
+                                # Connected input - store as [source_node_id, source_slot]
+                                src_node_id, src_slot = link_to_source[link_id]
+                                converted["inputs"][name] = [str(src_node_id), src_slot]
+                            elif "widget" in inp:
+                                # Widget input - try to get value from widgets_values
+                                # LiteGraph stores widget values in order they appear
+                                if widget_idx < len(widgets_list):
+                                    converted["inputs"][name] = widgets_list[widget_idx]
+                                widget_idx += 1
+                elif isinstance(raw_inputs, dict):
+                    # Already in dict format (shouldn't happen for LiteGraph but handle it)
+                    converted["inputs"] = raw_inputs
+                
+                # Handle widgets_values as dict (VHS and some other nodes)
+                if isinstance(widgets_values, dict):
+                    for k, v in widgets_values.items():
+                        if k not in converted["inputs"]:
+                            converted["inputs"][k] = v
+                
+                # Also copy widgets_values to inputs if they have meaningful names
+                # This helps with nodes that have prompts in widgets but no widget definition
+                if widgets_list:
+                    # For text encoder nodes, widgets_values[0] is usually the text
+                    node_type_lower = _lower(node.get("type"))
+                    if "text" not in converted["inputs"]:
+                        if any(x in node_type_lower for x in ["primitive", "string", "text", "encode"]):
+                            for wv in widgets_list:
+                                if isinstance(wv, str) and len(wv.strip()) > 10:
+                                    converted["inputs"]["text"] = wv
+                                    converted["inputs"]["value"] = wv
+                                    break
+                
+                nodes_by_id[node_id] = converted
+    else:
+        # Prompt-graph format - use as-is
+        for k, v in target_graph.items():
+            if isinstance(v, dict):
+                nodes_by_id[str(k)] = v
+
+    return nodes_by_id if nodes_by_id else None
+
+def _extract_geninfo(nodes_by_id: Dict[str, Any], sinks: List[str], workflow_meta: Optional[Dict]) -> Result:
     sink_id = sinks[0]
     sampler_id, sampler_conf = _select_primary_sampler(nodes_by_id, sink_id)
     sampler_mode = "primary"
+    
     if not sampler_id:
         sampler_id, sampler_conf = _select_advanced_sampler(nodes_by_id, sink_id)
         sampler_mode = "advanced" if sampler_id else sampler_mode
+    
     if not sampler_id:
         sampler_id, sampler_conf = _select_any_sampler(nodes_by_id)
         sampler_mode = "global" if sampler_id else sampler_mode
+
+    # Marigold / Qwen detection
+    if not sampler_id:
+        for nid, val in nodes_by_id.items():
+            ct_lower = _lower(_node_type(val))
+            if "marigold" in ct_lower:
+                 sampler_id = nid
+                 break
+            if "instruction" in ct_lower and "qwen" in ct_lower:
+                 sampler_id = nid
+                 break
+
     if not sampler_id:
         out_fallback: Dict[str, Any] = {}
         if workflow_meta:
             out_fallback["metadata"] = workflow_meta
             
-        # Try extracting inputs even without a recognized sampler (e.g. format conversion)
         input_files_fallback = _extract_input_files(nodes_by_id)
         if input_files_fallback:
             out_fallback["inputs"] = input_files_fallback
             
         if out_fallback:
             return Result.Ok(out_fallback)
-            
         return Result.Ok(None)
 
     # For secondary traces (VAE, etc.), compute a stable upstream set from the sink input.
@@ -1257,6 +1852,32 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
     # Advanced sampler pipelines (Flux/SD3): derive fields from orchestrator dependencies.
     advanced = _is_advanced_sampler(sampler_node)
 
+    # Qwen2-VL captioning workflows often don't have a sampler, but result in string output.
+    # If sink usage is text-based (rare for image gen tool, but possibly valid for caption), skip.
+
+    # Detect Marigold (Depth) - often no sampler, just an estimator node or inserted in pipe.
+    # If the sink comes from a Marigold node, treat it as the "sampler".
+    if not sampler_id:
+        for nid, val in nodes_by_id.items():
+            ct_lower = _lower(_node_type(val))
+            if "marigold" in ct_lower:
+                 # Marigold acts as the processor
+                 sampler_id = nid
+                 # Marigold usually takes 'image' input, not latent.
+                 # Metadata to extract: seed, denoise_steps, ensemble_size.
+                 break
+            # Qwen/Instruction nodes acted as sinks/processors
+            if "instruction" in ct_lower and "qwen" in ct_lower:
+                 sampler_id = nid
+                 # Needs special handling for prompt extraction later
+                 break
+    
+    # Ensure sampler_node object is up to date if we just found an ID in the fallback
+    if sampler_id and (not sampler_node or str(sampler_node.get("id")) != str(sampler_id)):
+         sampler_node = nodes_by_id.get(sampler_id) or {}
+         ins = _inputs(sampler_node)
+         confidence = "low" # Fallback confidence
+
     # Prompts
     pos_val: Optional[Tuple[str, str]] = None
     neg_val: Optional[Tuple[str, str]] = None
@@ -1264,6 +1885,26 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
     guider_cfg_value: Optional[Any] = None
     guider_cfg_source: Optional[str] = None
     guider_model_link: Optional[Any] = None
+
+    # Handle Qwen Instruction Prompts (stored directly on the node)
+    if sampler_node and "instruction" in _lower(_node_type(sampler_node)) and "qwen" in _lower(_node_type(sampler_node)):
+        p = ins.get("instruction") or ins.get("text")
+        if isinstance(p, str) and p.strip():
+            pos_val = (p.strip(), f"{_node_type(sampler_node)}:{sampler_id}:instruction")
+
+    # FluxKohyaInferenceSampler (Kijai) - stores prompt directly
+    if "flux" in _lower(_node_type(sampler_node)) and "trainer" in _lower(_node_type(sampler_node)):
+        p = ins.get("prompt")
+        if isinstance(p, str) and p.strip():
+            pos_val = (p.strip(), f"{_node_type(sampler_node)}:{sampler_id}:prompt")
+
+    # Wan/video stacks: prompts are often encoded into text embeds rather than conditioning.
+    if _is_link(ins.get("text_embeds")) or _is_link(ins.get("hyvid_embeds")):
+        link = ins.get("text_embeds") or ins.get("hyvid_embeds")
+        p, n = _extract_posneg_from_text_embeds(nodes_by_id, link)
+        pos_val = pos_val or p
+        neg_val = neg_val or n
+
     if _is_link(ins.get("positive")):
         items = _collect_texts_from_conditioning(nodes_by_id, ins.get("positive"), branch="positive")
         if items:
@@ -1281,12 +1922,6 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
             source = srcs[0] if len(set(srcs)) <= 1 else f"{srcs[0]} (+{len(srcs)-1})"
             if text:
                 neg_val = (text, source)
-
-    # Wan/video stacks: prompts are often encoded into text embeds rather than conditioning.
-    if (not pos_val and not neg_val) and _is_link(ins.get("text_embeds")):
-        p, n = _extract_posneg_from_text_embeds(nodes_by_id, ins.get("text_embeds"))
-        pos_val = pos_val or p
-        neg_val = neg_val or n
 
     # Flux-style guidance pipelines: conditioning is passed through a guider node.
     if advanced and _is_link(ins.get("guider")):
@@ -1331,6 +1966,12 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
             if cfg_val is not None:
                 guider_cfg_value = cfg_val
                 guider_cfg_source = f"{_node_type(guider_node)}:{guider_id}"
+            else:
+                # Flux-style: check if guidance is provided by an upstream node (e.g. FluxGuidance via conditioning)
+                cond_link = gins.get("conditioning")
+                found_guidance = _trace_guidance_value(nodes_by_id, cond_link)
+                if found_guidance:
+                    guider_cfg_value, guider_cfg_source = found_guidance
 
             # Model chain for video stacks can also originate on the guider node.
             if _is_link(gins.get("model")):
@@ -1352,9 +1993,15 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
 
     # Sampler params
     sampler_name = _scalar(ins.get("sampler_name")) or _scalar(ins.get("sampler"))
+    
+    # Check if this node class itself implies a specific sampler (Marigold/Depth)
+    if not sampler_name and "marigold" in _lower(_node_type(sampler_node)):
+        sampler_name = _node_type(sampler_node)
+        
     scheduler = _scalar(ins.get("scheduler"))
-    steps = _scalar(ins.get("steps"))
-    cfg = _scalar(ins.get("cfg")) or _scalar(ins.get("cfg_scale")) or _scalar(ins.get("guidance")) or _scalar(ins.get("guidance_scale"))
+    steps = _scalar(ins.get("steps")) or _scalar(ins.get("denoise_steps")) # Marigold uses denoise_steps
+    # embedded_guidance_scale is used by HunyuanVideoSampler
+    cfg = _scalar(ins.get("cfg")) or _scalar(ins.get("cfg_scale")) or _scalar(ins.get("guidance")) or _scalar(ins.get("guidance_scale")) or _scalar(ins.get("embedded_guidance_scale"))
     denoise = _scalar(ins.get("denoise"))
     seed_val = _scalar(ins.get("seed"))
     if seed_val is None and _is_link(ins.get("seed")):
@@ -1452,11 +2099,15 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
     if sink_start_id:
         vae = _trace_vae_from_sink(nodes_by_id, sink_start_id, confidence)
 
+    # Determine Workflow Type (T2I, I2V, etc.)
+    wf_type = _determine_workflow_type(nodes_by_id, sink_id, sampler_id)
+    
     out: Dict[str, Any] = {
         "engine": {
             "parser_version": "geninfo-v1",
             "sink": str(_node_type(nodes_by_id.get(sink_id, {}))),
             "sampler_mode": sampler_mode,
+            "type": wf_type,
         },
     }
     if workflow_meta:
@@ -1532,8 +2183,20 @@ def parse_geninfo_from_prompt(prompt_graph: Any, workflow: Any = None) -> Result
     if input_files:
         out["inputs"] = input_files
 
+    # For multi-output workflows, collect all distinct prompts
+    # This helps users see all variations when a workflow generates multiple outputs
+    if len(sinks) > 1:
+        all_pos, all_neg = _collect_all_prompts_from_sinks(nodes_by_id, sinks)
+        # Only add if there are multiple distinct prompts
+        if len(all_pos) > 1:
+            out["all_positive_prompts"] = all_pos
+        if len(all_neg) > 1:
+            out["all_negative_prompts"] = all_neg
+
     # Do-not-lie: if nothing useful extracted besides engine, return None.
     if len(out.keys()) <= 1:
+        if workflow_meta:
+            return Result.Ok({"metadata": workflow_meta})
         return Result.Ok(None)
 
     return Result.Ok(out)

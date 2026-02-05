@@ -6,6 +6,7 @@ export function createPopoverManager(container) {
     let containerScrollHandlerBound = false;
     let windowScrollHandlerBound = false;
     let windowResizeHandlerBound = false;
+    let repositionController = new AbortController();
 
     const POPOVER_GAP_PX = 8;
     const POPOVER_PAD_PX = 8;
@@ -107,14 +108,14 @@ export function createPopoverManager(container) {
         if (!openPopovers.size) return;
         try {
             if (!windowResizeHandlerBound) {
-                window.addEventListener("resize", scheduleReposition, { passive: true });
+            window.addEventListener("resize", scheduleReposition, { passive: true, signal: repositionController.signal });
                 windowResizeHandlerBound = true;
             }
         } catch {}
         try {
             if (!windowScrollHandlerBound) {
                 // Scroll doesn't bubble; use capture to catch nested scroll containers.
-                window.addEventListener("scroll", scheduleReposition, { passive: true, capture: true });
+            window.addEventListener("scroll", scheduleReposition, { passive: true, capture: true, signal: repositionController.signal });
                 windowScrollHandlerBound = true;
             }
         } catch {}
@@ -155,6 +156,10 @@ export function createPopoverManager(container) {
             if (resizeObserver) resizeObserver.disconnect();
         } catch {}
         resizeObserver = null;
+        try {
+            repositionController.abort();
+        } catch {}
+        repositionController = new AbortController();
     };
 
     const close = (popover) => {
@@ -232,6 +237,10 @@ export function createPopoverManager(container) {
         try {
             maybeRemoveRepositionListeners();
         } catch {}
+        try {
+            repositionController.abort();
+        } catch {}
+        repositionController = new AbortController();
         try {
             closeAll();
         } catch {}

@@ -34,6 +34,8 @@ export function createSidebarHeader(asset, onClose) {
     closeBtn.className = "mjr-sidebar-close";
     closeBtn.type = "button";
     closeBtn.textContent = "×";
+    closeBtn.title = "Close sidebar (Esc)";
+    closeBtn.setAttribute("aria-label", "Close sidebar");
     closeBtn.style.cssText = `
         background: none;
         border: none;

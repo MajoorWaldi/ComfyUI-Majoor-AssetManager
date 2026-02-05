@@ -7,6 +7,7 @@ in unit tests where we create our own aiohttp app.
 
 from __future__ import annotations
 
+import asyncio
 import time
 import os
 import threading
@@ -17,6 +18,45 @@ from aiohttp import web
 
 from .shared import get_logger, request_id_var
 from .utils import env_float
+
+# --- Client disconnection errors (benign) ---
+# These exceptions occur when the client closes the connection before the server
+# finishes sending the response. This is normal (page refresh, navigation, etc.)
+# and should be silently ignored to avoid polluting logs.
+# NOTE: Do NOT include asyncio.CancelledError here — it's a BaseException that
+# must propagate to allow proper task cancellation.
+_CLIENT_DISCONNECT_ERRORS = (
+    ConnectionResetError,      # [WinError 10054] on Windows
+    BrokenPipeError,           # EPIPE on Unix
+    ConnectionAbortedError,    # [WinError 10053] on Windows
+    OSError,                   # Catch-all for other socket errors (errno checked)
+)
+
+# OSError errno codes that indicate client disconnect (not server-side issues)
+_CLIENT_DISCONNECT_ERRNO = frozenset({
+    10053,  # WSAECONNABORTED (Windows)
+    10054,  # WSAECONNRESET (Windows)
+    104,    # ECONNRESET (Linux/macOS)
+    32,     # EPIPE (Linux/macOS)
+    9,      # EBADF (bad file descriptor, connection closed)
+})
+
+
+def _is_client_disconnect(exc: BaseException) -> bool:
+    """
+    Check if an exception represents a benign client disconnect.
+    """
+    if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+        return True
+    if isinstance(exc, OSError):
+        errno = getattr(exc, 'errno', None)
+        if errno in _CLIENT_DISCONNECT_ERRNO:
+            return True
+        # Also check winerror on Windows
+        winerror = getattr(exc, 'winerror', None)
+        if winerror in _CLIENT_DISCONNECT_ERRNO:
+            return True
+    return False
 
 logger = get_logger(__name__)
 
@@ -245,6 +285,61 @@ def ensure_observability(app: web.Application) -> None:
         app.middlewares.append(request_context_middleware)
     except Exception as exc:
         logger.debug("Failed to install observability middleware: %s", exc)
+
+    # Install asyncio exception handler to silence benign client disconnects.
+    # These errors occur at the transport level (after middleware) when clients
+    # close the connection mid-response (page refresh, navigation, etc.).
+    _install_asyncio_exception_handler()
+
+
+_ASYNCIO_HANDLER_INSTALLED = False
+
+
+def _install_asyncio_exception_handler() -> None:
+    """
+    Install a custom asyncio exception handler that silences benign client
+    disconnect errors (ConnectionResetError, BrokenPipeError, etc.).
+
+    These errors appear in asyncio's proactor_events.py _call_connection_lost
+    and are normal in web servers — they just mean the client closed the
+    connection before the server finished sending data.
+    """
+    global _ASYNCIO_HANDLER_INSTALLED
+    if _ASYNCIO_HANDLER_INSTALLED:
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop yet (e.g., during module import).
+        # This is fine; the handler will be installed when ensure_observability
+        # is called at runtime with an active loop.
+        return
+
+    original_handler = loop.get_exception_handler()
+
+    def _quiet_exception_handler(loop: asyncio.AbstractEventLoop, context: Dict[str, Any]) -> None:
+        """
+        Custom exception handler that silences client disconnect errors.
+        """
+        exc = context.get("exception")
+        if exc is not None and _is_client_disconnect(exc):
+            # Silently ignore client disconnect errors.
+            # These are benign and expected in web servers.
+            return
+
+        # For all other exceptions, use the original handler or default.
+        if original_handler is not None:
+            original_handler(loop, context)
+        else:
+            loop.default_exception_handler(context)
+
+    try:
+        loop.set_exception_handler(_quiet_exception_handler)
+        _ASYNCIO_HANDLER_INSTALLED = True
+        logger.debug("Installed asyncio exception handler for client disconnect errors")
+    except Exception as exc:
+        logger.debug("Failed to install asyncio exception handler: %s", exc)
 
 
 def build_request_log_fields(request: web.Request, response_status: Optional[int] = None) -> Dict[str, Any]:

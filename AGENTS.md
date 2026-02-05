@@ -1,8 +1,9 @@
 # AGENTS — Directives pour Majoor Assets Manager
 
-Updated: 2026-01-31
+Updated: 2026-02-03
 
-> **Status (as of 2026-01-31):** OPTIMIZED & STABLE. Critical performance audits complete. Virtual Scrolling & WebGL Player implemented.
+> **Status (as of 2026-02-03):** OPTIMIZED & STABLE. Critical performance audits complete. Virtual Scrolling & WebGL Player implemented. 
+> Support added for Qwen (Edit), Flux (Advanced/GGUF), WanVideo (Kijai), HunyuanVideo (Kijai), Marigold (Depth).
 
 ## Objectif
 Créer un **Assets Manager pour ComfyUI** qui indexe, recherche et gère les assets (images/vidéos) avec **ratings**, **tags**, **workflows**, et **metadata de génération**, sans faire planter l’UI.

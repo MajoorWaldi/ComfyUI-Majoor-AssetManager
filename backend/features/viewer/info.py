@@ -1,44 +1,56 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+logger = logging.getLogger(__name__)
+
 
 def _parse_fps(value: Any) -> Optional[float]:
+    """Safely parse FPS from various formats (number, string, fraction)."""
+    if value is None:
+        return None
+        
     try:
-        if value is None:
-            return None
         if isinstance(value, (int, float)):
             v = float(value)
             return v if v > 0 else None
-        s = str(value).strip()
-        if not s:
+
+        val_str = str(value).strip()
+        if not val_str:
             return None
-        if "/" in s:
-            a, b = s.split("/", 1)
-            na = float(a)
-            nb = float(b)
-            if nb == 0:
+
+        # Check for fraction format '30000/1001'
+        if "/" in val_str:
+            num_s, den_s = val_str.split("/", 1)
+            num = float(num_s)
+            den = float(den_s)
+            if den == 0:
                 return None
-            v = na / nb
-            return v if v > 0 else None
-        v = float(s)
-        return v if v > 0 else None
+            result = num / den
+        else:
+            # Direct number check
+            result = float(val_str)
+
+        return result if result > 0 else None
+
+    except (ValueError, TypeError, AttributeError):
+        # Expected parsing errors for invalid data
+        return None
     except Exception:
+        # Unexpected errors
         return None
 
 
 def _pick_ffprobe_video_stream(metadata_raw: Any) -> Dict[str, Any]:
-    try:
-        if not isinstance(metadata_raw, dict):
-            return {}
-        ff = metadata_raw.get("raw_ffprobe") or {}
-        if not isinstance(ff, dict):
-            return {}
-        vs = ff.get("video_stream") or {}
-        return vs if isinstance(vs, dict) else {}
-    except Exception:
+    if not isinstance(metadata_raw, dict):
         return {}
+    ff = metadata_raw.get("raw_ffprobe")
+    if not isinstance(ff, dict):
+        return {}
+    vs = ff.get("video_stream")
+    return vs if isinstance(vs, dict) else {}
 
 
 def build_viewer_media_info(asset: Dict[str, Any], resolved_path: Optional[Path] = None) -> Dict[str, Any]:
@@ -46,95 +58,86 @@ def build_viewer_media_info(asset: Dict[str, Any], resolved_path: Optional[Path]
     Build a compact media info payload for the viewer UI.
     Must be safe to call on partially populated assets.
     """
+    if not isinstance(asset, dict):
+        return {}
+    
     info: Dict[str, Any] = {}
-    try:
-        info["asset_id"] = asset.get("id")
-    except Exception:
-        pass
+    
+    # Safe extraction helper
+    def _safe_get(key: str, type_cast: type = str) -> Any:
+        try:
+            val = asset.get(key)
+            if val is None:
+                return None
+            return type_cast(val)
+        except Exception:
+            return None
 
+    # Basic Info
+    info["asset_id"] = asset.get("id")
+    
     kind = str(asset.get("kind") or "").lower()
     info["kind"] = kind or None
+    
+    ext = str(asset.get("ext") or "").lower()
+    info["ext"] = ext or None
 
-    try:
-        info["ext"] = str(asset.get("ext") or "").lower() or None
-    except Exception:
-        info["ext"] = None
+    info["width"] = _safe_get("width", int)
+    info["height"] = _safe_get("height", int)
+    info["duration_s"] = _safe_get("duration", float)
 
-    try:
-        info["width"] = int(asset["width"]) if asset.get("width") is not None else None
-    except Exception:
-        info["width"] = None
-    try:
-        info["height"] = int(asset["height"]) if asset.get("height") is not None else None
-    except Exception:
-        info["height"] = None
+    metadata_raw = asset.get("metadata_raw")
 
-    try:
-        d = asset.get("duration")
-        info["duration_s"] = float(d) if d is not None else None
-    except Exception:
-        info["duration_s"] = None
-
-    metadata_raw = asset.get("metadata_raw") if isinstance(asset, dict) else None
-
-    # Video extras
+    # Video extended info
     if kind == "video":
         vs = _pick_ffprobe_video_stream(metadata_raw)
-
+        
         fps_raw = None
-        try:
-            fps_raw = (metadata_raw or {}).get("fps")
-        except Exception:
-            fps_raw = None
-        try:
-            if fps_raw is None:
-                fps_raw = vs.get("avg_frame_rate") or vs.get("r_frame_rate")
-        except Exception:
-            pass
+        if isinstance(metadata_raw, dict):
+            fps_raw = metadata_raw.get("fps")
+        if fps_raw is None:
+            fps_raw = vs.get("avg_frame_rate") or vs.get("r_frame_rate")
 
         fps = _parse_fps(fps_raw)
         info["fps"] = fps
         info["fps_raw"] = str(fps_raw) if fps_raw is not None else None
 
         frame_count = None
+        # Valid frame count sources
         for key in ("nb_frames", "nb_read_frames"):
             try:
-                v = vs.get(key)
-                n = int(v)
-                if n > 0:
-                    frame_count = n
+                val = int(vs.get(key))
+                if val > 0:
+                    frame_count = val
                     break
-            except Exception:
+            except (ValueError, TypeError):
                 continue
+        
+        # Fallback: Duration * FPS
         if frame_count is None:
-            # Best-effort derive from duration * fps (not exact for VFR, but useful).
-            try:
-                dur = info.get("duration_s")
-                if fps and isinstance(dur, (int, float)) and dur and dur > 0:
-                    frame_count = max(1, int(round(float(dur) * fps)))
-            except Exception:
-                frame_count = None
+            dur = info.get("duration_s")
+            if fps and isinstance(dur, (int, float)) and dur > 0:
+                try:
+                    frame_count = max(1, int(round(dur * fps)))
+                except Exception:
+                    pass
         info["frame_count"] = frame_count
 
-    # File stats (prefer DB if present, but stat is authoritative when provided).
-    try:
-        size = asset.get("size")
-        info["size_bytes"] = int(size) if size is not None else None
-    except Exception:
-        info["size_bytes"] = None
-    try:
-        mtime = asset.get("mtime")
-        info["mtime"] = int(mtime) if mtime is not None else None
-    except Exception:
-        info["mtime"] = None
+    # File stats - prefer DB values initially
+    info["size_bytes"] = _safe_get("size", int)
+    info["mtime"] = _safe_get("mtime", int)
 
+    # Override with live filesystem stats if path is provided
     if resolved_path is not None:
         try:
             st = resolved_path.stat()
-            info["size_bytes"] = int(getattr(st, "st_size", 0) or 0) or info.get("size_bytes")
-            info["mtime"] = int(getattr(st, "st_mtime", 0) or 0) or info.get("mtime")
-        except Exception:
-            pass
+            info["size_bytes"] = st.st_size
+            info["mtime"] = int(st.st_mtime)
+        except OSError as e:
+            # Log failure but allow partial result
+            logger.warning(f"Failed to access file stats for {resolved_path}: {e}")
+        except Exception as e:
+            logger.debug(f"Unexpected error reading stats {resolved_path}: {e}")
 
     return info
 

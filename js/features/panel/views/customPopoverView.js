@@ -1,3 +1,5 @@
+import { t } from "../../../app/i18n.js";
+
 export function createCustomPopoverView() {
     const customPopover = document.createElement("div");
     customPopover.className = "mjr-popover mjr-custom-popover";
@@ -8,7 +10,7 @@ export function createCustomPopoverView() {
 
     const customLabel = document.createElement("div");
     customLabel.className = "mjr-popover-label";
-    customLabel.textContent = "Folder";
+    customLabel.textContent = t("label.folder");
 
     const customSelect = document.createElement("select");
     customSelect.className = "mjr-select";
@@ -21,12 +23,12 @@ export function createCustomPopoverView() {
 
     const customAddBtn = document.createElement("button");
     customAddBtn.type = "button";
-    customAddBtn.textContent = "Add…";
+    customAddBtn.textContent = t("btn.add");
     customAddBtn.classList.add("mjr-btn");
 
     const customRemoveBtn = document.createElement("button");
     customRemoveBtn.type = "button";
-    customRemoveBtn.textContent = "Remove";
+    customRemoveBtn.textContent = t("btn.remove");
     customRemoveBtn.classList.add("mjr-btn");
     customRemoveBtn.disabled = true;
 

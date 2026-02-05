@@ -1,4 +1,5 @@
 const STORAGE_KEY = "mjr_panel_state";
+let _lastSavedSerialized = "";
 
 function loadPanelState() {
     try {
@@ -14,7 +15,10 @@ function savePanelState(state) {
         // Don't persist transient stats
         delete toSave.lastGridCount;
         delete toSave.lastGridTotal;
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+        const serialized = JSON.stringify(toSave);
+        if (serialized === _lastSavedSerialized) return;
+        _lastSavedSerialized = serialized;
+        localStorage.setItem(STORAGE_KEY, serialized);
     } catch {}
 }
 
@@ -43,15 +47,54 @@ export function createPanelState() {
         // Selection state (source of truth) for durable selection across grid re-renders.
         // Stored as strings because DOM dataset values are strings.
         activeAssetId: saved.activeAssetId || "",
-        selectedAssetIds: saved.selectedAssetIds || []
+        selectedAssetIds: saved.selectedAssetIds || [],
+        
+        // Sidebar open state for restoring across panel close/reopen.
+        sidebarOpen: saved.sidebarOpen || false
     };
     
-    return new Proxy(state, {
+    let debounceTimer = null;
+    const debouncedSave = (targetState) => {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            savePanelState(targetState);
+            debounceTimer = null;
+        }, 750);
+    };
+
+    const storageHandler = (event) => {
+        if (!event) return;
+        if (event.key !== STORAGE_KEY) return;
+        if (!event.newValue) return;
+        try {
+            const updated = JSON.parse(event.newValue);
+            Object.assign(state, updated || {});
+        } catch {}
+    };
+    try {
+        window.addEventListener("storage", storageHandler);
+    } catch {}
+
+    const dispose = () => {
+        try {
+            if (debounceTimer) clearTimeout(debounceTimer);
+        } catch {}
+        debounceTimer = null;
+        try {
+            window.removeEventListener("storage", storageHandler);
+        } catch {}
+    };
+
+    const proxy = new Proxy(state, {
         set(target, prop, value) {
             target[prop] = value;
-            // Debounce save (optional, but reliable enough without for now)
-            savePanelState(target);
+            debouncedSave(target);
             return true;
         }
     });
+    
+    // Attach dispose to the proxy for cleanup
+    proxy._mjrDispose = dispose;
+    
+    return proxy;
 }

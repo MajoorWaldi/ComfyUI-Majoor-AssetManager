@@ -15,7 +15,9 @@ from ...config import (
     SEARCH_MAX_TOKENS,
     SEARCH_MAX_TOKEN_LENGTH,
     SEARCH_MAX_BATCH_IDS,
-    SEARCH_MAX_FILEPATH_LOOKUP
+    SEARCH_MAX_FILEPATH_LOOKUP,
+    SEARCH_MAX_LIMIT,
+    SEARCH_MAX_OFFSET,
 )
 
 
@@ -41,8 +43,27 @@ def _build_filter_clauses(filters: Optional[Dict[str, Any]], alias: str = "a") -
         clauses.append("AND COALESCE(m.rating, 0) >= ?")
         params.append(filters["min_rating"])
     if "has_workflow" in filters:
-        clauses.append("AND COALESCE(m.has_workflow, 0) = ?")
-        params.append(1 if filters["has_workflow"] else 0)
+        # Backward-compatible: older/stale rows may have has_workflow=0 even though metadata_raw
+        # contains a workflow/prompt. Prefer not to hide such assets when filtering.
+        want_workflow = bool(filters.get("has_workflow"))
+        if want_workflow:
+            clauses.append(
+                "AND ("
+                "COALESCE(m.has_workflow, 0) = 1 "
+                "OR json_extract(m.metadata_raw, '$.workflow') IS NOT NULL "
+                "OR json_extract(m.metadata_raw, '$.prompt') IS NOT NULL "
+                "OR json_extract(m.metadata_raw, '$.parameters') IS NOT NULL"
+                ")"
+            )
+        else:
+            clauses.append(
+                "AND ("
+                "COALESCE(m.has_workflow, 0) = 0 "
+                "AND json_extract(m.metadata_raw, '$.workflow') IS NULL "
+                "AND json_extract(m.metadata_raw, '$.prompt') IS NULL "
+                "AND json_extract(m.metadata_raw, '$.parameters') IS NULL"
+                ")"
+            )
     if "mtime_start" in filters:
         clauses.append(f"AND {alias}.mtime >= ?")
         params.append(filters["mtime_start"])
@@ -132,6 +153,9 @@ class IndexSearcher:
         if not query or not query.strip():
             return Result.Err("EMPTY_QUERY", "Search query cannot be empty")
 
+        limit = max(0, min(SEARCH_MAX_LIMIT, int(limit)))
+        offset = max(0, min(SEARCH_MAX_OFFSET, int(offset)))
+
         validation = self._validate_search_input(query)
         if validation and not validation.ok:
             return validation
@@ -153,8 +177,8 @@ class IndexSearcher:
                     COALESCE(m.rating, 0) as rating,
                     COALESCE(m.tags, '[]') as tags,
  {metadata_tags_text_clause}                    COALESCE(m.has_workflow, 0) as has_workflow,
-                    COALESCE(m.has_generation_data, 0) as has_generation_metadata,
-                    json_extract(m.metadata_raw, '$.generation_time') as generation_time,
+                    COALESCE(m.has_generation_data, 0) as has_generation_data,
+                    json_extract(m.metadata_raw, '$.generation_time_ms') as generation_time_ms,
                     json_extract(m.metadata_raw, '$.file_info.ctime') as file_creation_time,
                     json_extract(m.metadata_raw, '$.file_info.birthtime') as file_birth_time
                 FROM assets a
@@ -226,8 +250,8 @@ class IndexSearcher:
                     COALESCE(m.rating, 0) as rating,
                     COALESCE(m.tags, '[]') as tags,
  {metadata_tags_text_clause}                    COALESCE(m.has_workflow, 0) as has_workflow,
-                    COALESCE(m.has_generation_data, 0) as has_generation_metadata,
-                    json_extract(m.metadata_raw, '$.generation_time') as generation_time,
+                    COALESCE(m.has_generation_data, 0) as has_generation_data,
+                    json_extract(m.metadata_raw, '$.generation_time_ms') as generation_time_ms,
                     json_extract(m.metadata_raw, '$.file_info.ctime') as file_creation_time,
                     json_extract(m.metadata_raw, '$.file_info.birthtime') as file_birth_time,
                     best.rank as rank
@@ -342,6 +366,9 @@ class IndexSearcher:
             return Result.Err("INVALID_INPUT", "Missing or invalid roots")
 
         # Reuse the existing search logic but inject a filepath prefix constraint.
+        limit = max(0, min(SEARCH_MAX_LIMIT, int(limit)))
+        offset = max(0, min(SEARCH_MAX_OFFSET, int(offset)))
+
         if not query or not query.strip():
             return Result.Err("EMPTY_QUERY", "Search query cannot be empty")
 
@@ -379,8 +406,8 @@ class IndexSearcher:
                     COALESCE(m.rating, 0) as rating,
                     COALESCE(m.tags, '[]') as tags,
 {metadata_tags_text_clause}                    COALESCE(m.has_workflow, 0) as has_workflow,
-                    COALESCE(m.has_generation_data, 0) as has_generation_metadata,
-                    json_extract(m.metadata_raw, '$.generation_time') as generation_time,
+                    COALESCE(m.has_generation_data, 0) as has_generation_data,
+                    json_extract(m.metadata_raw, '$.generation_time_ms') as generation_time_ms,
                     json_extract(m.metadata_raw, '$.file_info.ctime') as file_creation_time,
                     json_extract(m.metadata_raw, '$.file_info.birthtime') as file_birth_time
                 FROM assets a
@@ -449,7 +476,8 @@ class IndexSearcher:
                     COALESCE(m.rating, 0) as rating,
                     COALESCE(m.tags, '[]') as tags,
 {metadata_tags_text_clause}                    COALESCE(m.has_workflow, 0) as has_workflow,
-                    COALESCE(m.has_generation_data, 0) as has_generation_metadata,                    json_extract(m.metadata_raw, '$.generation_time') as generation_time,
+                    COALESCE(m.has_generation_data, 0) as has_generation_data,
+                    json_extract(m.metadata_raw, '$.generation_time_ms') as generation_time_ms,
                     json_extract(m.metadata_raw, '$.file_info.ctime') as file_creation_time,
                     json_extract(m.metadata_raw, '$.file_info.birthtime') as file_birth_time,                    best.rank as rank
                 FROM best
@@ -664,7 +692,7 @@ class IndexSearcher:
                 m.workflow_hash,
                 COALESCE(m.has_workflow, 0) AS has_workflow,
                 COALESCE(m.has_generation_data, 0) AS has_generation_data,
-                COALESCE(m.metadata_quality, 'none') AS metadata_quality,
+                json_extract(m.metadata_raw, '$.generation_time_ms') as generation_time_ms,
                 COALESCE(m.metadata_raw, '{}') AS metadata_raw
             FROM assets a
             LEFT JOIN asset_metadata m ON m.asset_id = a.id
@@ -802,7 +830,7 @@ class IndexSearcher:
                 COALESCE(m.rating, 0) as rating,
                 COALESCE(m.tags, '[]') as tags,
                 COALESCE(m.has_workflow, 0) as has_workflow,
-                COALESCE(m.has_generation_data, 0) as has_generation_metadata
+                COALESCE(m.has_generation_data, 0) as has_generation_data
             FROM assets a
             LEFT JOIN asset_metadata m ON a.id = m.asset_id
             WHERE {IN_CLAUSE}

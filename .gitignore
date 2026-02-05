@@ -84,6 +84,9 @@ _mjr_batch_zips/
 output/
 input/
 
+# Local archive extracted for comparisons
+__old_version_zip/
+
 # Local utility scripts
 clean_pycache.bat
 check_sync_await_backend.py

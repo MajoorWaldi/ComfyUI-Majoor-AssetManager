@@ -24,6 +24,7 @@ export function createSearchView({ filterBtn, sortBtn, collectionsBtn, filterPop
     searchInputEl.id = "mjr-search-input";
     searchInputEl.classList.add("mjr-input");
     searchInputEl.placeholder = "Search assets...";
+    searchInputEl.title = "Search by filename, tags, or attributes (e.g. rating:5, ext:png)";
     searchInputEl.setAttribute("list", dataListId);
 
     // Autocomplete handler

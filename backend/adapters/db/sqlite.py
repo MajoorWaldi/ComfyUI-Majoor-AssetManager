@@ -210,6 +210,12 @@ def _validate_and_repair_column_name(column: str) -> Tuple[bool, Optional[str]]:
     return False, None
 
 
+def _asset_lock_key(asset_id: Any) -> str:
+    if asset_id is None:
+        return "asset:__null__"
+    return f"asset:{str(asset_id)}"
+
+
 class _AsyncLoopThread:
     def __init__(self):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -305,6 +311,8 @@ class Sqlite:
         self._tx_state_lock = threading.Lock()
         # Thread-local storage for sync transactions (caller thread).
         self._tx_local = threading.local()
+        self._asset_locks: Dict[str, asyncio.Lock] = {}
+        self._asset_locks_lock = threading.Lock()
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
@@ -398,11 +406,33 @@ class Sqlite:
             self._initialized = True
         if self._write_lock is None:
             self._write_lock = asyncio.Lock()
-        logger.info("Database initialized: %s", self.db_path)
+
+    def _get_or_create_asset_lock(self, asset_id: Any) -> asyncio.Lock:
+        key = _asset_lock_key(asset_id)
+        with self._asset_locks_lock:
+            lock = self._asset_locks.get(key)
+            if lock:
+                return lock
+            lock = asyncio.Lock()
+            self._asset_locks[key] = lock
+            return lock
+
+    @asynccontextmanager
+    async def lock_for_asset(self, asset_id: Any):
+        """
+        Async context manager that serializes work per asset.
+        """
+        lock = self._get_or_create_asset_lock(asset_id)
+        await lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
 
     def _init_db(self):
         try:
             self._loop_thread.run(self._ensure_initialized_async())
+            logger.info("Database initialized: %s", self.db_path)
         except Exception as exc:
             logger.error("Failed to initialize database: %s", exc)
             raise
@@ -1072,6 +1102,8 @@ class Sqlite:
         4. Re-init
         """
         try:
+            deleted_files: list[str] = []
+            renamed_files: list[dict[str, str]] = []
             # 1. Drain and close on loop thread
             fut = self._loop_thread.submit(self._drain_for_reset_async())
             await asyncio.wrap_future(fut)
@@ -1093,6 +1125,7 @@ class Sqlite:
                     try:
                         p.unlink()
                         deleted = True
+                        deleted_files.append(str(p))
                         break
                     except Exception as e:
                         last_error = e
@@ -1101,17 +1134,21 @@ class Sqlite:
                 
                 if not deleted:
                     logger.warning(f"Failed to delete {p} after retries: {last_error}")
-                    # If main file fails, it's fatal. WAL/SHM might be tolerable or indicate locks.
-                    if ext == "":
-                         # Final Hail Mary: Try rename if delete fails (Windows hack)
-                         try:
-                             trash = p.with_name(f"{p.name}.trash_{uuid.uuid4().hex}")
-                             p.rename(trash)
-                             # Schedule trash deletion for later or ignore
-                             logger.info(f"Renamed locked DB file to {trash}")
-                             deleted = True
-                         except Exception as rename_err:
-                             return Result.Err("DELETE_FAILED", f"Could not delete {p}: {last_error} | Rename failed: {rename_err}")
+                    # Final Hail Mary: Try rename if delete fails (Windows hack).
+                    # We do this for main DB and WAL/SHM to guarantee the old files disappear.
+                    try:
+                        trash = p.with_name(f"{p.name}.trash_{uuid.uuid4().hex}")
+                        p.rename(trash)
+                        renamed_files.append({"from": str(p), "to": str(trash)})
+                        logger.info(f"Renamed locked DB file to {trash}")
+                        deleted = True
+                    except Exception as rename_err:
+                        # If main file fails, it's fatal. WAL/SHM failures are also fatal here
+                        # because the user explicitly requested a hard reset.
+                        return Result.Err(
+                            "DELETE_FAILED",
+                            f"Could not delete {p}: {last_error} | Rename failed: {rename_err}",
+                        )
 
             # 4. Reset initialization state
             with self._lock:
@@ -1130,8 +1167,8 @@ class Sqlite:
             indexes_res = await ensure_indexes_and_triggers(self)
             if not indexes_res.ok:
                 return indexes_res
-            
-            return Result.Ok(True)
+
+            return Result.Ok(True, deleted_files=deleted_files, renamed_files=renamed_files)
         except Exception as exc:
             self._resetting = False # Ensure unlock on error
             logger.error(f"DB Reset failed: {exc}")

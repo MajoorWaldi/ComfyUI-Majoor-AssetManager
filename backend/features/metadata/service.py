@@ -19,7 +19,6 @@ from .extractors import (
     extract_video_metadata,
     extract_rating_tags_from_exif,
 )
-from .native_extractors import extract_png_metadata_native
 from ..geninfo.parser import parse_geninfo_from_prompt
 
 logger = get_logger(__name__)
@@ -360,19 +359,6 @@ class MetadataService:
                 "quality": "partial" if exif_data else "none"
             })
             
-        # Ensure dimensions are present even if ExifTool missed them or didn't map them correctly
-        # We can call the native extractor cheaply here for dims.
-        try:
-             native_dims = await extract_png_metadata_native(file_path)
-             if native_dims and metadata_result.ok:
-                 data = metadata_result.data or {}
-                 if not data.get("width") and native_dims.get("width"):
-                     data["width"] = native_dims["width"]
-                 if not data.get("height") and native_dims.get("height"):
-                     data["height"] = native_dims["height"]
-        except Exception:
-             pass
-
         if not metadata_result.ok:
             self._log_metadata_issue(
                 logging.WARNING,
@@ -553,67 +539,37 @@ class MetadataService:
 
         from ...shared import classify_file
 
-        # Group files by kind to optimize tool invocations
-        images = []
-        videos = []
-        audios = []
-        others = []
+        def _group_existing_paths(paths: list[str]):
+            images: list[str] = []
+            videos: list[str] = []
+            audios: list[str] = []
+            others: list[str] = []
+            for path in paths:
+                if not os.path.exists(path):
+                    continue
+                kind = classify_file(path)
+                if kind == "image":
+                    images.append(path)
+                elif kind == "video":
+                    videos.append(path)
+                elif kind == "audio":
+                    audios.append(path)
+                else:
+                    others.append(path)
+            return images, videos, audios, others
 
-        for path in file_paths:
-            if not os.path.exists(path):
-                continue
-            kind = classify_file(path)
-            if kind == "image":
-                images.append(path)
-            elif kind == "video":
-                videos.append(path)
-            elif kind == "audio":
-                audios.append(path)
-            else:
-                others.append(path)
+        images, videos, audios, others = _group_existing_paths(file_paths)
 
-        results = {}
-
+        results: Dict[str, Result[Dict[str, Any]]] = {}
         probe_mode = await self._resolve_probe_mode(probe_mode_override)
 
-        exif_targets = []
-        ffprobe_targets = []
-        seen_exif = set()
-        seen_ffprobe = set()
-
-        # 1. Optimistic native extraction
-        # Try for all images to get dimensions at minimum.
-        # For PNGs, if full metadata is found, we might skip ExifTool.
-        native_cache: Dict[str, Dict[str, Any]] = {}
-        
-        for path in images:
-            if probe_mode == "exiftool": # Forced check
-                continue
-                
-            native_res = await extract_png_metadata_native(path) # Supports all images (dimensions) now
-            if native_res:
-                native_cache[path] = native_res
-                
-                # Decision: Is this result "complete" enough to skip ExifTool?
-                # For PNG: If we have workflow/prompt OR just dimensions, we often trust Pillow for PNGs in ComfyUI ecosystem.
-                # NOTE: Only skip ExifTool if it is actually a PNG, other formats might need ExifTool for metadata hidden in EXIF tags.
-                if path.lower().endswith(".png"):
-                     combined = {
-                         "file_info": self._get_file_info(path),
-                         "exif": None,
-                         **native_res
-                     }
-                     await self._enrich_with_geninfo_async(combined)
-                     # If we have workflow/prompt, it's definitely full. Result handles partial too.
-                     results[path] = Result.Ok(combined, quality="full")
-                     seen_exif.add(path)
-
-        # 2. Schedule remaining files for tools
+        # Schedule tool targets (dedupe to avoid duplicate subprocess work).
+        exif_targets: list[str] = []
+        ffprobe_targets: list[str] = []
+        seen_exif: set[str] = set()
+        seen_ffprobe: set[str] = set()
 
         for path in [*images, *videos, *audios]:
-            if path in results:
-                continue
-
             backends = pick_probe_backend(path, settings_override=probe_mode)
             if "exiftool" in backends and path not in seen_exif:
                 seen_exif.add(path)
@@ -622,24 +578,28 @@ class MetadataService:
                 seen_ffprobe.add(path)
                 ffprobe_targets.append(path)
 
-        # Batch ExifTool for targets that requested it
-        exif_results = {}
-        if exif_targets:
-            exif_results = self.exiftool.read_batch(exif_targets)
+        exif_results: Dict[str, Result[Dict[str, Any]]] = self.exiftool.read_batch(exif_targets) if exif_targets else {}
+        ffprobe_results: Dict[str, Result[Dict[str, Any]]] = self.ffprobe.read_batch(ffprobe_targets) if ffprobe_targets else {}
 
-        # Batch FFProbe for videos only when enabled
-        ffprobe_results = {}
-        if ffprobe_targets:
-            ffprobe_results = self.ffprobe.read_batch(ffprobe_targets)
+        def _exif_for(path: str) -> Optional[Dict[str, Any]]:
+            ex_res = exif_results.get(path)
+            return ex_res.data if ex_res and ex_res.ok else None
 
-        # Process images (remaining)
+        def _ffprobe_for(path: str) -> Optional[Dict[str, Any]]:
+            ff_res = ffprobe_results.get(path)
+            return ff_res.data if ff_res and ff_res.ok else None
+
+        async def _finalize_ok(path: str, combined: Dict[str, Any], metadata_result: Result[Dict[str, Any]]):
+            await self._enrich_with_geninfo_async(combined)
+            quality = metadata_result.meta.get("quality", "none")
+            results[path] = Result.Ok(combined, quality=quality)
+
+        # Images
         for path in images:
             if path in results:
                 continue
-
             ext = os.path.splitext(path)[1].lower()
-            ex_res = exif_results.get(path)
-            exif_data = ex_res.data if ex_res and ex_res.ok else None
+            exif_data = _exif_for(path)
 
             if ext == ".png":
                 metadata_result = extract_png_metadata(path, exif_data)
@@ -649,69 +609,54 @@ class MetadataService:
                 metadata_result = Result.Ok({
                     "workflow": None,
                     "prompt": None,
-                    "quality": "partial" if exif_data else "none"
+                    "quality": "partial" if exif_data else "none",
                 })
 
             if metadata_result.ok:
                 combined = {
                     "file_info": self._get_file_info(path),
                     "exif": exif_data,
-                    **metadata_result.data
+                    **metadata_result.data,
                 }
-                await self._enrich_with_geninfo_async(combined)
-
-                quality = metadata_result.meta.get("quality", "none")
-                results[path] = Result.Ok(combined, quality=quality)
+                await _finalize_ok(path, combined, metadata_result)
             else:
                 results[path] = metadata_result
 
-        # Process videos
+        # Videos
         for path in videos:
             if path in results:
                 continue
-
-            ex_res = exif_results.get(path)
-            exif_data = ex_res.data if ex_res and ex_res.ok else None
-            
-            ff_res = ffprobe_results.get(path)
-            ffprobe_data = ff_res.data if ff_res and ff_res.ok else None
+            exif_data = _exif_for(path)
+            ffprobe_data = _ffprobe_for(path)
 
             metadata_result = extract_video_metadata(path, exif_data, ffprobe_data)
-
             if metadata_result.ok:
                 combined = {
                     "file_info": self._get_file_info(path),
                     "exif": exif_data,
                     "ffprobe": ffprobe_data,
-                    **metadata_result.data
+                    **metadata_result.data,
                 }
-                await self._enrich_with_geninfo_async(combined)
-
-                quality = metadata_result.meta.get("quality", "none")
-                results[path] = Result.Ok(combined, quality=quality)
+                await _finalize_ok(path, combined, metadata_result)
             else:
                 results[path] = metadata_result
 
-        # Process audio (ExifTool only)
+        # Audio (ExifTool only)
         for path in audios:
             if path in results:
                 continue
-            
-            ex_res = exif_results.get(path)
-            exif_data = ex_res.data if ex_res and ex_res.ok else None
-            
-            results[path] = Result.Ok({
-                "file_info": self._get_file_info(path),
-                "exif": exif_data,
-                "quality": "partial" if exif_data else "none"
-            }, quality="partial" if exif_data else "none")
+            exif_data = _exif_for(path)
+            quality = "partial" if exif_data else "none"
+            results[path] = Result.Ok(
+                {"file_info": self._get_file_info(path), "exif": exif_data, "quality": quality},
+                quality=quality,
+            )
 
-        # Process other files
+        # Other
         for path in others:
-            results[path] = Result.Ok({
-                "file_info": self._get_file_info(path),
-                "quality": "none"
-            }, quality="none")
+            if path in results:
+                continue
+            results[path] = Result.Ok({"file_info": self._get_file_info(path), "quality": "none"}, quality="none")
 
         return results
 

@@ -1,6 +1,7 @@
 import { comfyPrompt, comfyConfirm } from "../../../app/dialogs.js";
 import { comfyToast } from "../../../app/toast.js";
 import { listCollections, createCollection, deleteCollection } from "../../../api/client.js";
+import { t } from "../../../app/i18n.js";
 
 function createMenuItem(label, { right = null, checked = false, danger = false } = {}) {
     const btn = document.createElement("button");
@@ -44,13 +45,13 @@ export function createCollectionsController({ state, collectionsBtn, collections
     const render = async () => {
         collectionsMenu.replaceChildren();
 
-        const createBtn = createMenuItem("Create collection...");
+        const createBtn = createMenuItem(t("ctx.createCollection"));
         createBtn.addEventListener("click", async () => {
-            const name = await comfyPrompt("Create collection", "My collection");
+            const name = await comfyPrompt(t("dialog.createCollection"), t("dialog.collectionPlaceholder"));
             if (!name) return;
             const res = await createCollection(name);
             if (!res?.ok) {
-                comfyToast(res?.error || "Failed to create collection.", "error");
+                comfyToast(res?.error || t("toast.failedCreateCollection"), "error");
                 return;
             }
             state.collectionId = String(res.data?.id || "");
@@ -64,7 +65,7 @@ export function createCollectionsController({ state, collectionsBtn, collections
         collectionsMenu.appendChild(createBtn);
 
             if (state.collectionId) {
-                const exitBtn = createMenuItem(`Exit collection view`, { right: state.collectionName || null });
+                const exitBtn = createMenuItem(t("ctx.exitCollection"), { right: state.collectionName || null });
                 exitBtn.addEventListener("click", async () => {
                     state.collectionId = "";
                     state.collectionName = "";
@@ -86,7 +87,7 @@ export function createCollectionsController({ state, collectionsBtn, collections
             const empty = document.createElement("div");
             empty.className = "mjr-muted";
             empty.style.cssText = "padding: 10px 12px; opacity: 0.75;";
-            empty.textContent = "No collections yet.";
+            empty.textContent = t("msg.noCollections");
             collectionsMenu.appendChild(empty);
             return;
         }
@@ -127,11 +128,11 @@ export function createCollectionsController({ state, collectionsBtn, collections
             delBtn.addEventListener("click", async (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                const ok = await comfyConfirm(`Delete collection "${name}"?`);
+                const ok = await comfyConfirm(t("dialog.deleteCollection", `Delete collection "${name}"?`, { name }));
                 if (!ok) return;
                 const res = await deleteCollection(id);
                 if (!res?.ok) {
-                    comfyToast(res?.error || "Failed to delete collection.", "error");
+                    comfyToast(res?.error || t("toast.failedDeleteCollection"), "error");
                     return;
                 }
                 if (state.collectionId === id) {

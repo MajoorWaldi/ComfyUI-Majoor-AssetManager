@@ -60,20 +60,33 @@ export class VirtualGrid {
         this.renderPending = false;
         this.rafId = 0;
         this.lastWidth = 0;
+        this._resizeDebounce = 0;
 
         // Observer for container width changes
+        const scheduleResize = (width) => {
+            if (this._resizeDebounce) {
+                clearTimeout(this._resizeDebounce);
+            }
+            this._resizeDebounce = window.setTimeout(() => {
+                this._resizeDebounce = 0;
+                if (width > 0) {
+                    this.lastWidth = width;
+                    this.onResize();
+                }
+            }, 100);
+        };
+
         this.resizeObserver = new ResizeObserver((entries) => {
             // Use the container's actual content width (excludes border/scrollbar of itself)
             // entry.contentRect.width is reliable for the observed element
             for (const entry of entries) {
                  if (entry.target === this.container) {
                      const width = entry.contentRect.width;
-                     if (width > 0 && Math.abs(width - this.lastWidth) > 2) {
-                        this.lastWidth = width;
-                        this.onResize();
-                     }
-                     break; // Only care about container
-                 }
+                      if (width > 0 && Math.abs(width - this.lastWidth) > 20) {
+                         scheduleResize(width);
+                      }
+                      break; // Only care about container
+                  }
             }
         });
         // Always observe container for correct width relative to parent padding/scrollbars
@@ -299,29 +312,32 @@ export class VirtualGrid {
     render() {
         if (!this.items.length || this.columnCount < 1) return;
 
-        // Fix: Robust scroll position reading
+        // Cache layout rects to avoid repeated DOM reads
         let scrollTop = 0;
         let viewportHeight = 0;
-        
+        const safeRect = (el) => {
+            try {
+                return el?.getBoundingClientRect?.() || null;
+            } catch {
+                return null;
+            }
+        };
+        const containerRect = safeRect(this.container);
+        const rootRect = this.scrollTarget === window ? null : safeRect(this.scrollElement);
+
         if (this.scrollTarget === window) {
             viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-            // Use container-relative scroll so virtualization stays correct even if the grid is not
-            // the first child inside the scrolling root.
-            try {
-                const containerTop = this.container.getBoundingClientRect().top;
-                scrollTop = Math.max(0, -containerTop);
-            } catch {
+            if (containerRect) {
+                scrollTop = Math.max(0, -containerRect.top);
+            } else {
                 scrollTop = window.scrollY || window.pageYOffset || document.documentElement.scrollTop || 0;
             }
         } else {
-            viewportHeight = this.scrollElement.clientHeight;
-            // Same idea as above, but relative to the scroll element's viewport.
-            try {
-                const rootTop = this.scrollElement.getBoundingClientRect().top;
-                const containerTop = this.container.getBoundingClientRect().top;
-                scrollTop = Math.max(0, -(containerTop - rootTop));
-            } catch {
-                scrollTop = this.scrollElement.scrollTop;
+            viewportHeight = this.scrollElement?.clientHeight || 0;
+            if (containerRect && rootRect) {
+                scrollTop = Math.max(0, -(containerRect.top - rootRect.top));
+            } else {
+                scrollTop = this.scrollElement?.scrollTop || 0;
             }
         }
         

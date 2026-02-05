@@ -89,6 +89,7 @@ export function createFileBadge(filename, kind, nameCollision = false) {
     }
 
     badge.textContent = ext + (nameCollision ? "+" : "");
+    badge.title = nameCollision ? `${ext} file (duplicate filename in view)` : `${ext} file`;
     badge.style.cssText = `
         position: absolute;
         top: 6px;
@@ -100,7 +101,7 @@ export function createFileBadge(filename, kind, nameCollision = false) {
         background: ${bgColor};
         color: white;
         text-transform: uppercase;
-        pointer-events: none;
+        pointer-events: auto;
         z-index: 10;
         letter-spacing: 0.5px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.3);
@@ -125,16 +126,27 @@ export function createWorkflowDot(asset) {
     const dot = document.createElement("span");
     dot.className = "mjr-workflow-dot";
 
+    const toBoolish = (v) => {
+        if (v === true) return true;
+        if (v === false) return false;
+        if (v === 1 || v === "1") return true;
+        if (v === 0 || v === "0") return false;
+        return null;
+    };
+
+    const hasWorkflow = toBoolish(asset?.has_workflow ?? asset?.hasWorkflow);
+    const hasGen = toBoolish(asset?.has_generation_data ?? asset?.hasGenerationData);
+
     let color = "var(--mjr-status-neutral, #666)";
     let title = "Not parsed yet";
 
-    if (asset.has_workflow && asset.has_generation_metadata) {
+    if (hasWorkflow === true && hasGen === true) {
         color = "var(--mjr-status-success, #4CAF50)";
-        title = "Complete: Workflow + Generation metadata";
-    } else if (asset.has_workflow || asset.has_generation_metadata) {
+        title = "Complete: Workflow + Generation data";
+    } else if (hasWorkflow === true || hasGen === true) {
         color = "var(--mjr-status-warning, #FF9800)";
-        title = asset.has_workflow ? "Partial: Workflow only" : "Partial: Generation metadata only";
-    } else if (asset.has_workflow === false || asset.has_generation_metadata === false) {
+        title = hasWorkflow === true ? "Partial: Workflow only" : "Partial: Generation data only";
+    } else if (hasWorkflow === false && hasGen === false) {
         color = "var(--mjr-status-error, #f44336)";
         title = "No workflow or generation data";
     }
@@ -160,6 +172,7 @@ export function createRatingBadge(rating) {
 
     const badge = document.createElement("div");
     badge.className = "mjr-rating-badge";
+    badge.title = `Rating: ${ratingValue} star${ratingValue > 1 ? "s" : ""}`;
     badge.style.cssText = `
         position: absolute;
         top: 6px;
@@ -203,6 +216,7 @@ export function createTagsBadge(tags) {
     }
 
     badge.textContent = tags.join(", ");
+    badge.title = `Tags: ${tags.join(", ")}`;
     badge.style.cssText = `
         position: absolute;
         bottom: 6px;

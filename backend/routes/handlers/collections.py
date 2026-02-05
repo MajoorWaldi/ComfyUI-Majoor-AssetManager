@@ -54,26 +54,25 @@ def _minimal_asset_from_item(item: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         stat = None
 
-    return {
-        "id": None,
-        "filename": filename,
-        "subfolder": subfolder,
-        "filepath": fp,
-        "kind": kind,
-        "ext": p.suffix.lower(),
-        "size": int(getattr(stat, "st_size", 0) or 0) if stat else 0,
-        "mtime": int(getattr(stat, "st_mtime", 0) or 0) if stat else 0,
-        "width": None,
-        "height": None,
-        "duration": None,
-        "rating": 0,
-        "tags": [],
-        "has_workflow": 0,
-        "has_generation_data": 0,
-        "has_generation_metadata": 0,
-        "type": asset_type,
-        "root_id": root_id,
-    }
+        return {
+            "id": None,
+            "filename": filename,
+            "subfolder": subfolder,
+            "filepath": fp,
+            "kind": kind,
+            "ext": p.suffix.lower(),
+            "size": int(getattr(stat, "st_size", 0) or 0) if stat else 0,
+            "mtime": int(getattr(stat, "st_mtime", 0) or 0) if stat else 0,
+            "width": None,
+            "height": None,
+            "duration": None,
+            "rating": 0,
+            "tags": [],
+            "has_workflow": 0,
+            "has_generation_data": 0,
+            "type": asset_type,
+            "root_id": root_id,
+        }
 
 
 def register_collections_routes(routes: web.RouteTableDef) -> None:
@@ -168,12 +167,8 @@ def register_collections_routes(routes: web.RouteTableDef) -> None:
                             a["rating"] = int(db_row.get("rating") or 0)
                             a["tags"] = db_row.get("tags") or []
                             a["has_workflow"] = int(db_row.get("has_workflow") or 0)
-                            has_gen = db_row.get("has_generation_data")
-                            if has_gen is None:
-                                has_gen = db_row.get("has_generation_metadata")
-                            has_gen = int(has_gen or 0)
+                            has_gen = int(db_row.get("has_generation_data") or 0)
                             a["has_generation_data"] = has_gen
-                            a["has_generation_metadata"] = has_gen
                             if db_row.get("root_id"):
                                 a["root_id"] = db_row.get("root_id")
         except Exception as exc:

@@ -41,6 +41,13 @@ async def test_search_matches_tags_and_metadata(services):
     )
     assert insert_meta.ok, insert_meta.error
 
+    # Regression: Workflow-only filter should not hide assets when DB flags are stale
+    # but metadata_raw still contains prompt/workflow.
+    res_wf = await index.search("*", limit=50, offset=0, filters={"has_workflow": True})
+    assert res_wf.ok, res_wf.error
+    wf_ids = [a.get("id") for a in (res_wf.data or {}).get("assets", [])]
+    assert asset_id in wf_ids
+
     # Search by tag
     res = await index.search("redpanda", limit=50, offset=0)
     assert res.ok, res.error

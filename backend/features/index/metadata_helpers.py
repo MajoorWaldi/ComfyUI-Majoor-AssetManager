@@ -7,8 +7,13 @@ import json
 from typing import Dict, Any, Tuple, Optional
 
 from ...config import MAX_METADATA_JSON_BYTES
-from ...shared import Result, ErrorCode
+from ...shared import Result
 from ...adapters.db.sqlite import Sqlite
+from ..metadata.parsing_utils import (
+    looks_like_comfyui_workflow,
+    looks_like_comfyui_prompt_graph,
+    try_parse_json_text,
+)
 
 MAX_TAG_LENGTH = 100
 
@@ -77,20 +82,48 @@ class MetadataHelpers:
                 return False
             return False
 
+        def _coerce_json_dict(value: Any) -> Optional[Dict[str, Any]]:
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str):
+                parsed = try_parse_json_text(value)
+                return parsed if isinstance(parsed, dict) else None
+            return None
+
         if metadata_result and metadata_result.ok and metadata_result.data:
             meta = metadata_result.data
+
+            raw_workflow = meta.get("workflow")
+            raw_prompt = meta.get("prompt")
+
+            workflow_obj = _coerce_json_dict(raw_workflow)
+            prompt_obj = _coerce_json_dict(raw_prompt)
+
+            workflow_ok = bool(workflow_obj and looks_like_comfyui_workflow(workflow_obj))
+            prompt_ok = bool(prompt_obj and looks_like_comfyui_prompt_graph(prompt_obj))
+
+            # Backward-compatible: if the extractor stored non-empty strings but we can't parse,
+            # still count it as "has_workflow" so Workflow-only filters don't hide the asset.
+            workflow_present = bool(raw_workflow)
+            prompt_present = bool(raw_prompt)
+
             has_workflow = bool(
-                meta.get("workflow") or
+                workflow_ok or
+                prompt_ok or
+                workflow_present or
+                prompt_present or
                 meta.get("parameters")
             )
+
             has_generation_data = bool(
                 meta.get("parameters") or
                 meta.get("geninfo") or
                 meta.get("model") or
                 meta.get("seed") or
-                _graph_has_sampler(meta.get("prompt")) or
-                _graph_has_sampler(meta.get("workflow"))
+                _graph_has_sampler(prompt_obj or raw_prompt) or
+                _graph_has_sampler(workflow_obj or raw_workflow)
             )
+
             metadata_quality = meta.get("quality", "none")
             metadata_raw_json = json.dumps(meta)
 
@@ -220,6 +253,29 @@ class MetadataHelpers:
                     if isinstance(p_val, str) and p_val.strip():
                         extras.append(p_val.strip())
 
+                # Workflow Type (T2I, I2V, etc.)
+                engine = geninfo.get("engine")
+                if isinstance(engine, dict):
+                    wf_type = engine.get("type")
+                    if isinstance(wf_type, str) and wf_type.strip():
+                        extras.append(wf_type.strip()) # e.g. "I2V", "T2I"
+
+                # Input files (to find assets using a specific source)
+                inputs = geninfo.get("inputs")
+                if isinstance(inputs, list):
+                    for inp in inputs:
+                        if isinstance(inp, dict):
+                            fname = inp.get("filename")
+                            if isinstance(fname, str) and fname.strip():
+                                extras.append(fname.strip())
+                            
+                            role = inp.get("role")
+                            if isinstance(role, str) and role.strip() and role not in ("secondary",):
+                                # Index roles too? Maybe overkill to add "first_frame" to index, 
+                                # but "mask" or "source" could be useful. 
+                                # Let's keep it simple for now and just index the filenames.
+                                pass
+
                 if extras:
                     if extracted_tags_text:
                         extracted_tags_text += " " + " ".join(extras)
@@ -313,30 +369,31 @@ class MetadataHelpers:
         Returns:
             True if metadata was refreshed, False otherwise
         """
-        result = await db.aquery(
-            "SELECT has_workflow, has_generation_data, metadata_raw FROM asset_metadata WHERE asset_id = ?",
-            (asset_id,)
-        )
-        if not result.ok:
-            return False
+        async with db.lock_for_asset(asset_id):
+            result = await db.aquery(
+                "SELECT has_workflow, has_generation_data, metadata_raw FROM asset_metadata WHERE asset_id = ?",
+                (asset_id,)
+            )
+            if not result.ok:
+                return False
 
-        current = result.data[0] if result.data else None
-        new_has_workflow, new_has_generation_data, _, new_metadata_raw = MetadataHelpers.prepare_metadata_fields(metadata_result)
+            current = result.data[0] if result.data else None
+            new_has_workflow, new_has_generation_data, _, new_metadata_raw = MetadataHelpers.prepare_metadata_fields(metadata_result)
 
-        current_has_workflow = current["has_workflow"] if current else 0
-        current_has_generation = current["has_generation_data"] if current else 0
-        current_raw = current["metadata_raw"] if current else ""
+            current_has_workflow = current["has_workflow"] if current else 0
+            current_has_generation = current["has_generation_data"] if current else 0
+            current_raw = current["metadata_raw"] if current else ""
 
-        if (current_has_workflow == (1 if new_has_workflow else 0) and
-                current_has_generation == (1 if new_has_generation_data else 0) and
-                current_raw == new_metadata_raw):
-            return False
+            if (current_has_workflow == (1 if new_has_workflow else 0) and
+                    current_has_generation == (1 if new_has_generation_data else 0) and
+                    current_raw == new_metadata_raw):
+                return False
 
-        write_result = await MetadataHelpers.write_asset_metadata_row(db, asset_id, metadata_result)
-        if write_result.ok:
-            # We assume write_journal_fn is async now
-            await write_journal_fn(filepath, base_dir, state_hash, mtime, size)
-        return write_result.ok
+            write_result = await MetadataHelpers.write_asset_metadata_row(db, asset_id, metadata_result)
+            if write_result.ok:
+                # We assume write_journal_fn is async now
+                await write_journal_fn(filepath, base_dir, state_hash, mtime, size)
+            return write_result.ok
 
     @staticmethod
     async def retrieve_cached_metadata(db: Sqlite, filepath: str, state_hash: str) -> Optional[Result[Dict[str, Any]]]:

@@ -1,5 +1,6 @@
 import { createGenerationSection } from "../../components/sidebar/sections/GenerationSection.js";
 import { createWorkflowMinimapSection } from "../../components/sidebar/sections/WorkflowMinimapSection.js";
+import { createFileInfoSection } from "../../components/sidebar/sections/FileInfoSection.js";
 import { createInfoBox } from "../../components/sidebar/utils/dom.js";
 import { safeCall as baseSafeCall } from "../../utils/safeCall.js";
 import { APP_CONFIG } from "../../app/config.js";
@@ -344,16 +345,18 @@ export function buildViewerMetadataBlocks({ title, asset, ui } = {}) {
     }
 
     const gen = safeCall(() => createGenerationSection(asset), null);
+    const fileInfo = safeCall(() => createFileInfoSection(asset), null);
     
     let wf = null;
     if (APP_CONFIG.WORKFLOW_MINIMAP_ENABLED !== false) {
         wf = safeCall(() => createWorkflowMinimapSection(asset), null);
     }
 
+    if (fileInfo) block.appendChild(fileInfo);
     if (gen) block.appendChild(gen);
     if (wf) block.appendChild(wf);
 
-    if (!gen && !wf) {
+    if (!gen && !wf && !fileInfo) {
         // Avoid showing "no data" when we have an explicit status box.
         if (!(status && typeof status === "object" && (status.kind === "fetch_error" || status.kind === "media_pipeline")) && !ui?.loading) {
             const empty = document.createElement("div");

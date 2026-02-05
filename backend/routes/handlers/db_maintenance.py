@@ -54,10 +54,14 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
     @routes.post("/mjr/am/db/reset")
     async def db_reset(request: web.Request):
         """
-        Reset database and trigger rescan.
+        Legacy DB reset endpoint (compat).
+
+        This performs a hard DB reset (delete + recreate SQLite files) and triggers a rescan.
+        It is gated behind the same security checks as /mjr/am/index/reset.
         """
         import asyncio
         from backend.config import WATCHER_PATHS
+        from ..core.security import _require_operation_enabled, _require_write_access, _resolve_security_prefs
 
         csrf = _csrf_error(request)
         if csrf:
@@ -66,6 +70,15 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
         svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
+
+        prefs = await _resolve_security_prefs(svc)
+        op = _require_operation_enabled("reset_index", prefs=prefs)
+        if not op.ok:
+            return _json_response(op)
+
+        auth = _require_write_access(request)
+        if not auth.ok:
+            return _json_response(auth)
 
         db = svc.get("db")
         index_service = svc.get("index")
@@ -85,4 +98,4 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
              asyncio.create_task(index_service.scan_directory(str(path), recursive=True, incremental=False))
              started_scans.append(str(path))
              
-        return _json_response(Result.Ok({"reset": True, "scans_triggered": started_scans}))
+        return _json_response(Result.Ok({"reset": True, "scans_triggered": started_scans, "file_ops": (reset_res.meta or {})}))

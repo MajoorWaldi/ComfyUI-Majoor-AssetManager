@@ -19,8 +19,10 @@ import {
     MENU_Z_INDEX,
     safeEscapeSelector,
     setMenuSessionCleanup,
+    cleanupMenu,
 } from "../../components/contextmenu/MenuCore.js";
 import { hideMenu, clearMenu } from "../../components/contextmenu/MenuCore.js";
+import { getShortcutDisplay } from "../grid/GridKeyboard.js";
 // Bulk operations removed - using local helpers
 const getSelectedAssetIds = (gridContainer) => {
     const selected = new Set();
@@ -329,10 +331,10 @@ export function bindGridContextMenu({
              try {
                  gridContainer.dataset.mjrSelectedAssetIds = JSON.stringify(newSelection);
                  // Dispatch event to sync state
-                 safeDispatchCustomEvent(gridContainer, "mjr:selection-changed", {
+                 safeDispatchCustomEvent("mjr:selection-changed", {
                      selectedIds: newSelection,
                      selectedAssets: [asset]
-                 });
+                 }, { target: gridContainer, warnPrefix: "[GridContextMenu]" });
              } catch {}
              // Update local set for menu logic
              selectedIds = new Set(newSelection);
@@ -352,7 +354,7 @@ export function bindGridContextMenu({
 
         // Open Viewer
         menu.appendChild(
-            createItem("Open Viewer", "pi pi-image", null, () => {
+            createItem("Open Viewer", "pi pi-image", getShortcutDisplay("OPEN_VIEWER"), () => {
                 // For a small selection set, open the selection (useful for quick compare).
                 // Otherwise open the whole grid so navigation works.
                 try {
@@ -377,7 +379,7 @@ export function bindGridContextMenu({
         );
 
         menu.appendChild(
-            createItem("Show metadata panel", "pi pi-info-circle", "D", () => {
+            createItem("Show metadata panel", "pi pi-info-circle", getShortcutDisplay("METADATA_PANEL"), () => {
                 try {
                     hideMenu(menu);
                 } catch {}
@@ -398,7 +400,7 @@ export function bindGridContextMenu({
         const selectedCount = selectedAssets.length;
         if (selectedCount === 2) {
             menu.appendChild(
-                createItem("Compare A/B (2 selected)", "pi pi-clone", null, () => {
+                createItem("Compare A/B (2 selected)", "pi pi-clone", getShortcutDisplay("COMPARE_AB"), () => {
                     try {
                         const viewer = getViewerInstance();
                         viewer.open(selectedAssets, 0);
@@ -409,7 +411,7 @@ export function bindGridContextMenu({
         }
         if (selectedCount >= 2 && selectedCount <= 4) {
             menu.appendChild(
-                createItem(`Side-by-side (2x2) (${selectedCount} selected)`, "pi pi-table", null, () => {
+                createItem(`Side-by-side (2x2) (${selectedCount} selected)`, "pi pi-table", getShortcutDisplay("SIDE_BY_SIDE"), () => {
                     try {
                         const viewer = getViewerInstance();
                         viewer.open(selectedAssets, 0);
@@ -421,7 +423,7 @@ export function bindGridContextMenu({
 
         // Open in Folder
         menu.appendChild(
-            createItem("Open in Folder", "pi pi-folder-open", null, async () => {
+            createItem("Open in Folder", "pi pi-folder-open", getShortcutDisplay("OPEN_IN_FOLDER"), async () => {
                 if (!asset?.id) return;
                 const res = await openInFolder(asset.id);
                 if (!res?.ok) {
@@ -434,7 +436,7 @@ export function bindGridContextMenu({
 
         // Copy file path
         menu.appendChild(
-            createItem("Copy file path", "pi pi-copy", null, async () => {
+            createItem("Copy file path", "pi pi-copy", getShortcutDisplay("COPY_PATH"), async () => {
                 const p = asset?.filepath ? String(asset.filepath) : "";
                 if (!p) {
                     comfyToast("No file path available for this asset.", "error");
@@ -452,7 +454,7 @@ export function bindGridContextMenu({
 
         // Download
         menu.appendChild(
-            createItem("Download", "pi pi-download", null, () => {
+            createItem("Download", "pi pi-download", getShortcutDisplay("DOWNLOAD"), () => {
                 if (!asset || !asset.filepath) {
                     console.error("No filepath for asset", asset);
                     return;
@@ -474,7 +476,7 @@ export function bindGridContextMenu({
 
         // Add to collection (single or multi)
         menu.appendChild(
-                createItem("Add to collection...", "pi pi-bookmark", null, async () => {
+                createItem("Add to collection...", "pi pi-bookmark", getShortcutDisplay("ADD_TO_COLLECTION"), async () => {
                     try {
                         hideMenu(menu);
                     } catch {}
@@ -519,7 +521,7 @@ export function bindGridContextMenu({
         menu.appendChild(separator());
 
         // Edit Tags
-        menu.appendChild(createItem("Edit Tags...", "pi pi-tags", null, () => {
+        menu.appendChild(createItem("Edit Tags...", "pi pi-tags", getShortcutDisplay("EDIT_TAGS"), () => {
             try {
                 hideMenu(menu);
             } catch {}
@@ -534,18 +536,24 @@ export function bindGridContextMenu({
 
         // Rating submenu (hover)
         menu.appendChild(separator());
-        const ratingRoot = createItem("Set rating", "pi pi-star", "›", () => {}, { disabled: !asset?.id });
+        const ratingRoot = createItem("Set rating", "pi pi-star", "1-5 ›", () => {}, { disabled: !asset?.id });
         ratingRoot.style.cursor = !asset?.id ? "default" : "pointer";
         menu.appendChild(ratingRoot);
 
         let hideTimer = null;
         const ratingSubmenu = getOrCreateRatingSubmenu();
+        ratingRoot.dataset.mjrHasSubmenu = "true";
+        ratingRoot._mjrSubmenuTarget = ratingSubmenu;
         // Prevent listener buildup across repeated opens (submenu is reused).
         try {
             ratingSubmenu._mjrAbortController?.abort?.();
         } catch {}
+        try {
+            ratingRoot._mjrAbortController?.abort?.();
+        } catch {}
         const ratingAC = new AbortController();
         ratingSubmenu._mjrAbortController = ratingAC;
+        ratingRoot._mjrAbortController = ratingAC;
 
         const closeRatingSubmenu = () => {
             try {
@@ -640,7 +648,7 @@ export function bindGridContextMenu({
 
         // Rename (single only)
         menu.appendChild(
-            createItem("Rename…", "pi pi-pencil", null, async () => {
+            createItem("Rename…", "pi pi-pencil", getShortcutDisplay("RENAME"), async () => {
                 if (!asset?.id) return;
                 
                 const currentName = asset.filename || "";
@@ -677,7 +685,7 @@ export function bindGridContextMenu({
         // Delete (single or multi)
         if (isMultiSelected) {
             menu.appendChild(
-                createItem(`Delete ${selectedIds.size} files...`, "pi pi-trash", null, async () => {
+                createItem(`Delete ${selectedIds.size} files...`, "pi pi-trash", getShortcutDisplay("DELETE"), async () => {
                    // Confirmation removed as per user request
                     try {
                         // Delete each asset individually
@@ -711,7 +719,7 @@ export function bindGridContextMenu({
             );
         } else {
             menu.appendChild(
-                createItem("Delete...", "pi pi-trash", null, async () => {
+                createItem("Delete...", "pi pi-trash", getShortcutDisplay("DELETE"), async () => {
                    // Confirmation removed as per user request
                     try {
                         const result = await deleteAsset(asset.id);
@@ -753,6 +761,9 @@ export function bindGridContextMenu({
         } catch {}
         try {
             gridContainer._mjrGridContextMenuUnbind = null;
+        } catch {}
+        try {
+            cleanupMenu(menu);
         } catch {}
     };
     gridContainer._mjrGridContextMenuUnbind = unbind;

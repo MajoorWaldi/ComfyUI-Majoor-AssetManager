@@ -29,7 +29,7 @@ export function safeEscapeSelector(value) {
     return str.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, "\\$1");
 }
 
-export function destroyMenu(menu) {
+export function cleanupMenu(menu) {
     if (!menu) return;
     try {
         menu._mjrAbortController?.abort?.();
@@ -47,6 +47,8 @@ export function destroyMenu(menu) {
         menu.remove?.();
     } catch {}
 }
+
+export { cleanupMenu as destroyMenu };
 
 export function setMenuSessionCleanup(menu, fn) {
     if (!menu) return;
@@ -93,6 +95,39 @@ export function getOrCreateMenu({
 
     const ac = new AbortController();
     menu._mjrAbortController = ac;
+
+    const navHandler = (e) => {
+        try {
+            if (!menu || !["ArrowDown", "ArrowUp", "ArrowRight"].includes(e.key)) return;
+            const items = Array.from(
+                menu.querySelectorAll('[role="menuitem"]:not([aria-disabled="true"])')
+            );
+            if (!items.length) return;
+
+            const current = items.indexOf(document.activeElement);
+            if (e.key === "ArrowRight") {
+                e.preventDefault();
+                const active = document.activeElement;
+                if (active?.dataset?.mjrHasSubmenu === "true") {
+                    try {
+                        active.dispatchEvent(
+                            new MouseEvent("mouseenter", { bubbles: true, cancelable: true })
+                        );
+                    } catch {}
+                }
+                return;
+            }
+
+            e.preventDefault();
+            const direction = e.key === "ArrowDown" ? 1 : -1;
+            const next =
+                ((current >= 0 ? current : 0) + direction + items.length) % items.length;
+            items[next]?.focus();
+        } catch {}
+    };
+
+    menu._mjrNavHandler = navHandler;
+    menu.addEventListener("keydown", navHandler, { signal: ac.signal, capture: true });
 
     try {
         menu._mjrOnHideCallbacks = [];
@@ -169,9 +204,11 @@ export function hideMenu(menu) {
     try {
         if (typeof menu?._mjrHide === "function") {
             menu._mjrHide();
-            return;
+        } else {
+            menu.style.display = "none";
         }
-        menu.style.display = "none";
+        // Cleanup orphans immediately after hiding to avoid leaking detached menus.
+        cleanupMenu(menu);
     } catch {}
 }
 

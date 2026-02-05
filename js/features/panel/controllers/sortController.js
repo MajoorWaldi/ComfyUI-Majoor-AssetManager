@@ -1,9 +1,11 @@
+import { t } from "../../../app/i18n.js";
+
 export function createSortController({ state, sortBtn, sortMenu, sortPopover, popovers, reloadGrid, onChanged = null }) {
-    const sortOptions = [
-        { key: "mtime_desc", label: "Newest first" },
-        { key: "mtime_asc", label: "Oldest first" },
-        { key: "name_asc", label: "Name A → Z" },
-        { key: "name_desc", label: "Name Z → A" },
+    const getSortOptions = () => [
+        { key: "mtime_desc", label: t("sort.newest") },
+        { key: "mtime_asc", label: t("sort.oldest") },
+        { key: "name_asc", label: t("sort.nameAZ") },
+        { key: "name_desc", label: t("sort.nameZA") },
     ];
 
     const setSortIcon = (key) => {
@@ -17,6 +19,7 @@ export function createSortController({ state, sortBtn, sortMenu, sortPopover, po
 
     const renderSortMenu = () => {
         sortMenu.replaceChildren();
+        const sortOptions = getSortOptions();
         for (const opt of sortOptions) {
             const btn = document.createElement("button");
             btn.type = "button";

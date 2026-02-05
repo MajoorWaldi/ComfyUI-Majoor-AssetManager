@@ -224,7 +224,7 @@ export function createImageProcessor({
         const s = src.data;
 
         const total = w * h * 4;
-        const chunk = 220_000 * 4;
+        const chunk = 55_000 * 4;
         let i = 0;
 
         const step = () => {

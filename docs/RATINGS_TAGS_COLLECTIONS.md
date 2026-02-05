@@ -56,6 +56,17 @@ When ExifTool is available, ratings can be synced to file metadata:
 - Compatible with other applications that read ratings
 - Enabled/disabled via settings
 
+#### Windows rating mapping (why 99?)
+
+When sync is enabled, the manager writes both star ratings (0–5) and Windows-style percent fields (`RatingPercent` / `Microsoft:SharedUserRating`) for best Explorer compatibility.
+
+- 0★ → 0
+- 1★ → 1
+- 2★ → 25
+- 3★ → 50
+- 4★ → 75
+- 5★ → 99 (many Windows handlers treat 99 as “max”)
+
 ## Tagging System
 
 ### Understanding Tags

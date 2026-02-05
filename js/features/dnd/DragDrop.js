@@ -51,7 +51,7 @@ const cleanupWorkflowCache = () => {
     }
 };
 
-const tryLoadWorkflowToCanvas = async (payload, fallbackAbsPath = null) => {
+export const tryLoadWorkflowToCanvas = async (payload, fallbackAbsPath = null) => {
     const pl = payload && typeof payload === "object" ? payload : null;
     const rootId = pickRootId(pl);
 

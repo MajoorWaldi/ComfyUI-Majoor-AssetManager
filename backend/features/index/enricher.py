@@ -1,10 +1,11 @@
 """
 Metadata enricher - handles background metadata enrichment for assets.
 """
+from __future__ import annotations
+
 import os
-import threading
 import asyncio
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from ...shared import get_logger
 from ...adapters.db.sqlite import Sqlite
@@ -51,7 +52,7 @@ class MetadataEnricher:
         self._metadata_error_payload = metadata_error_payload_fn
         self._enrich_lock = asyncio.Lock()
         self._enrich_queue: List[str] = []
-        self._enrich_thread: Optional[threading.Thread] = None
+        self._enrich_task: Optional[asyncio.Task[None]] = None
         self._enrich_running = False
 
     async def start_enrichment(self, filepaths: List[str]) -> None:
@@ -71,10 +72,10 @@ class MetadataEnricher:
                     continue
                 self._enrich_queue.append(fp)
                 existing.add(fp)
-            if self._enrich_running and self._enrich_thread and self._enrich_thread.is_alive():
+            if self._enrich_running and self._enrich_task and not self._enrich_task.done():
                 return
             self._enrich_running = True
-            self._enrich_thread = asyncio.create_task(self._enrichment_worker())
+            self._enrich_task = asyncio.create_task(self._enrichment_worker())
 
     async def _enrichment_worker(self) -> None:
         """Background worker that processes the enrichment queue."""
@@ -82,14 +83,16 @@ class MetadataEnricher:
             while True:
                 async with self._enrich_lock:
                     if not self._enrich_queue:
-                        self._enrich_running = False
                         return
                     chunk = self._enrich_queue[:64]
                     del self._enrich_queue[:64]
                 await self._enrich_metadata_chunk(chunk)
-        except Exception:
+        except Exception as exc:
+            logger.warning("Metadata enrichment worker failed: %s", exc)
+        finally:
             async with self._enrich_lock:
                 self._enrich_running = False
+                self._enrich_task = None
 
     async def _enrich_metadata_chunk(self, filepaths: List[str]) -> None:
         """

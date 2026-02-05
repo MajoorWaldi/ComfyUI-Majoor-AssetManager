@@ -182,3 +182,4 @@ class AppSettings:
                 logger.info("Media probe backend set to %s", normalized)
                 return Result.Ok(normalized)
             return Result.Err("DB_ERROR", result.error or "Failed to persist probe backend")
+

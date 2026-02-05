@@ -16,7 +16,8 @@ export const ENDPOINTS = {
     // Index & Search
     SCAN: "/mjr/am/scan",
     INDEX_FILES: "/mjr/am/index-files",
-    INDEX_RESET: "/mjr/am/db/reset",
+    INDEX_RESET: "/mjr/am/index/reset",
+    DB_RESET: "/mjr/am/db/reset",
     SEARCH: "/mjr/am/search",
     LIST: "/mjr/am/list",
     ROOTS: "/mjr/am/roots",

@@ -455,12 +455,25 @@ export async function resetIndex(options = {}) {
         options.root_id ??
         options.customRoot ??
         null;
-    const body = {
-        scope,
-        reindex: _bool(options.reindex, true),
-        clear_scan_journal: _bool(options.clearScanJournal ?? options.clear_scan_journal, true),
-        clear_metadata_cache: _bool(options.clearMetadataCache ?? options.clear_metadata_cache, true),
-        rebuild_fts: _bool(options.rebuildFts ?? options.rebuild_fts, true),
+      const body = {
+          scope,
+          reindex: _bool(options.reindex, true),
+          // When scope=all, the backend defaults to a hard DB reset unless explicitly disabled.
+          hard_reset_db: _bool(
+              options.hardResetDb ??
+              options.hard_reset_db ??
+              options.deleteDbFiles ??
+              options.delete_db_files ??
+              options.deleteDb ??
+              options.delete_db ??
+              undefined,
+              scope === "all"
+          ),
+          clear_scan_journal: _bool(options.clearScanJournal ?? options.clear_scan_journal, true),
+          clear_metadata_cache: _bool(options.clearMetadataCache ?? options.clear_metadata_cache, true),
+          clear_asset_metadata: _bool(options.clearAssetMetadata ?? options.clear_asset_metadata, true),
+          clear_assets: _bool(options.clearAssets ?? options.clear_assets, true),
+          rebuild_fts: _bool(options.rebuildFts ?? options.rebuild_fts, true),
         incremental: _bool(options.incremental, false),
         fast: _bool(options.fast, true),
         background_metadata: _bool(options.backgroundMetadata ?? options.background_metadata, true),

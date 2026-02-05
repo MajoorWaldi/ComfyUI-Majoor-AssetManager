@@ -13,14 +13,22 @@ from typing import Any, Mapping, Optional
 
 from backend.shared import Result, classify_file, get_logger
 from backend.adapters.fs.list_cache_watcher import ensure_fs_list_cache_watching, get_fs_list_cache_token
-from backend.config import FS_LIST_CACHE_MAX, FS_LIST_CACHE_TTL_SECONDS, FS_LIST_CACHE_WATCHDOG, BG_SCAN_FAILURE_HISTORY_MAX, SCAN_PENDING_MAX
+from backend.config import (
+    FS_LIST_CACHE_MAX,
+    FS_LIST_CACHE_TTL_SECONDS,
+    FS_LIST_CACHE_WATCHDOG,
+    BG_SCAN_FAILURE_HISTORY_MAX,
+    SCAN_PENDING_MAX,
+    MANUAL_BG_SCAN_GRACE_SECONDS,
+)
+from shared.scan_throttle import normalize_scan_directory, should_skip_background_scan
 from ..core import _safe_rel_path, _is_within_root, _require_services
 
 logger = get_logger(__name__)
 
 # Locks for async concurrency safety
 _BACKGROUND_SCAN_LOCK = asyncio.Lock()
-_BACKGROUND_SCAN_LAST: dict[str, float] = {}
+_BACKGROUND_SCAN_LAST: dict[str, dict[str, Any]] = {}
 _BACKGROUND_SCAN_FAILURES: list[dict[str, Any]] = []
 _MAX_FAILURE_HISTORY = int(BG_SCAN_FAILURE_HISTORY_MAX)
 
@@ -50,23 +58,27 @@ async def _kickoff_background_scan(
 
     Used to ensure input/custom folders get indexed without blocking list requests.
     """
+    normalized_dir = normalize_scan_directory(directory)
+    if should_skip_background_scan(normalized_dir, source, root_id, MANUAL_BG_SCAN_GRACE_SECONDS):
+        return
+
     try:
-        key = f"{source}|{str(root_id or '')}|{str(directory)}"
+        key = f"{source}|{str(root_id or '')}|{normalized_dir}"
         now = time.time()
         
-        # Check rate limit
-        # No lock needed for simple dict access in single-threaded async
-        # unless yielding, but we'll stick to non-blocking check
-        last = _BACKGROUND_SCAN_LAST.get(key, 0)
-        if now - last < min_interval_seconds:
+        entry = _ensure_background_entry(key)
+        if entry["in_progress"]:
             return
-        _BACKGROUND_SCAN_LAST[key] = now
+        if now - entry["last"] < min_interval_seconds:
+            return
+        entry["last"] = now
+        entry["in_progress"] = False
 
     except Exception:
         return
 
     job = {
-        "directory": str(directory),
+        "directory": str(normalized_dir),
         "source": str(source),
         "root_id": str(root_id) if root_id is not None else None,
         "recursive": bool(recursive),
@@ -85,7 +97,7 @@ async def _kickoff_background_scan(
         
         # Enforce max pending size
         while len(_SCAN_PENDING) > _SCAN_PENDING_MAX:
-             _SCAN_PENDING.popitem(last=False)
+            _SCAN_PENDING.popitem(last=False)
 
 
 def _ensure_worker() -> None:
@@ -116,7 +128,13 @@ async def _worker_loop() -> None:
                 pass
             continue
 
+        entry: Optional[dict[str, Any]] = None
         try:
+            key = _build_task_key(task)
+            entry = _ensure_background_entry(key)
+            entry["in_progress"] = True
+            entry["last"] = time.time()
+
             # Import strictly locally or use the core helper to avoid circular imports if possible
             # But here we are effectively inside backend.routes.handlers
             # We can use the helper from core.
@@ -155,6 +173,10 @@ async def _worker_loop() -> None:
                 _record_scan_failure(str(task.get("directory")), str(task.get("source")), "EXCEPTION", "Unhandled exception")
             except Exception:
                 pass
+        finally:
+            if entry is not None:
+                entry["in_progress"] = False
+                entry["last"] = time.time()
         
         # Yield to event loop
         await asyncio.sleep(0)
@@ -172,6 +194,25 @@ def _record_scan_failure(directory: str, source: str, code: str, error: str) -> 
     # Trim
     while len(_BACKGROUND_SCAN_FAILURES) > _MAX_FAILURE_HISTORY:
         _BACKGROUND_SCAN_FAILURES.pop()
+
+
+def _ensure_background_entry(key: str) -> dict[str, Any]:
+    entry = _BACKGROUND_SCAN_LAST.get(key)
+    if isinstance(entry, dict):
+        return entry
+    if isinstance(entry, (int, float)):
+        entry = {"last": float(entry), "in_progress": False}
+    else:
+        entry = {"last": 0.0, "in_progress": False}
+    _BACKGROUND_SCAN_LAST[key] = entry
+    return entry
+
+
+def _build_task_key(task: dict[str, Any]) -> str:
+    source = str(task.get("source") or "output")
+    root_id = str(task.get("root_id") or "")
+    directory = normalize_scan_directory(str(task.get("directory") or ""))
+    return f"{source}|{root_id}|{directory}"
 
 
 async def _fs_cache_get_or_build(
@@ -257,7 +298,6 @@ async def _fs_cache_get_or_build(
                     "tags": [],
                     "has_workflow": 0,
                     "has_generation_data": 0,
-                    "has_generation_metadata": 0,
                     "type": asset_type,
                     "root_id": root_id,
                 }
@@ -366,12 +406,8 @@ async def _list_filesystem_assets(
                         asset["rating"] = int(db_row.get("rating") or 0)
                         asset["tags"] = db_row.get("tags") or []
                         asset["has_workflow"] = int(db_row.get("has_workflow") or 0)
-                        has_gen = db_row.get("has_generation_data")
-                        if has_gen is None:
-                            has_gen = db_row.get("has_generation_metadata")
-                        has_gen = int(has_gen or 0)
+                        has_gen = int(db_row.get("has_generation_data") or 0)
                         asset["has_generation_data"] = has_gen
-                        asset["has_generation_metadata"] = has_gen
                         # Prefer stored root_id if present (custom)
                         if db_row.get("root_id"):
                             asset["root_id"] = db_row.get("root_id")

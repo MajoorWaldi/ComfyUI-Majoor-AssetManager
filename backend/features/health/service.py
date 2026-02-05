@@ -161,87 +161,53 @@ class HealthService:
             Result with counters dict containing asset counts
         """
         try:
-            if roots:
-                where_sql, where_params = self._roots_where(roots)
-                # Count total assets
-                total_result = await self.db.aexecute(
-                    f"SELECT COUNT(*) as count FROM assets a WHERE {where_sql}",
-                    tuple(where_params),
-                    fetch=True
-                )
+            where_sql, where_params = self._roots_where(roots) if roots else ("1=1", [])
+            params = tuple(where_params)
 
-                # Count by kind
-                kind_result = await self.db.aexecute(
-                    f"SELECT a.kind, COUNT(*) as count FROM assets a WHERE {where_sql} GROUP BY a.kind",
-                    tuple(where_params),
-                    fetch=True
-                )
+            total_result = await self.db.aexecute(
+                f"SELECT COUNT(*) as count FROM assets a WHERE {where_sql}",
+                params,
+                fetch=True,
+            )
 
-                # Count with ratings
-                rated_result = await self.db.aexecute(
-                    f"""
-                    SELECT COUNT(*) as count
-                    FROM asset_metadata m
-                    JOIN assets a ON a.id = m.asset_id
-                    WHERE m.rating > 0 AND {where_sql}
-                    """,
-                    tuple(where_params),
-                    fetch=True
-                )
+            kind_result = await self.db.aexecute(
+                f"SELECT a.kind, COUNT(*) as count FROM assets a WHERE {where_sql} GROUP BY a.kind",
+                params,
+                fetch=True,
+            )
 
-                # Count with workflows
-                workflow_result = await self.db.aexecute(
-                    f"""
-                    SELECT COUNT(*) as count
-                    FROM asset_metadata m
-                    JOIN assets a ON a.id = m.asset_id
-                    WHERE m.has_workflow = 1 AND {where_sql}
-                    """,
-                    tuple(where_params),
-                    fetch=True
-                )
+            rated_result = await self.db.aexecute(
+                f"""
+                SELECT COUNT(*) as count
+                FROM asset_metadata m
+                JOIN assets a ON a.id = m.asset_id
+                WHERE m.rating > 0 AND {where_sql}
+                """,
+                params,
+                fetch=True,
+            )
 
-                # Count with generation data
-                generation_result = await self.db.aexecute(
-                    f"""
-                    SELECT COUNT(*) as count
-                    FROM asset_metadata m
-                    JOIN assets a ON a.id = m.asset_id
-                    WHERE m.has_generation_data = 1 AND {where_sql}
-                    """,
-                    tuple(where_params),
-                    fetch=True
-                )
-            else:
-                # Count total assets
-                total_result = await self.db.aexecute(
-                    "SELECT COUNT(*) as count FROM assets",
-                    fetch=True
-                )
+            workflow_result = await self.db.aexecute(
+                f"""
+                SELECT COUNT(*) as count
+                FROM asset_metadata m
+                JOIN assets a ON a.id = m.asset_id
+                WHERE m.has_workflow = 1 AND {where_sql}
+                """,
+                params,
+                fetch=True,
+            )
 
-                # Count by kind
-                kind_result = await self.db.aexecute(
-                    "SELECT kind, COUNT(*) as count FROM assets GROUP BY kind",
-                    fetch=True
-                )
-
-                # Count with ratings
-                rated_result = await self.db.aexecute(
-                    "SELECT COUNT(*) as count FROM asset_metadata WHERE rating > 0",
-                    fetch=True
-                )
-
-                # Count with workflows
-                workflow_result = await self.db.aexecute(
-                    "SELECT COUNT(*) as count FROM asset_metadata WHERE has_workflow = 1",
-                    fetch=True
-                )
-
-                # Count with generation data
-                generation_result = await self.db.aexecute(
-                    "SELECT COUNT(*) as count FROM asset_metadata WHERE has_generation_data = 1",
-                    fetch=True
-                )
+            generation_result = await self.db.aexecute(
+                f"""
+                SELECT COUNT(*) as count
+                FROM asset_metadata m
+                JOIN assets a ON a.id = m.asset_id
+                WHERE m.has_generation_data = 1 AND {where_sql}
+                """,
+                params,
+                fetch=True,
+            )
 
             last_scan_result = await self.db.aexecute(
                 "SELECT value FROM metadata WHERE key = 'last_scan_end'",

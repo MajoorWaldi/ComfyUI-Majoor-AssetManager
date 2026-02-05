@@ -89,7 +89,12 @@ export function createViewerLifecycle(overlay) {
                     }
                 } catch {}
             });
-            obs.observe(document.body, { childList: true, subtree: true });
+            const targetNode = overlay?.parentElement;
+            if (targetNode) {
+                obs.observe(targetNode, { childList: true });
+            } else {
+                obs.observe(document.body, { childList: true });
+            }
             lifecycle._observer = obs;
         }
     } catch {}

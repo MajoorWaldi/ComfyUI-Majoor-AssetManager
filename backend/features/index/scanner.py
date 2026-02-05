@@ -7,7 +7,9 @@ import os
 import time
 import threading
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from queue import Empty, Queue
 from typing import List, Dict, Any, Iterable, Optional
 from datetime import datetime
 from uuid import uuid4
@@ -29,6 +31,10 @@ from .metadata_helpers import MetadataHelpers
 
 
 logger = get_logger(__name__)
+
+# Single-thread executor to ensure the directory walk generator is never advanced from
+# different threads (which can cause subtle corruption / deadlocks).
+_FS_WALK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mjr-fs-walk")
 
 MAX_TRANSACTION_BATCH_SIZE = 500
 MAX_SCAN_JOURNAL_LOOKUP = 5000
@@ -137,39 +143,102 @@ class IndexScanner:
                 return int(SCAN_BATCH_XL)
 
             try:
-                # Stream batches to keep memory bounded for very large directories.
-                file_iter = self._iter_files(dir_path, recursive)
+                # IMPORTANT: os.walk() / Path.iterdir() are blocking and can freeze aiohttp.
+                # Walk the filesystem in a dedicated thread and consume results in batches.
+                loop = asyncio.get_running_loop()
+                stop_event = threading.Event()
+                q: "Queue[Optional[Path]]" = Queue(maxsize=max(1000, int(SCAN_BATCH_XL) * 4))
+
+                def _walk_and_put() -> None:
+                    try:
+                        for fp in self._iter_files(dir_path, recursive):
+                            if stop_event.is_set():
+                                break
+                            try:
+                                q.put(fp)
+                            except Exception:
+                                break
+                    except Exception:
+                        pass
+                    finally:
+                        try:
+                            q.put(None)
+                        except Exception:
+                            pass
+
+                walk_future = loop.run_in_executor(_FS_WALK_EXECUTOR, _walk_and_put)
+
+                def _get_many(max_items: int) -> list[Optional[Path]]:
+                    items: list[Optional[Path]] = []
+                    try:
+                        first = q.get()
+                    except Exception:
+                        return items
+                    items.append(first)
+                    # Drain without blocking.
+                    try:
+                        while len(items) < max(1, int(max_items or 1)):
+                            try:
+                                items.append(q.get_nowait())
+                            except Empty:
+                                break
+                    except Exception:
+                        pass
+                    return items
+
                 batch: List[Path] = []
-                for file_path in file_iter:
-                    batch.append(file_path)
-                    stats["scanned"] += 1
-                    if len(batch) < _stream_batch_target(stats["scanned"]):
-                        continue
+                done = False
+                try:
+                    while not done:
+                        target = _stream_batch_target(stats["scanned"])
+                        pulled = await asyncio.to_thread(_get_many, target)
+                        if not pulled:
+                            # Yield and try again.
+                            await asyncio.sleep(0)
+                            continue
 
-                    await self._scan_stream_batch(
-                        batch=batch,
-                        base_dir=directory,
-                        incremental=incremental,
-                        source=source,
-                        root_id=root_id,
-                        fast=fast,
-                        stats=stats,
-                        to_enrich=to_enrich,
-                    )
-                    batch = []
+                        for file_path in pulled:
+                            if file_path is None:
+                                done = True
+                                break
 
-                if batch:
-                    await self._scan_stream_batch(
-                        batch=batch,
-                        base_dir=directory,
-                        incremental=incremental,
-                        source=source,
-                        root_id=root_id,
-                        fast=fast,
-                        stats=stats,
-                        to_enrich=to_enrich,
-                    )
-                    batch = []
+                            batch.append(file_path)
+                            stats["scanned"] += 1
+
+                            if len(batch) >= _stream_batch_target(stats["scanned"]):
+                                await self._scan_stream_batch(
+                                    batch=batch,
+                                    base_dir=directory,
+                                    incremental=incremental,
+                                    source=source,
+                                    root_id=root_id,
+                                    fast=fast,
+                                    stats=stats,
+                                    to_enrich=to_enrich,
+                                )
+                                batch = []
+
+                    if batch:
+                        await self._scan_stream_batch(
+                            batch=batch,
+                            base_dir=directory,
+                            incremental=incremental,
+                            source=source,
+                            root_id=root_id,
+                            fast=fast,
+                            stats=stats,
+                            to_enrich=to_enrich,
+                        )
+                        batch = []
+                except asyncio.CancelledError:
+                    stop_event.set()
+                    raise
+                finally:
+                    stop_event.set()
+                    try:
+                        await asyncio.wait_for(walk_future, timeout=2.0)
+                    except Exception:
+                        pass
             finally:
                 stats["end_time"] = datetime.now().isoformat()
                 duration = time.perf_counter() - scan_start
@@ -266,12 +335,36 @@ class IndexScanner:
             Result with indexing statistics
         """
         async with self._scan_lock:
+            # Filter unsupported files to prevent indexing internal files (DBs, etc.)
+            filtered_paths = []
+            for p in paths:
+                try:
+                    ext = p.suffix.lower() if p.suffix else ""
+                    if ext and _EXT_TO_KIND:
+                        if _EXT_TO_KIND.get(ext, "unknown") != "unknown":
+                            filtered_paths.append(p)
+                            continue
+                    if classify_file(str(p)) != "unknown":
+                        filtered_paths.append(p)
+                except Exception:
+                    pass
+            paths = filtered_paths
+            
+            if not paths:
+                return Result.Ok({
+                    "scanned": 0, "added": 0, "updated": 0, "skipped": 0, "errors": 0,
+                    "start_time": datetime.now().isoformat(),
+                    "end_time": datetime.now().isoformat()
+                })
+
             scan_id = str(uuid4())
             self._current_scan_id = scan_id
             scan_start = time.perf_counter()
 
+            # Reduce log noise for single-file indexing (common in watchers)
+            start_log_level = logging.DEBUG if len(paths) == 1 else logging.INFO
             self._log_scan_event(
-                logging.INFO,
+                start_log_level,
                 "Starting file list index",
                 file_count=len(paths),
                 base_dir=base_dir,
@@ -329,8 +422,12 @@ class IndexScanner:
                 # for single-file indexing causes unnecessary grid reloads/flicker.
                 await MetadataHelpers.set_metadata_value(self.db, "last_index_end", stats["end_time"])
 
+                # Only log completion at INFO if meaningful changes occurred
+                has_changes = stats["added"] > 0 or stats["updated"] > 0 or stats["errors"] > 0
+                complete_log_level = logging.INFO if has_changes else logging.DEBUG
+
                 self._log_scan_event(
-                    logging.INFO,
+                    complete_log_level,
                     "File list index complete",
                     duration_seconds=duration,
                     scanned=stats["scanned"],
@@ -455,7 +552,9 @@ class IndexScanner:
                     pass
 
             # Check cache skip using prefetched data
-            if incremental and existing_id and existing_mtime == mtime:
+            # Optimization: Skip processing if mtime matches, even for non-incremental scans.
+            # This prevents massive redundant DB updates when performing full directory scans.
+            if existing_id and existing_mtime == mtime:
                 # Check if we have cached metadata for this filepath and state_hash
                 cached_raw = cache_map.get((filepath, state_hash))
                 if cached_raw:
@@ -720,7 +819,7 @@ class IndexScanner:
                                 stats["skipped"] += 1
                                 stats["errors"] -= 1  # Correct the error count
                                 if refreshed and entry.get("fast") and to_enrich is not None:
-                                    if len(to_enrich) < 10000:
+                                    if len(to_enrich) < MAX_TO_ENRICH_ITEMS:
                                         to_enrich.append(entry.get("filepath") or str(entry.get("file_path") or ""))
                             except Exception as exc:
                                 stats["errors"] += 1  # Keep as error
@@ -959,47 +1058,7 @@ class IndexScanner:
             }
         )
 
-    def _collect_files(self, directory: Path, recursive: bool) -> List[Path]:
-        """
-        Collect all asset files from directory.
 
-        Args:
-            directory: Directory to scan
-            recursive: Scan subdirectories
-
-        Returns:
-            List of file paths
-        """
-        files = []
-
-        def _is_supported(p: Path) -> bool:
-            try:
-                ext = p.suffix.lower()
-            except Exception:
-                ext = ""
-            if ext and _EXT_TO_KIND:
-                return _EXT_TO_KIND.get(ext, "unknown") != "unknown"
-            return classify_file(str(p)) != "unknown"
-
-        if recursive:
-            for root, _, filenames in os.walk(directory):
-                for filename in filenames:
-                    # Avoid Path allocation + classify loops when possible.
-                    try:
-                        ext = os.path.splitext(filename)[1].lower()
-                    except Exception:
-                        ext = ""
-                    if ext and _EXT_TO_KIND and _EXT_TO_KIND.get(ext, "unknown") == "unknown":
-                        continue
-                    file_path = Path(root) / filename
-                    if _is_supported(file_path):
-                        files.append(file_path)
-        else:
-            for item in directory.iterdir():
-                if item.is_file() and _is_supported(item):
-                    files.append(item)
-
-        return files
 
     def _iter_files(self, directory: Path, recursive: bool):
         """

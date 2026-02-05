@@ -272,6 +272,7 @@ export function mountVideoControls(video, opts = {}) {
         seek.step = "1";
         seek.value = "0";
         seek.setAttribute("aria-label", "Seek");
+        seek.title = "Seek through video";
 
         const seekOverlay = document.createElement("div");
         seekOverlay.className = "mjr-video-seek-overlay";
@@ -340,6 +341,7 @@ export function mountVideoControls(video, opts = {}) {
         const timeLabel = document.createElement("span");
         timeLabel.className = "mjr-video-time";
         timeLabel.textContent = "0:00 / 0:00";
+        timeLabel.title = "Current time / Total duration";
 
         const rangeCountLabel = document.createElement("span");
         rangeCountLabel.className = "mjr-video-range-count";
@@ -356,6 +358,7 @@ export function mountVideoControls(video, opts = {}) {
         const frameLabel = document.createElement("span");
         frameLabel.className = "mjr-video-frame";
         frameLabel.textContent = "F: 0";
+        frameLabel.title = "Current frame number";
 
         const playBtn = createBtn("mjr-video-btn--play", "Play", "Play/Pause (Space)");
         const prevFrameBtn = createBtn("mjr-video-btn--step", "<", "Step back");

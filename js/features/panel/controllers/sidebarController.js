@@ -231,13 +231,12 @@ export function bindSidebarOpen({
         try {
             const nextHasWorkflow = updatedAsset?.has_workflow ?? updatedAsset?.hasWorkflow ?? asset.has_workflow;
             const nextHasGen =
-                updatedAsset?.has_generation_metadata ??
                 updatedAsset?.has_generation_data ??
                 updatedAsset?.hasGenerationData ??
-                asset.has_generation_metadata;
+                asset.has_generation_data;
 
             if (nextHasWorkflow !== undefined) asset.has_workflow = nextHasWorkflow;
-            if (nextHasGen !== undefined) asset.has_generation_metadata = nextHasGen;
+            if (nextHasGen !== undefined) asset.has_generation_data = nextHasGen;
 
             const oldDot = card.querySelector(".mjr-workflow-dot");
             const newDot = createWorkflowDot(asset);
@@ -389,12 +388,16 @@ export function bindSidebarOpen({
             const curId = sidebar?._currentAsset?.id ?? sidebar?._currentFullAsset?.id ?? null;
             if (isOpen && curId != null && String(curId) === String(asset.id) && typeof closeSidebar === "function") {
                 closeSidebar(sidebar);
+                // Persist sidebar closed state
+                try { state.sidebarOpen = false; } catch {}
                 return;
             }
         } catch {}
 
         try {
             await showAssetInSidebar(sidebar, asset, (updatedAsset) => applyAssetUpdateToCard(card, asset, updatedAsset));
+            // Persist sidebar open state
+            try { state.sidebarOpen = true; } catch {}
             ensureSelectionVisible(gridContainer);
             card?.focus?.({ preventScroll: true });
         } catch {}
@@ -423,6 +426,12 @@ export function bindSidebarOpen({
     };
     gridContainer.addEventListener("keydown", onKeyDown);
 
+    // Listen for sidebar close events (e.g. from the close button in sidebar header)
+    const onSidebarClosed = () => {
+        try { state.sidebarOpen = false; } catch {}
+    };
+    sidebar?.addEventListener?.("mjr:sidebar-closed", onSidebarClosed);
+
     try {
         gridContainer._mjrOpenDetails = openDetailsForSelection;
     } catch {}
@@ -433,6 +442,9 @@ export function bindSidebarOpen({
         } catch {}
         try {
             gridContainer.removeEventListener("keydown", onKeyDown);
+        } catch {}
+        try {
+            sidebar?.removeEventListener?.("mjr:sidebar-closed", onSidebarClosed);
         } catch {}
         try {
             if (gridContainer._mjrOpenDetails === openDetailsForSelection) {

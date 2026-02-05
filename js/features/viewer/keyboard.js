@@ -65,6 +65,16 @@ export function installViewerKeyboard({
         }, 300);
     };
 
+    const toggleFullscreen = () => {
+        try {
+            if (!document.fullscreenElement) {
+                overlay?.requestFullscreen?.();
+            } else {
+                document?.exitFullscreen?.();
+            }
+        } catch {}
+    };
+
     const handleKeyboard = (e) => {
         const consume = () => {
             try {
@@ -86,18 +96,12 @@ export function installViewerKeyboard({
             const t = e?.target;
             if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
                 if (e.key === "f" || e.key === "F") {
-                consume();
-                try {
-                    if (!document.fullscreenElement) {
-                        overlay?.requestFullscreen?.();
-                    } else {
-                        document?.exitFullscreen?.();
-                    }
-                } catch {}
-                return;
-            }
+                    consume();
+                    toggleFullscreen();
+                    return;
+                }
 
-            if (e.key === "Escape") {
+                if (e.key === "Escape") {
                     consume();
                     safeCall(closeViewer);
                 }
@@ -214,6 +218,8 @@ export function installViewerKeyboard({
             }
             case "f":
             case "F": {
+                consume();
+                toggleFullscreen();
                 break;
             }
             case "d":

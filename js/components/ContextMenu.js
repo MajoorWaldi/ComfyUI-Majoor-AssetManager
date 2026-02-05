@@ -9,11 +9,17 @@
  */
 
 import { getViewerInstance } from "./Viewer.js";
-import { buildAssetViewURL } from "../api/endpoints.js";
+import { buildAssetViewURL, ENDPOINTS } from "../api/endpoints.js";
 import { comfyToast } from "../app/toast.js";
-import { openInFolder } from "../api/client.js";
+import { openInFolder, post } from "../api/client.js";
 import { showAddToCollectionMenu } from "../features/collections/contextmenu/addToCollectionMenu.js";
+import { tryLoadWorkflowToCanvas } from "../features/dnd/DragDrop.js";
+import { stageToInput } from "../features/dnd/staging/stageToInput.js";
+import { pickRootId } from "../utils/ids.js";
 import { MENU_Z_INDEX } from "./contextmenu/MenuCore.js";
+import { app } from "../../scripts/app.js";
+
+import { pickBestVideoPathWidget } from "../features/dnd/targets/node.js";
 
 // NOTE: Keep this menu isolated from the newer grid context menu
 // (`.mjr-grid-context-menu`) to avoid selector collisions.
@@ -184,6 +190,109 @@ export function showContextMenu(x, y, asset, allAssets, currentIndex, selectedAs
         }
     });
     menu.appendChild(openViewer);
+
+    // --- WORKFLOW ACTIONS ---
+    if (asset.has_workflow || asset.has_generation_data) {
+        // [CustomScripts Feature] Load Workflow directly
+        const loadWf = createMenuItem("Load Workflow", "pi pi-sitemap", null, async () => {
+            const payload = {
+                filename: asset.filename,
+                subfolder: asset.subfolder,
+                type: asset.type,
+                root_id: pickRootId(asset)
+            };
+            
+            // Only confirm if graph is not empty (basic heuristic)
+            if (app.graph && app.graph._nodes && app.graph._nodes.length > 0) {
+                 if (!confirm("⚠️ Replace current workflow?\n\nUnsaved changes will be lost.")) return;
+            }
+            
+            hide();
+            const ok = await tryLoadWorkflowToCanvas(payload);
+            if (ok) {
+                 comfyToast("Workflow loaded", "success");
+            } else {
+                 comfyToast("Could not load workflow (missing metadata?)", "warn");
+            }
+        });
+        menu.appendChild(loadWf);
+    }
+
+    // --- SEND TO NODE ---
+    const loadImageNodes = app?.graph?._nodes?.filter(n => {
+         if (!n?.type) return false;
+         const t = n.type.toLowerCase();
+         // Broad matching for Loaders
+         return (t.includes("load") || t.includes("input")) && (t.includes("image") || t.includes("video"));
+    }) || [];
+
+    if (loadImageNodes.length > 0) {
+         // [CustomScripts Feature] Send to LoadImage
+         const sendToInput = createMenuItem("Send to Node", "pi pi-arrow-circle-down", null, async () => {
+             hide();
+             
+             // 1. Prefer selected node
+             // 2. Prefer node matching the file type (video vs image) if multiple
+             // 3. Fallback to first
+             let targetNode = app.canvas.current_node;
+             
+             const ext = String(asset.filename).split('.').pop();
+             const isVideo = ["mp4", "webm", "mkv", "mov", "gif"].includes(ext?.toLowerCase());
+             
+             if (!targetNode || !loadImageNodes.includes(targetNode)) {
+                 if (isVideo) {
+                     targetNode = loadImageNodes.find(n => n.type.toLowerCase().includes("video")) || loadImageNodes[0];
+                 } else {
+                     targetNode = loadImageNodes.find(n => !n.type.toLowerCase().includes("video")) || loadImageNodes[0];
+                 }
+             }
+             
+             if (!targetNode) return;
+             
+             const payload = {
+                filename: asset.filename,
+                subfolder: asset.subfolder,
+                type: asset.type,
+                root_id: pickRootId(asset)
+            };
+            
+            const relativePath = await stageToInput({
+                post,
+                endpoint: ENDPOINTS.STAGE_TO_INPUT,
+                payload,
+                index: false
+            });
+            
+            if (relativePath) {
+                const widget = pickBestVideoPathWidget(targetNode, ext) || targetNode.widgets?.find(w => w.name === "image" || w.name === "video" || w.name === "filename");
+                
+                if (widget) {
+                    widget.value = relativePath;
+                    if (widget.callback) widget.callback(widget.value);
+                    
+                    // Flash the node to show where it went
+                    app.canvas.centerOnNode(targetNode);
+                    app.canvas.draw(true, true);
+                    
+                    comfyToast(`Sent to ${targetNode.title || "Node"}`, "success");
+                } else {
+                    // Fallback: set first string widget
+                     const firstStr = targetNode.widgets?.find(w => typeof w.value === "string" || w.type === "string");
+                     if (firstStr) {
+                         firstStr.value = relativePath;
+                         if (firstStr.callback) firstStr.callback(firstStr.value);
+                         comfyToast(`Sent to ${targetNode.title} (guessed widget)`, "success");
+                     } else {
+                         comfyToast(`Node ${targetNode.type} has no file widget`, "warn");
+                     }
+                }
+                app.graph.setDirtyCanvas(true);
+            }
+         });
+         menu.appendChild(sendToInput);
+    }
+    
+    menu.appendChild(createMenuSeparator());
 
     const details = createMenuItem("Details", "pi pi-info-circle", "D", () => {
         hide();

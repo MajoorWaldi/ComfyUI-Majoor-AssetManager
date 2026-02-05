@@ -1,4 +1,4 @@
-import { triggerAutoScan } from "../../app/bootstrap.js";
+
 import { comfyConfirm, comfyPrompt } from "../../app/dialogs.js";
 import { comfyToast } from "../../app/toast.js";
 import { createStatusIndicator, setupStatusPolling, triggerScan } from "../status/StatusDot.js";
@@ -36,7 +36,18 @@ import { bindGridContextMenu } from "../contextmenu/GridContextMenu.js";
 let _activeGridContainer = null;
 
 export function getActiveGridContainer() {
-    return _activeGridContainer;
+    // First try the cached reference
+    if (_activeGridContainer && _activeGridContainer.isConnected) {
+        return _activeGridContainer;
+    }
+    // Fallback: try to find it in the DOM by ID or class
+    try {
+        const grid = document.getElementById("mjr-assets-grid") || document.querySelector(".mjr-grid");
+        if (grid && grid.isConnected) {
+            return grid;
+        }
+    } catch {}
+    return null;
 }
 
 export async function renderAssetsManager(container, { useComfyThemeUI = true } = {}) {
@@ -46,7 +57,28 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         container.classList.remove("mjr-assets-manager");
     }
 
-    triggerAutoScan();
+    // Cleanup previous instance before re-render to prevent listener leaks
+    try {
+        container._eventCleanup?.();
+    } catch {}
+    try {
+        container._mjrPanelState?._mjrDispose?.();
+    } catch {}
+    try {
+        container._mjrPopoverManager?.dispose?.();
+    } catch {}
+    try {
+        container._mjrHotkeys?.dispose?.();
+    } catch {}
+    try {
+        container._mjrRatingHotkeys?.dispose?.();
+    } catch {}
+    try {
+        container._mjrSidebarController?.dispose?.();
+    } catch {}
+    try {
+        container._mjrGridContextMenuUnbind?.();
+    } catch {}
 
     container.innerHTML = "";
     container.classList.add("mjr-am-container");
@@ -56,6 +88,9 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         container._mjrPopoverManager = popovers;
     } catch {}
     const state = createPanelState();
+    try {
+        container._mjrPanelState = state;
+    } catch {}
 
     const headerView = createHeaderView();
     const { header, headerActions, tabButtons, customMenuBtn, filterBtn, sortBtn, collectionsBtn } = headerView;
@@ -113,14 +148,8 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         position: relative;
     `;
 
-    // Restore persistent scroll position
-    if (state.scrollTop > 0) {
-        requestAnimationFrame(() => {
-            try {
-                gridWrapper.scrollTop = state.scrollTop;
-            } catch {}
-        });
-    }
+    // NOTE: Scroll restoration is done AFTER grid loads (see initialLoadPromise below).
+    // Restoring scroll on an empty grid would be useless.
     
     let _scrollTimer = null;
     gridWrapper.addEventListener("scroll", () => {
@@ -278,9 +307,12 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         }
     });
 
-    Object.values(tabButtons).forEach((btn) => {
-        btn.addEventListener("click", () => scopeController.setScope(btn.dataset.scope));
-    });
+    if (!header._mjrTabListenersBound) {
+        Object.values(tabButtons).forEach((btn) => {
+            btn.addEventListener("click", () => scopeController.setScope(btn.dataset.scope));
+        });
+        header._mjrTabListenersBound = true;
+    }
 
     popovers.setDismissWhitelist([
         customPopover,
@@ -435,6 +467,21 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         onToggleDetails: () => {
             sidebarController?.toggleDetails?.();
         },
+        onFocusSearch: () => {
+            try {
+                searchInputEl?.focus?.();
+                // Move cursor to end for immediate typing.
+                const len = searchInputEl?.value?.length || 0;
+                searchInputEl?.setSelectionRange?.(len, len);
+            } catch {}
+        },
+        onClearSearch: () => {
+            try {
+                if (!searchInputEl) return;
+                searchInputEl.value = "";
+                searchInputEl.dispatchEvent?.(new Event("input", { bubbles: true }));
+            } catch {}
+        },
         getScanContext: () => ({
             scope: state.scope,
             customRootId: state.customRootId
@@ -457,6 +504,13 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
 
     hotkeys.bind(content);
     ratingHotkeys.bind();
+    
+    // Attach controllers to container for cleanup on re-render
+    try {
+        container._mjrHotkeys = hotkeys;
+        container._mjrRatingHotkeys = ratingHotkeys;
+        container._mjrSidebarController = sidebarController;
+    } catch {}
 
     container._eventCleanup = () => {
         try {
@@ -593,6 +647,56 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     });
 
     const initialLoadPromise = gridController.reloadGrid();
+    
+    // Restore scroll, selection visuals, and sidebar AFTER grid loads.
+    const restoreUIState = async () => {
+        try {
+            await initialLoadPromise;
+        } catch {}
+
+        // Wait one frame for DOM to settle before restoring.
+        requestAnimationFrame(() => {
+            // 1. Restore scroll position
+            if (state.scrollTop > 0) {
+                try {
+                    gridWrapper.scrollTop = state.scrollTop;
+                } catch {}
+            }
+
+            // 2. Restore selection visuals on cards
+            if (state.selectedAssetIds?.length || state.activeAssetId) {
+                try {
+                    const selected = (state.selectedAssetIds || []).map(String);
+                    const activeId = String(state.activeAssetId || selected[0] || "");
+
+                    selected.forEach(id => {
+                        const card = gridContainer.querySelector(`.mjr-asset-card[data-mjr-asset-id="${CSS?.escape ? CSS.escape(id) : id}"]`);
+                        if (card) card.classList.add("is-selected");
+                    });
+
+                    if (activeId) {
+                        const activeCard = gridContainer.querySelector(`.mjr-asset-card[data-mjr-asset-id="${CSS?.escape ? CSS.escape(activeId) : activeId}"]`);
+                        if (activeCard) {
+                            activeCard.classList.add("is-active");
+                            // Scroll selection into view if not visible after scroll restore
+                            if (state.scrollTop === 0) {
+                                activeCard.scrollIntoView?.({ block: "nearest", behavior: "instant" });
+                            }
+                        }
+                    }
+                } catch {}
+            }
+
+            // 3. Restore sidebar if it was open
+            if (state.sidebarOpen && state.activeAssetId) {
+                try {
+                    sidebarController?.toggleDetails?.();
+                } catch {}
+            }
+        });
+    };
+    restoreUIState();
+
     const checkAndAutoLoad = async () => {
         try {
             await initialLoadPromise;

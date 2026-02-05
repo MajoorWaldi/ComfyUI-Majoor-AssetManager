@@ -84,6 +84,9 @@ function createProgram(gl, vs, fs) {
     gl.linkProgram(program);
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
         console.warn("WebGL Program Error:", gl.getProgramInfoLog(program));
+        try {
+            gl.deleteProgram(program);
+        } catch {}
         return null; // Return null to fallback
     }
     return program;
@@ -101,52 +104,10 @@ export function isWebGLAvailable() {
 export function createWebGLVideoProcessor(opts) {
     const { canvas, videoEl, getGradeParams, isDefaultGrade, maxProcPixelsVideo } = opts;
     
-    // Attempt WebGL context
-    let gl = canvas.getContext("webgl", { alpha: false, preserveDrawingBuffer: true });
-    if (!gl) gl = canvas.getContext("experimental-webgl", { alpha: false });
-    
-    if (!gl) return null; // Fallback to 2D
-
-    // Setup Shaders
-    const vs = createShader(gl, gl.VERTEX_SHADER, VS_SOURCE);
-    const fs = createShader(gl, gl.FRAGMENT_SHADER, FS_SOURCE);
-    if (!vs || !fs) return null;
-
-    const program = createProgram(gl, vs, fs);
-    if (!program) return null;
-
-    // Lookups
-    const loc = {
-        position: gl.getAttribLocation(program, "a_position"),
-        u_image: gl.getUniformLocation(program, "u_image"),
-        u_exposure: gl.getUniformLocation(program, "u_exposure_scale"),
-        u_gamma: gl.getUniformLocation(program, "u_gamma_inv"),
-        u_channel: gl.getUniformLocation(program, "u_channel"),
-        u_analysis: gl.getUniformLocation(program, "u_analysis"),
-        u_thresh: gl.getUniformLocation(program, "u_zebra_threshold"),
-        u_res: gl.getUniformLocation(program, "u_resolution"),
-    };
-
-    // Buffer (Quad)
-    const positionBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-        -1, -1,
-         1, -1,
-        -1,  1,
-        -1,  1,
-         1, -1,
-         1,  1,
-    ]), gl.STATIC_DRAW);
-
-    // Texture
-    const texture = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-
+    let gl = null;
+    let resources = null;
+    let maxTextureSize = 4096;
+    let _contextLost = false;
     const proc = {
         type: 'webgl',
         ready: false,
@@ -156,73 +117,210 @@ export function createWebGLVideoProcessor(opts) {
         _destroyed: false,
     };
 
-    function ensureSize() {
-        if (!videoEl || !videoEl.videoWidth) return false;
-        const w = videoEl.videoWidth;
-        const h = videoEl.videoHeight;
-        if (canvas.width !== w || canvas.height !== h) {
-            canvas.width = w;
-            canvas.height = h;
-            gl.viewport(0, 0, w, h);
-        }
-        return true;
-    }
-
-    function render(overrideParams) {
-        if (proc._destroyed) return;
-        if (!ensureSize()) return;
-
-        const params = overrideParams || (getGradeParams ? getGradeParams() : {});
-
-        gl.useProgram(program);
-
-        // Upload texture
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, texture);
+    function acquireContext() {
+        let ctx = null;
         try {
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, videoEl);
-        } catch (e) {
-            // Tainted? source broken?
-            return; 
+            ctx = canvas.getContext("webgl", { alpha: false, preserveDrawingBuffer: true });
+        } catch {}
+        if (!ctx) {
+            try {
+                ctx = canvas.getContext("experimental-webgl", { alpha: false });
+            } catch {}
         }
-        gl.uniform1i(loc.u_image, 0);
-
-        // Uniforms
-        const exposureEV = Number(params.exposureEV) || 0;
-        const gamma = Math.max(0.1, Math.min(3, Number(params.gamma) || 1));
-        const analysis = params.analysisMode === 'zebra' ? 1 : 0;
-        
-        let ch = 0;
-        if (params.channel === 'r') ch = 1;
-        if (params.channel === 'g') ch = 2;
-        if (params.channel === 'b') ch = 3;
-
-        gl.uniform1f(loc.u_exposure, Math.pow(2, exposureEV));
-        gl.uniform1f(loc.u_gamma, 1.0 / gamma);
-        gl.uniform1i(loc.u_channel, ch);
-        gl.uniform1i(loc.u_analysis, analysis);
-        gl.uniform1f(loc.u_thresh, params.zebraThreshold ?? 0.95);
-        gl.uniform2f(loc.u_res, canvas.width, canvas.height);
-
-        // Draw
-        gl.enableVertexAttribArray(loc.position);
-        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-        gl.vertexAttribPointer(loc.position, 2, gl.FLOAT, false, 0, 0);
-
-        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        if (ctx) {
+            maxTextureSize = ctx.getParameter(ctx.MAX_TEXTURE_SIZE) || 4096;
+        }
+        return ctx;
     }
 
-    // Return the processor interface expected by Viewer
+    const checkGLError = (label = "") => {
+        if (!gl) return;
+        const error = gl.getError();
+        if (error !== gl.NO_ERROR) {
+            console.error(`WebGL Error [${label}]: ${error}`);
+        }
+    };
+
+    const cleanupResources = () => {
+        if (!gl || !resources) return;
+        const { positionBuffer, texture, program } = resources;
+        try {
+            gl.bindTexture(gl.TEXTURE_2D, null);
+        } catch {}
+        try {
+            gl.bindBuffer(gl.ARRAY_BUFFER, null);
+        } catch {}
+        try {
+            gl.useProgram(null);
+        } catch {}
+        try {
+            gl.deleteTexture(texture);
+        } catch {}
+        try {
+            gl.deleteBuffer(positionBuffer);
+        } catch {}
+        try {
+            gl.deleteProgram(program);
+        } catch {}
+        resources = null;
+    };
+
+    const setupResources = () => {
+        if (!gl) return null;
+        cleanupResources();
+
+        const vs = createShader(gl, gl.VERTEX_SHADER, VS_SOURCE);
+        const fs = createShader(gl, gl.FRAGMENT_SHADER, FS_SOURCE);
+        if (!vs || !fs) {
+            if (vs) gl.deleteShader(vs);
+            if (fs) gl.deleteShader(fs);
+            return null;
+        }
+
+        const program = createProgram(gl, vs, fs);
+        gl.deleteShader(vs);
+        gl.deleteShader(fs);
+        if (!program) {
+            return null;
+        }
+
+        checkGLError("setupResources:createProgram");
+
+        const loc = {
+            position: gl.getAttribLocation(program, "a_position"),
+            u_image: gl.getUniformLocation(program, "u_image"),
+            u_exposure: gl.getUniformLocation(program, "u_exposure_scale"),
+            u_gamma: gl.getUniformLocation(program, "u_gamma_inv"),
+            u_channel: gl.getUniformLocation(program, "u_channel"),
+            u_analysis: gl.getUniformLocation(program, "u_analysis"),
+            u_thresh: gl.getUniformLocation(program, "u_zebra_threshold"),
+            u_res: gl.getUniformLocation(program, "u_resolution"),
+        };
+
+        const positionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(
+            gl.ARRAY_BUFFER,
+            new Float32Array([
+                -1, -1,
+                 1, -1,
+                -1,  1,
+                -1,  1,
+                 1, -1,
+                 1,  1,
+            ]),
+            gl.STATIC_DRAW
+        );
+        checkGLError("setupResources:bufferData");
+
+        const texture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        checkGLError("setupResources:texSetup");
+
+        return { program, loc, positionBuffer, texture };
+    };
+
+    const ensureResources = () => {
+        if (_contextLost || proc._destroyed) return false;
+        if (!gl) gl = acquireContext();
+        if (!gl) return false;
+        if (!resources) resources = setupResources();
+        return !!resources;
+    };
+
+    const ensureSize = () => {
+        if (!_contextLost && gl && videoEl?.videoWidth) {
+            let w = videoEl.videoWidth;
+            let h = videoEl.videoHeight;
+            const maxSize = maxTextureSize || (gl.getParameter(gl.MAX_TEXTURE_SIZE) || 4096);
+            if (w > maxSize || h > maxSize) {
+                const scale = Math.min(maxSize / w, maxSize / h);
+                w = Math.floor(w * scale);
+                h = Math.floor(h * scale);
+            }
+            if (canvas.width !== w || canvas.height !== h) {
+                canvas.width = w;
+                canvas.height = h;
+                gl.viewport(0, 0, w, h);
+            }
+            return true;
+        }
+        return false;
+    };
+
+    const render = (overrideParams) => {
+        if (!_contextLost && ensureResources() && ensureSize()) {
+            const { program, loc, positionBuffer, texture } = resources;
+            gl.useProgram(program);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            try {
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, videoEl);
+            } catch (e) {
+                console.warn("WebGL texImage2D failed", e);
+                checkGLError("texImage2D");
+                return;
+            }
+            checkGLError("texImage2D");
+            gl.uniform1i(loc.u_image, 0);
+
+            const params = overrideParams || (getGradeParams ? getGradeParams() : {});
+            const exposureEV = Number(params.exposureEV) || 0;
+            const gamma = Math.max(0.1, Math.min(3, Number(params.gamma) || 1));
+            const analysis = params.analysisMode === 'zebra' ? 1 : 0;
+
+            let ch = 0;
+            if (params.channel === 'r') ch = 1;
+            if (params.channel === 'g') ch = 2;
+            if (params.channel === 'b') ch = 3;
+
+            gl.uniform1f(loc.u_exposure, Math.pow(2, exposureEV));
+            gl.uniform1f(loc.u_gamma, 1.0 / gamma);
+            gl.uniform1i(loc.u_channel, ch);
+            gl.uniform1i(loc.u_analysis, analysis);
+            gl.uniform1f(loc.u_thresh, params.zebraThreshold ?? 0.95);
+            gl.uniform2f(loc.u_res, canvas.width, canvas.height);
+
+            gl.enableVertexAttribArray(loc.position);
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.vertexAttribPointer(loc.position, 2, gl.FLOAT, false, 0, 0);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+            checkGLError("drawArrays");
+        }
+    };
+
+    const handleContextLost = (event) => {
+        event.preventDefault();
+        _contextLost = true;
+        cleanupResources();
+    };
+
+    const handleContextRestored = () => {
+        gl = acquireContext();
+        _contextLost = false;
+        resources = null;
+        ensureResources();
+    };
+
+    canvas.addEventListener("webglcontextlost", handleContextLost);
+    canvas.addEventListener("webglcontextrestored", handleContextRestored);
+
     return {
-        update: render, 
+        update: render,
         destroy: () => {
             proc._destroyed = true;
-            gl.deleteProgram(program);
-            gl.deleteShader(vs);
-            gl.deleteShader(fs);
-            gl.deleteTexture(texture);
-            gl.deleteBuffer(positionBuffer);
-            // Lost context?
+            proc.ready = false;
+            cleanupResources();
+            if (gl) {
+                try { gl.getExtension("WEBGL_lose_context")?.loseContext?.(); } catch {}
+            }
+            canvas.removeEventListener("webglcontextlost", handleContextLost);
+            canvas.removeEventListener("webglcontextrestored", handleContextRestored);
         }
     };
 }
