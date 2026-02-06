@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - master
+      - nightly
     paths-ignore:
       - '**.md'
       - '.github/workflows/**'
