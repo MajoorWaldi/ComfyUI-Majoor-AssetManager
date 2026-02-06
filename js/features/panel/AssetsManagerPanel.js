@@ -267,6 +267,10 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     content.appendChild(summaryBar);
     content.appendChild(browseSection);
     container.appendChild(header);
+    try {
+        container._mjrVersionUpdateCleanup?.();
+    } catch {}
+    container._mjrVersionUpdateCleanup = header._mjrVersionUpdateCleanup;
     container.appendChild(content);
 
     const getQuery = () => normalizeQuery(searchInputEl);
@@ -549,6 +553,10 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     } catch {}
 
     container._eventCleanup = () => {
+        try {
+            container._mjrVersionUpdateCleanup?.();
+        } catch {}
+        container._mjrVersionUpdateCleanup = null;
         try {
             hotkeys.dispose();
         } catch {}

@@ -61,7 +61,8 @@ def _build_geninfo_from_parameters(meta: Dict[str, Any]) -> Optional[Dict[str, A
 
     has_any = any(v is not None and v != "" for v in (pos, neg, steps, sampler, cfg, seed, w, h, model))
     if not has_any:
-        return None
+        # Return an empty dict instead of None to ensure geninfo is always a dict
+        return {}
 
     out: Dict[str, Any] = {"engine": {"parser_version": "geninfo-params-v1", "source": "parameters"}}
 
@@ -170,11 +171,10 @@ class MetadataService:
         try:
             prompt_graph = combined.get("prompt")
             workflow = combined.get("workflow")
-            
             loop = asyncio.get_running_loop()
             # Offload heavy parsing to thread pool to prevent blocking the event loop
             geninfo_res = await loop.run_in_executor(
-                None, 
+                None,
                 functools.partial(parse_geninfo_from_prompt, prompt_graph, workflow=workflow)
             )
 
@@ -182,9 +182,9 @@ class MetadataService:
                 combined["geninfo"] = geninfo_res.data
             elif "geninfo" not in combined:
                 gi = _build_geninfo_from_parameters(combined)
-                if gi:
-                    combined["geninfo"] = gi
-                elif _looks_like_media_pipeline(prompt_graph):
+                # Always set geninfo to a dict (empty if nothing parsed)
+                combined["geninfo"] = gi if gi is not None else {}
+                if not gi and _looks_like_media_pipeline(prompt_graph):
                     combined["geninfo_status"] = {"kind": "media_pipeline", "reason": "no_sampler"}
         except Exception as exc:
             logger.debug(f"GenInfo parse skipped: {exc}")

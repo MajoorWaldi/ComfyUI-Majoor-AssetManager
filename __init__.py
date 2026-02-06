@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,37 @@ from pathlib import Path
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 WEB_DIRECTORY = "./js"
+
+
+def _read_version_from_pyproject() -> str:
+    try:
+        root = Path(__file__).resolve().parent
+        pyproject_path = root / "pyproject.toml"
+        if not pyproject_path.exists():
+            return "0.0.0"
+        raw = pyproject_path.read_text(encoding="utf-8")
+        match = re.search(r'^version\\s*=\\s*"(.*?)"', raw, flags=re.MULTILINE)
+        if match:
+            return match.group(1).strip()
+    except Exception:
+        pass
+    return "0.0.0"
+
+
+def _detect_branch_from_env() -> str:
+    candidates = (
+        "MAJOR_ASSETS_MANAGER_BRANCH",
+        "MAJOOR_ASSETS_MANAGER_BRANCH",
+    )
+    for key in candidates:
+        value = os.environ.get(key)
+        if value:
+            return value.strip()
+    return "main"
+
+
+__version__ = _read_version_from_pyproject()
+__branch__ = _detect_branch_from_env()
 
 # ---- Windows safety guard -------------------------------------------------
 # ComfyUI loads every entry under `custom_nodes/`. On Windows, reserved device
@@ -227,4 +259,10 @@ except Exception:
         pass
     routes = None  # type: ignore
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+__all__ = [
+    "NODE_CLASS_MAPPINGS",
+    "NODE_DISPLAY_NAME_MAPPINGS",
+    "WEB_DIRECTORY",
+    "__version__",
+    "__branch__",
+]

@@ -3,6 +3,7 @@ import { post, getAssetMetadata } from "../../../api/client.js";
 import { ENDPOINTS } from "../../../api/endpoints.js";
 import { pickRootId } from "../../../utils/ids.js";
 import { safeClosest } from "../../../utils/dom.js";
+import { comfyToast } from "../../../app/toast.js";
 
 const RESCAN_FLAG = "_mjrRescanning";
 const RESCAN_TTL_MS = 1500;
@@ -20,11 +21,13 @@ async function rescanSingleAsset({ card, asset, sidebar, onAssetUpdated }) {
     const dot = card.querySelector(".mjr-workflow-dot");
     try {
         if (dot) {
-            dot.style.opacity = "0.6";
+            dot.style.color = "var(--mjr-status-info, #64B5F6)";
             dot.style.cursor = "progress";
             dot.title = "Rescanning…";
         }
     } catch {}
+
+    try { comfyToast("Rescanning file…", "info", 2000); } catch {}
 
     const fileEntry = {
         filename: asset.filename,
@@ -64,7 +67,6 @@ async function rescanSingleAsset({ card, asset, sidebar, onAssetUpdated }) {
     } finally {
         try {
             if (dot) {
-                dot.style.opacity = "";
                 dot.style.cursor = "";
             }
         } catch {}
@@ -273,16 +275,26 @@ export function bindSidebarOpen({
     gridContainer._mjrSidebarOpenBound = true;
 
     // Keep selection visible when the panel/grid resizes (column wrap changes can move the selected card).
+    // The VirtualGrid repositions cards after a 100ms debounce, so we need multiple passes
+    // to ensure we scroll after the grid has finished re-laying out.
     try {
         if (!gridContainer._mjrSelectionResizeObserver) {
             const scrollRoot = gridContainer.parentElement;
             let raf = null;
+            let timer = null;
             const schedule = () => {
                 if (raf) cancelAnimationFrame(raf);
+                if (timer) clearTimeout(timer);
+                // First pass: immediate after layout
                 raf = requestAnimationFrame(() => {
                     raf = null;
                     ensureSelectionVisible(gridContainer);
                 });
+                // Second pass: after VirtualGrid debounce (100ms) + render
+                timer = setTimeout(() => {
+                    timer = null;
+                    ensureSelectionVisible(gridContainer);
+                }, 160);
             };
 
             const ro = new ResizeObserver(() => schedule());
@@ -462,6 +474,12 @@ export function bindSidebarOpen({
         }
         const asset = card?._mjrAsset;
         if (!asset) return;
+
+        // Ensure the card keeps selection and focus when the sidebar opens
+        // (needed when triggered from the global hotkey which bypasses the grid keydown handler)
+        setSelectedCard(gridContainer, card);
+        updateSelectedIdsDataset(gridContainer);
+        syncSelectionState({ gridContainer, state, activeId: card?.dataset?.mjrAssetId });
 
         try {
             const isOpen = !!sidebar?.classList?.contains?.("is-open");

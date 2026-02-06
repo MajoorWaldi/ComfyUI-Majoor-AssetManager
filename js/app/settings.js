@@ -795,7 +795,7 @@ export const registerMajoorSettings = (app, onApplied) => {
                 if (langOptions.includes(value)) {
                     setLang(value);
                     notifyApplied("language");
-                    comfyToast(t("toast.languageChanged", "Language changed. Reload the page for full effect."), "info", 4000);
+                    // Toast removed: no notification on language change
                 }
             },
         });

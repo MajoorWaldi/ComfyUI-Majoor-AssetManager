@@ -5,6 +5,7 @@
 
 import { app } from "../../scripts/app.js";
 import { testAPI, triggerStartupScan } from "./app/bootstrap.js";
+import { checkMajoorVersion } from "./app/versionCheck.js";
 import { ensureStyleLoaded } from "./app/style.js";
 import { registerMajoorSettings } from "./app/settings.js";
 import { initDragDrop } from "./features/dnd/DragDrop.js";
@@ -94,6 +95,7 @@ app.registerExtension({
         });
 
         triggerStartupScan();
+        void checkMajoorVersion();
 
         // Get ComfyUI API
         const api = app.api || (app.ui ? app.ui.api : null);

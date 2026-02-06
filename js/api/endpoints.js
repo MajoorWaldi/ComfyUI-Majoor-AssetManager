@@ -12,6 +12,7 @@ export const ENDPOINTS = {
     HEALTH: "/mjr/am/health",
     HEALTH_COUNTERS: "/mjr/am/health/counters",
     CONFIG: "/mjr/am/config",
+    VERSION: "/majoor/version",
 
     // Index & Search
     SCAN: "/mjr/am/scan",

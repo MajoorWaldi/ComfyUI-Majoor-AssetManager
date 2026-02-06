@@ -1,32 +1,60 @@
-name: Release on tag
+name: Create Stable Release
+
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - "v*.*.*" # Se déclenche sur les tags comme v1.0.0, v0.2.1, etc.
 
 permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    name: Build ZIP and create Release
+  create-release:
+    name: Create GitHub Release
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          submodules: true
 
-      - name: Build ZIP artifact
+      - name: Create Archive
+        # Réutilisation de la logique d'exclusion du ps1
         run: |
-          REF_NAME=${{ github.ref_name }}
-          ZIP_NAME=mjr-assets-manager-${REF_NAME}.zip
-          git archive --format=zip --output="$ZIP_NAME" ${{ github.ref }} || (zip -r "$ZIP_NAME" . -x .github/** tests/** __pycache__/**)
-          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          zip -r ComfyUI-Majoor-AssetsManager_release.zip . \
+          -x "*.git/*" \
+          -x ".github/*" \
+          -x ".claude/*" \
+          -x "*/__pycache__/*" \
+          -x "node_modules/*" \
+          -x "*/.pytest_cache/*" \
+          -x "tests/*" \
+          -x "scripts/make_release_zip.ps1" \
+          -x "*.zip"
 
-      - name: Create GitHub Release and upload asset
+      - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ github.ref_name }}
-          name: Release ${{ github.ref_name }}
-          files: ${{ env.ZIP_NAME }}
+          files: ComfyUI-Majoor-AssetsManager_release.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Intégration de votre workflow existant pour publier aussi sur le registre Comfy
+  publish-registry:
+    needs: create-release
+    name: Publish to Comfy Registry
+    runs-on: ubuntu-latest
+    # Condition extraite de votre fichier publish.yml original
+    if: ${{ github.repository_owner == 'MajoorWaldi' }} 
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Publish Custom Node
+        uses: Comfy-Org/publish-node-action@v1
+        with:
+          personal_access_token: ${{ secrets.REGISTRY_ACCESS_TOKEN }}

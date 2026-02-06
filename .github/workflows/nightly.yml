@@ -1,34 +1,45 @@
-name: Nightly build & prerelease
+name: Nightly Build
+
 on:
-  schedule:
-    - cron: '0 2 * * *' # daily at 02:00 UTC
-  workflow_dispatch: {}
+  push:
+    branches:
+      - main
+      - master
+    paths-ignore:
+      - '**.md'
+      - '.github/workflows/**'
 
 permissions:
   contents: write
 
 jobs:
-  nightly:
-    name: Nightly build and prerelease
+  build-nightly:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Build nightly ZIP
+      - name: Create Archive
+        # Nous reproduisons ici la logique d'exclusion de votre script make_release_zip.ps1
         run: |
-          TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
-          ZIP=mjr-am-nightly-${TIMESTAMP}.zip
-          git archive --format=zip --output="$ZIP" HEAD || (zip -r "$ZIP" . -x .github/** tests/** __pycache__/**)
-          echo "ZIP=$ZIP" >> $GITHUB_ENV
+          zip -r ComfyUI-Majoor-AssetsManager_nightly.zip . \
+          -x "*.git/*" \
+          -x ".github/*" \
+          -x ".claude/*" \
+          -x "*/__pycache__/*" \
+          -x "node_modules/*" \
+          -x "*/.pytest_cache/*" \
+          -x "tests/*" \
+          -x "scripts/make_release_zip.ps1" \
+          -x "*.zip"
 
-      - name: Create nightly prerelease
-        uses: softprops/action-gh-release@v1
+      - name: Update Nightly Release
+        uses: andymckay/append-gh-release@v1
         with:
-          tag_name: ${{ env.ZIP }}
-          name: Nightly ${{ env.ZIP }}
-          body: Automated nightly build
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: nightly
+          release_name: "Nightly Build (Development)"
+          asset_path: ./ComfyUI-Majoor-AssetsManager_nightly.zip
+          asset_name: ComfyUI-Majoor-AssetsManager_nightly.zip
           prerelease: true
-          files: ${{ env.ZIP }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          replace_assets: true

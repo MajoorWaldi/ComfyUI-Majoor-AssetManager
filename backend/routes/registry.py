@@ -60,6 +60,7 @@ from .handlers import (
     register_viewer_routes,
     register_db_maintenance_routes,
     register_releases_routes,
+    register_version_routes,
     register_download_routes,
 )
 
@@ -163,6 +164,12 @@ def register_all_routes() -> web.RouteTableDef:
         logger.info("  GET /mjr/am/releases (Added)")
     except Exception as e:
         logger.error(f"Failed to register releases routes: {e}")
+
+    try:
+        register_version_routes(routes)
+        logger.info("  GET /majoor/version (Added)")
+    except Exception as e:
+        logger.error(f"Failed to register version route: {e}")
 
     # FIX: Enregistrement de la route de téléchargement
     try:
