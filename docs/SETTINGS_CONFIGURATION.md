@@ -94,15 +94,6 @@ Settings are primarily adjusted through the user interface:
 
 ## File System Settings
 
-### File Watching
-- **Enable File Watcher**: Automatically reindex when files change
-- **Watcher Interval**: How often to check for file changes
-- **Join Timeout**: Time to wait before processing multiple changes together
-- **Watched Paths**: Which directories to monitor for changes
-- **Default**: Usually Disabled to save resources
-- **Impact**: Keeps index current but uses system resources
-- **Recommendation**: Enable for actively used output directories
-
 ### Custom Roots
 - **Adding Custom Directories**: Add additional directories to browse
 - **Path Validation**: Ensures paths are valid and accessible
@@ -160,31 +151,6 @@ Settings are primarily adjusted through the user interface:
   - Default: `auto`
   - Impact: Determines which tools are used for metadata extraction
   - Example: `MAJOOR_MEDIA_PROBE_BACKEND=both`
-
-#### File Watching
-- **MAJOOR_ENABLE_FILE_WATCHER**: Enable automatic reindexing
-  - Options: `true`, `false`, `1`, `0`
-  - Default: `false`
-  - Impact: Automatically updates index when files change
-  - Example: `MAJOOR_ENABLE_FILE_WATCHER=true`
-
-- **MAJOOR_WATCHER_INTERVAL**: File watching interval in seconds
-  - Default: 15.0
-  - Range: 1.0 to 300.0
-  - Impact: How frequently the system checks for changes
-  - Example: `MAJOOR_WATCHER_INTERVAL=10.0`
-
-- **MAJOOR_WATCHER_JOIN_TIMEOUT**: Coalescing timeout for file events
-  - Default: 5.0 seconds
-  - Range: 0.1 to 60.0
-  - Impact: Time to wait before processing grouped file changes
-  - Example: `MAJOOR_WATCHER_JOIN_TIMEOUT=3.0`
-
-- **MAJOOR_WATCHER_PATHS**: Directories to watch (colon-separated on Unix, semicolon on Windows)
-  - Default: Output directory
-  - Format: Path separators depend on OS
-  - Impact: Which directories are monitored for changes
-  - Example: `MAJOOR_WATCHER_PATHS=/path/to/output:/path/to/inputs`
 
 #### Database Tuning
 - **MAJOOR_DB_TIMEOUT**: Database operation timeout in seconds
@@ -253,8 +219,6 @@ Create a batch file to set environment variables:
 ```batch
 @echo off
 set MAJOOR_MEDIA_PROBE_BACKEND=auto
-set MAJOOR_ENABLE_FILE_WATCHER=true
-set MAJOOR_WATCHER_INTERVAL=15.0
 set MAJOOR_DB_TIMEOUT=60.0
 
 REM Start ComfyUI with the environment variables
@@ -269,8 +233,6 @@ Create a shell script to set environment variables:
 ```bash
 #!/bin/bash
 export MAJOOR_MEDIA_PROBE_BACKEND=auto
-export MAJOOR_ENABLE_FILE_WATCHER=true
-export MAJOOR_WATCHER_INTERVAL=15.0
 export MAJOOR_DB_TIMEOUT=60.0
 
 # Start ComfyUI with the environment variables
@@ -282,8 +244,6 @@ Or add to your shell profile (`.bashrc`, `.zshrc`, etc.):
 
 ```bash
 export MAJOOR_MEDIA_PROBE_BACKEND=auto
-export MAJOOR_ENABLE_FILE_WATCHER=true
-export MAJOOR_WATCHER_INTERVAL=15.0
 export MAJOOR_DB_TIMEOUT=60.0
 ```
 
@@ -291,7 +251,6 @@ export MAJOOR_DB_TIMEOUT=60.0
 
 ### Performance Optimization
 - Adjust page size based on your system's RAM
-- Enable file watching only for actively used directories
 - Set appropriate timeouts based on your storage speed
 - Monitor database performance and adjust connections as needed
 
@@ -334,12 +293,6 @@ export MAJOOR_DB_TIMEOUT=60.0
 - Check tool permissions and access rights
 - Ensure tools are properly installed
 - Test tools independently before using with Assets Manager
-
-#### File Watching Problems
-- Check directory permissions
-- Verify the watched directories exist and are accessible
-- Monitor system resources (file watching can be resource-intensive)
-- Adjust intervals if causing performance issues
 
 ### Diagnostic Steps
 1. Check ComfyUI console for error messages

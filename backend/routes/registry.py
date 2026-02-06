@@ -59,6 +59,7 @@ from .handlers import (
     register_calendar_routes,
     register_viewer_routes,
     register_db_maintenance_routes,
+    register_releases_routes,
     register_download_routes,
 )
 
@@ -156,6 +157,12 @@ def register_all_routes() -> web.RouteTableDef:
     register_calendar_routes(routes)
     register_viewer_routes(routes)
     register_db_maintenance_routes(routes)
+    # Register releases route (exposes tags/branches + zip template)
+    try:
+        register_releases_routes(routes)
+        logger.info("  GET /mjr/am/releases (Added)")
+    except Exception as e:
+        logger.error(f"Failed to register releases routes: {e}")
 
     # FIX: Enregistrement de la route de téléchargement
     try:
@@ -186,6 +193,7 @@ def register_all_routes() -> web.RouteTableDef:
     logger.info("  GET /mjr/am/viewer/info?asset_id=<id>")
     logger.info("  POST /mjr/am/db/optimize")
     logger.info("  GET /mjr/am/download")
+    logger.info("  GET /mjr/am/releases")
     logger.info("=" * 60)
 
     return routes

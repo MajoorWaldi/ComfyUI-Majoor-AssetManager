@@ -335,17 +335,10 @@ export MAJOOR_FFPROBE_PATH="/path/to/ffprobe"
 # Set media probe backend
 export MAJOOR_MEDIA_PROBE_BACKEND="auto"  # auto, exiftool, ffprobe, both
 
-# Enable file watcher for auto-reindexing
-export MAJOOR_ENABLE_FILE_WATCHER=true
-
 # Database tuning
 export MAJOOR_DB_TIMEOUT=30.0
 export MAJOOR_DB_MAX_CONNECTIONS=8
 export MAJOOR_DB_QUERY_TIMEOUT=30.0
-
-# Watcher settings
-export MAJOOR_WATCHER_INTERVAL=15.0
-export MAJOOR_WATCHER_JOIN_TIMEOUT=5.0
 
 # Collection limits
 export MJR_COLLECTION_MAX_ITEMS=50000
@@ -372,7 +365,6 @@ If you see warnings about missing dependencies:
 
 #### Index Not Updating
 - Use `Ctrl/Cmd+S` to manually trigger a scan
-- Enable file watcher for automatic updates
 - Check permissions on output directory
 
 #### Metadata Extraction Issues

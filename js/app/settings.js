@@ -3,7 +3,7 @@
  */
 
 import { APP_CONFIG, APP_DEFAULTS } from "./config.js";
-import { getSecuritySettings, setSecuritySettings, setProbeBackendMode } from "../api/client.js";
+import { getSecuritySettings, setSecuritySettings, setProbeBackendMode, getWatcherStatus, toggleWatcher } from "../api/client.js";
 import { comfyToast } from "./toast.js";
 import { safeDispatchCustomEvent } from "../utils/events.js";
 import { t, initI18n, setLang, getCurrentLang, getSupportedLanguages } from "./i18n.js";
@@ -44,6 +44,9 @@ const DEFAULT_SETTINGS = {
     },
     autoScan: {
         onStartup: APP_DEFAULTS.AUTO_SCAN_ON_STARTUP,
+    },
+    watcher: {
+        enabled: true,
     },
     status: {
         pollInterval: APP_DEFAULTS.STATUS_POLL_INTERVAL,
@@ -90,6 +93,7 @@ const DEFAULT_SETTINGS = {
     security: {
         safeMode: false,
         allowWrite: true,
+        allowRemoteWrite: true,
         allowDelete: true,
         allowRename: true,
         allowOpenInFolder: true,
@@ -145,6 +149,7 @@ export const loadMajoorSettings = () => {
             "infiniteScroll",
             "siblings",
             "autoScan",
+            "watcher",
             "status",
             "viewer",
             "rtHydrate",
@@ -250,6 +255,7 @@ export async function syncBackendSecuritySettings() {
         settings.security = settings.security || {};
         settings.security.safeMode = _safeBool(prefs.safe_mode, settings.security.safeMode);
         settings.security.allowWrite = _safeBool(prefs.allow_write, settings.security.allowWrite);
+        settings.security.allowRemoteWrite = _safeBool(prefs.allow_remote_write, settings.security.allowRemoteWrite);
         settings.security.allowDelete = _safeBool(prefs.allow_delete, settings.security.allowDelete);
         settings.security.allowRename = _safeBool(prefs.allow_rename, settings.security.allowRename);
         settings.security.allowOpenInFolder = _safeBool(prefs.allow_open_in_folder, settings.security.allowOpenInFolder);
@@ -627,6 +633,34 @@ export const registerMajoorSettings = (app, onApplied) => {
         });
 
         safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Watcher.Enabled`,
+            category: cat(t("cat.scanning"), t("setting.watcher.name").replace("Majoor: ", "")),
+            name: t("setting.watcher.name"),
+            tooltip: t("setting.watcher.desc"),
+            type: "boolean",
+            defaultValue: !!settings.watcher?.enabled,
+            onChange: async (value) => {
+                settings.watcher = settings.watcher || {};
+                settings.watcher.enabled = !!value;
+                saveMajoorSettings(settings);
+                notifyApplied("watcher.enabled");
+                try {
+                    const res = await toggleWatcher(!!value);
+                    if (!res?.ok) {
+                        settings.watcher.enabled = !value;
+                        saveMajoorSettings(settings);
+                        notifyApplied("watcher.enabled");
+                        comfyToast(res?.error || "Failed to toggle watcher", "error");
+                    }
+                } catch {
+                    settings.watcher.enabled = !value;
+                    saveMajoorSettings(settings);
+                    notifyApplied("watcher.enabled");
+                }
+            },
+        });
+
+        safeAddSetting({
             id: `${SETTINGS_PREFIX}.RatingTagsSync.Enabled`,
             category: cat(t("cat.scanning"), t("setting.sync.rating.name").replace("Majoor: ", "")),
             name: t("setting.sync.rating.name"),
@@ -695,10 +729,10 @@ export const registerMajoorSettings = (app, onApplied) => {
 
         registerMinimapToggle("Enabled", "enabled", "setting.minimap.enabled.name", "setting.minimap.enabled.desc");
 
-        const registerSecurityToggle = (key, nameKey, descKey) => {
+        const registerSecurityToggle = (key, nameKey, descKey, sectionKey = "cat.security") => {
             safeAddSetting({
                 id: `${SETTINGS_PREFIX}.Security.${key}`,
-                category: cat(t("cat.security"), t(nameKey).replace("Majoor: ", "")),
+                category: cat(t(sectionKey), t(nameKey).replace("Majoor: ", "")),
                 name: t(nameKey),
                 tooltip: t(descKey),
                 type: "boolean",
@@ -713,6 +747,7 @@ export const registerMajoorSettings = (app, onApplied) => {
                         setSecuritySettings({
                             safe_mode: _safeBool(sec.safeMode, false),
                             allow_write: _safeBool(sec.allowWrite, true),
+                            allow_remote_write: _safeBool(sec.allowRemoteWrite, true),
                             allow_delete: _safeBool(sec.allowDelete, true),
                             allow_rename: _safeBool(sec.allowRename, true),
                             allow_open_in_folder: _safeBool(sec.allowOpenInFolder, true),
@@ -732,6 +767,12 @@ export const registerMajoorSettings = (app, onApplied) => {
         };
 
         registerSecurityToggle("safeMode", "setting.sec.safe.name", "setting.sec.safe.desc");
+        registerSecurityToggle(
+            "allowRemoteWrite",
+            "setting.sec.remote.name",
+            "setting.sec.remote.desc",
+            "cat.remote"
+        );
         registerSecurityToggle("allowWrite", "setting.sec.write.name", "setting.sec.write.desc");
         registerSecurityToggle("allowDelete", "setting.sec.del.name", "setting.sec.del.desc");
         registerSecurityToggle("allowRename", "setting.sec.ren.name", "setting.sec.ren.desc");
@@ -781,5 +822,30 @@ export const registerMajoorSettings = (app, onApplied) => {
         } catch {}
     }
 
+    // Best-effort: apply watcher state to backend to match saved settings.
+    try {
+        const desired = !!settings?.watcher?.enabled;
+        setTimeout(() => {
+            toggleWatcher(desired).catch(() => {});
+        }, 0);
+    } catch {}
+
     return settings;
 };
+
+// Best-effort backend sync (watcher status) at startup.
+try {
+    const settings = loadMajoorSettings();
+    if (settings?.watcher && typeof settings.watcher.enabled === "boolean") {
+        getWatcherStatus()
+            .then((res) => {
+                const enabled = !!res?.ok && !!res?.data?.enabled;
+                if (typeof enabled === "boolean" && enabled !== !!settings.watcher.enabled) {
+                    settings.watcher.enabled = enabled;
+                    saveMajoorSettings(settings);
+                    safeDispatchCustomEvent("mjr-settings-changed", { key: "watcher.enabled" }, { warnPrefix: "[Majoor]" });
+                }
+            })
+            .catch(() => {});
+    }
+} catch {}

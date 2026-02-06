@@ -266,9 +266,17 @@ export function installGridKeyboard({
                         viewer.open(selected, 0);
                     } else {
                         // Open all assets from grid, starting at active
-                        const allAssets = Array.from(gridContainer.querySelectorAll('.mjr-asset-card'))
-                            .map(card => card._mjrAsset)
-                            .filter(Boolean);
+                        let allAssets = [];
+                        if (Array.isArray(state?.assets) && state.assets.length) {
+                            allAssets = state.assets;
+                        } else if (typeof gridContainer?._mjrGetAssets === "function") {
+                            const list = gridContainer._mjrGetAssets();
+                            if (Array.isArray(list) && list.length) allAssets = list;
+                        } else {
+                            allAssets = Array.from(gridContainer.querySelectorAll('.mjr-asset-card'))
+                                .map(card => card._mjrAsset)
+                                .filter(Boolean);
+                        }
                         const idx = allAssets.findIndex(a => String(a?.id) === String(asset?.id));
                         viewer.open(allAssets, Math.max(0, idx));
                     }
@@ -428,6 +436,7 @@ export function installGridKeyboard({
                 const toDelete = selected.length > 0 ? selected : [asset];
                 let successCount = 0;
                 let errorCount = 0;
+                const deletedIds = [];
 
                 for (const a of toDelete) {
                     if (!a?.id) continue;
@@ -435,9 +444,7 @@ export function installGridKeyboard({
                         const result = await deleteAsset(a.id);
                         if (result?.ok) {
                             successCount++;
-                            // Remove card from DOM
-                            const card = gridContainer.querySelector(`[data-mjr-asset-id="${a.id}"]`);
-                            card?.remove?.();
+                            deletedIds.push(String(a.id));
                         } else {
                             errorCount++;
                         }
@@ -446,11 +453,31 @@ export function installGridKeyboard({
                     }
                 }
 
+                if (deletedIds.length) {
+                    try {
+                        const removeFn = gridContainer?._mjrRemoveAssets;
+                        if (typeof removeFn === "function") {
+                            removeFn(deletedIds);
+                        } else {
+                            for (const id of deletedIds) {
+                                const card = gridContainer.querySelector(`[data-mjr-asset-id="${id}"]`);
+                                card?.remove?.();
+                            }
+                        }
+                    } catch {}
+                }
+
                 if (errorCount === 0) {
                     comfyToast(`${successCount} file${successCount !== 1 ? 's' : ''} deleted`, "success");
                 } else {
                     comfyToast(`${successCount} deleted, ${errorCount} failed`, "warning");
                 }
+                try {
+                    if (typeof gridContainer?._mjrSetSelection === "function") {
+                        const remaining = selected.filter(a => !deletedIds.includes(String(a?.id || ""))).map(a => String(a?.id || "")).filter(Boolean);
+                        gridContainer._mjrSetSelection(remaining, remaining[0] || "");
+                    }
+                } catch {}
                 onSelectionChanged();
                 return;
             }
@@ -459,14 +486,34 @@ export function installGridKeyboard({
         // Select All (Ctrl+A)
         if (matchesShortcut(e, GRID_SHORTCUTS.SELECT_ALL)) {
             consume();
-            const cards = gridContainer.querySelectorAll('.mjr-asset-card');
-            const ids = [];
-            cards.forEach(card => {
-                card.classList.add('is-selected');
-                card.setAttribute('aria-selected', 'true');
-                if (card._mjrAsset?.id) ids.push(String(card._mjrAsset.id));
-            });
-            gridContainer.dataset.mjrSelectedAssetIds = JSON.stringify(ids);
+            let ids = [];
+            try {
+                if (Array.isArray(state?.assets) && state.assets.length) {
+                    ids = state.assets.map(a => String(a?.id || "")).filter(Boolean);
+                } else if (typeof gridContainer?._mjrGetAssets === "function") {
+                    const list = gridContainer._mjrGetAssets();
+                    if (Array.isArray(list)) ids = list.map(a => String(a?.id || "")).filter(Boolean);
+                }
+            } catch {}
+            if (!ids.length) {
+                try {
+                    const cards = gridContainer.querySelectorAll('.mjr-asset-card');
+                    ids = Array.from(cards).map(card => String(card?._mjrAsset?.id || "")).filter(Boolean);
+                } catch {}
+            }
+            try {
+                if (typeof gridContainer?._mjrSetSelection === "function") {
+                    gridContainer._mjrSetSelection(ids, ids[0] || "");
+                } else {
+                    const cards = gridContainer.querySelectorAll('.mjr-asset-card');
+                    cards.forEach(card => {
+                        card.classList.add('is-selected');
+                        card.setAttribute('aria-selected', 'true');
+                    });
+                    gridContainer.dataset.mjrSelectedAssetIds = JSON.stringify(ids);
+                    gridContainer.dataset.mjrSelectedAssetId = String(ids[0] || "");
+                }
+            } catch {}
             onSelectionChanged();
             return;
         }
@@ -474,12 +521,19 @@ export function installGridKeyboard({
         // Deselect All (Ctrl+D)
         if (matchesShortcut(e, GRID_SHORTCUTS.DESELECT_ALL)) {
             consume();
-            const cards = gridContainer.querySelectorAll('.mjr-asset-card.is-selected');
-            cards.forEach(card => {
-                card.classList.remove('is-selected');
-                card.setAttribute('aria-selected', 'false');
-            });
-            gridContainer.dataset.mjrSelectedAssetIds = JSON.stringify([]);
+            try {
+                if (typeof gridContainer?._mjrSetSelection === "function") {
+                    gridContainer._mjrSetSelection([], "");
+                } else {
+                    const cards = gridContainer.querySelectorAll('.mjr-asset-card.is-selected');
+                    cards.forEach(card => {
+                        card.classList.remove('is-selected');
+                        card.setAttribute('aria-selected', 'false');
+                    });
+                    delete gridContainer.dataset.mjrSelectedAssetIds;
+                    delete gridContainer.dataset.mjrSelectedAssetId;
+                }
+            } catch {}
             onSelectionChanged();
             return;
         }

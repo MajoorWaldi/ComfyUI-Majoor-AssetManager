@@ -25,6 +25,7 @@ from ...config import (
     SCAN_BATCH_LARGE,
     SCAN_BATCH_XL,
     MAX_TO_ENRICH_ITEMS,
+    IS_WINDOWS,
 )
 from ..metadata import MetadataService
 from .metadata_helpers import MetadataHelpers
@@ -58,7 +59,13 @@ class IndexScanner:
     and integration with metadata extraction.
     """
 
-    def __init__(self, db: Sqlite, metadata_service: MetadataService, scan_lock: asyncio.Lock):
+    def __init__(
+        self,
+        db: Sqlite,
+        metadata_service: MetadataService,
+        scan_lock: asyncio.Lock,
+        index_lock: Optional[asyncio.Lock] = None,
+    ):
         """
         Initialize index scanner.
 
@@ -70,6 +77,7 @@ class IndexScanner:
         self.db = db
         self.metadata = metadata_service
         self._scan_lock = scan_lock
+        self._index_lock = index_lock or scan_lock
         self._current_scan_id = None
 
     async def scan_directory(
@@ -217,6 +225,7 @@ class IndexScanner:
                                     to_enrich=to_enrich,
                                 )
                                 batch = []
+                                await asyncio.sleep(0)
 
                     if batch:
                         await self._scan_stream_batch(
@@ -230,6 +239,7 @@ class IndexScanner:
                             to_enrich=to_enrich,
                         )
                         batch = []
+                        await asyncio.sleep(0)
                 except asyncio.CancelledError:
                     stop_event.set()
                     raise
@@ -255,6 +265,16 @@ class IndexScanner:
                     skipped=stats["skipped"],
                     errors=stats["errors"]
                 )
+                if duration > 0.5:
+                    logger.debug(
+                        "scan_directory timing: %.3fs (scanned=%s added=%s updated=%s skipped=%s errors=%s)",
+                        duration,
+                        stats.get("scanned"),
+                        stats.get("added"),
+                        stats.get("updated"),
+                        stats.get("skipped"),
+                        stats.get("errors"),
+                    )
                 self._current_scan_id = None
 
         # Return to_enrich list for background enrichment
@@ -334,7 +354,7 @@ class IndexScanner:
         Returns:
             Result with indexing statistics
         """
-        async with self._scan_lock:
+        async with self._index_lock:
             # Filter unsupported files to prevent indexing internal files (DBs, etc.)
             filtered_paths = []
             for p in paths:
@@ -361,7 +381,7 @@ class IndexScanner:
             self._current_scan_id = scan_id
             scan_start = time.perf_counter()
 
-            # Reduce log noise for single-file indexing (common in watchers)
+            # Reduce log noise for single-file indexing (common in incremental updates)
             start_log_level = logging.DEBUG if len(paths) == 1 else logging.INFO
             self._log_scan_event(
                 start_log_level,
@@ -379,7 +399,7 @@ class IndexScanner:
                 "errors": 0,
                 "start_time": datetime.now().isoformat()
             }
-
+            added_ids: List[int] = []
             try:
                 for batch in self._chunk_file_batches(paths):
                     if not batch:
@@ -412,7 +432,9 @@ class IndexScanner:
                         existing_map=existing_map,
                         stats=stats,
                         to_enrich=None,
+                        added_ids=added_ids,
                     )
+                    await asyncio.sleep(0)
             finally:
                 stats["end_time"] = datetime.now().isoformat()
                 duration = time.perf_counter() - scan_start
@@ -438,6 +460,9 @@ class IndexScanner:
                 )
                 self._current_scan_id = None
 
+        # Include added/updated asset IDs for WebSocket notification
+        if added_ids:
+            stats["added_ids"] = added_ids
         return Result.Ok(stats)
 
     async def _index_batch(
@@ -452,6 +477,7 @@ class IndexScanner:
         existing_map: Dict[str, Dict[str, Any]],
         stats: Dict[str, Any],
         to_enrich: Optional[List[str]] = None,
+        added_ids: Optional[List[int]] = None,
     ) -> None:
         """
         Index a batch of files using a single transaction for all DB writes.
@@ -459,6 +485,8 @@ class IndexScanner:
         This drastically reduces SQLite transaction overhead on large scans (10k+ files)
         while keeping the "do not crash UI" and Result patterns intact.
         """
+
+        batch_start = time.perf_counter()
 
         # Phase 1: Stat files and determine which need metadata extraction
         prepared: List[Dict[str, Any]] = []
@@ -655,7 +683,9 @@ class IndexScanner:
         # If the batch fails, fall back to processing items individually
         batch_failed = False
         try:
-            async with self.db.atransaction(mode="immediate"):
+            async with self.db.atransaction(mode="immediate") as tx:
+                if not tx.ok:
+                    raise RuntimeError(tx.error or "Failed to begin transaction")
                 for entry in prepared:
                     action = entry.get("action")
 
@@ -726,6 +756,12 @@ class IndexScanner:
                                 int(entry.get("size") or 0),
                             )
                             stats["updated"] += 1
+                            # Collect updated asset ID for WebSocket notification
+                            if added_ids is not None and asset_id:
+                                try:
+                                    added_ids.append(int(asset_id))
+                                except Exception:
+                                    pass
                             if entry.get("fast") and to_enrich is not None:
                                 if len(to_enrich) < MAX_TO_ENRICH_ITEMS:
                                     to_enrich.append(entry.get("filepath") or str(entry.get("file_path") or ""))
@@ -771,6 +807,12 @@ class IndexScanner:
                                 int(entry.get("size") or 0),
                             )
                             stats["added"] += 1
+                            # Collect added asset ID for WebSocket notification
+                            if added_ids is not None and res.data and res.data.get("asset_id"):
+                                try:
+                                    added_ids.append(int(res.data["asset_id"]))
+                                except Exception:
+                                    pass
                             if entry.get("fast") and to_enrich is not None:
                                 if len(to_enrich) < MAX_TO_ENRICH_ITEMS:
                                     to_enrich.append(entry.get("filepath") or str(entry.get("file_path") or ""))
@@ -780,29 +822,35 @@ class IndexScanner:
 
                     # Unknown action: count as skipped to be safe.
                     stats["skipped"] += 1
+            if not tx.ok:
+                raise RuntimeError(tx.error or "Commit failed")
         except Exception as batch_error:
             # If the entire batch transaction fails, fall back to processing items individually
             batch_failed = True
             logger.warning("Batch transaction failed: %s. Falling back to individual processing.", str(batch_error))
             stats["errors"] += len(prepared)  # Temporarily count all as errors, will be corrected below
+            failed_entries: list[str] = []
 
             # Process each item individually to isolate failures
             for entry in prepared:
                 action = entry.get("action")
+                filepath_value = str(entry.get("filepath") or entry.get("file_path") or "unknown")
 
                 if action in ("skipped", "skipped_journal"):
                     stats["skipped"] += 1
-                    stats["errors"] -= 1  # Correct the error count
+                    stats["errors"] = max(0, stats["errors"] - 1)  # Correct the error count
                     continue
 
                 try:
-                    async with self.db.atransaction(mode="immediate"):
+                    async with self.db.atransaction(mode="immediate") as tx:
+                        if not tx.ok:
+                            failed_entries.append(filepath_value)
+                            continue
                         if action == "refresh":
                             asset_id = entry.get("asset_id")
                             metadata_result = entry.get("metadata_result")
                             if not asset_id or not isinstance(metadata_result, Result):
-                                stats["skipped"] += 1
-                                stats["errors"] -= 1  # Correct the error count
+                                failed_entries.append(filepath_value)
                                 continue
                             try:
                                 refreshed = await MetadataHelpers.refresh_metadata_if_needed(
@@ -817,12 +865,12 @@ class IndexScanner:
                                     self._write_scan_journal_entry,
                                 )
                                 stats["skipped"] += 1
-                                stats["errors"] -= 1  # Correct the error count
+                                stats["errors"] = max(0, stats["errors"] - 1)  # Correct the error count
                                 if refreshed and entry.get("fast") and to_enrich is not None:
                                     if len(to_enrich) < MAX_TO_ENRICH_ITEMS:
                                         to_enrich.append(entry.get("filepath") or str(entry.get("file_path") or ""))
                             except Exception as exc:
-                                stats["errors"] += 1  # Keep as error
+                                failed_entries.append(filepath_value)
                                 logger.warning("Metadata refresh failed for asset_id=%s: %s", asset_id, exc)
                             continue
 
@@ -830,7 +878,7 @@ class IndexScanner:
                             asset_id = entry.get("asset_id")
                             metadata_result = entry.get("metadata_result")
                             if not asset_id or not isinstance(metadata_result, Result):
-                                stats["errors"] += 1  # Keep as error
+                                failed_entries.append(filepath_value)
                                 continue
                             cache_store = bool(entry.get("cache_store"))
                             if cache_store:
@@ -862,17 +910,17 @@ class IndexScanner:
                                     int(entry.get("size") or 0),
                                 )
                                 stats["updated"] += 1
-                                stats["errors"] -= 1  # Correct the error count
+                                stats["errors"] = max(0, stats["errors"] - 1)  # Correct the error count
                                 if entry.get("fast") and to_enrich is not None:
                                     to_enrich.append(entry.get("filepath") or str(entry.get("file_path") or ""))
                             else:
-                                stats["errors"] += 1  # Keep as error
+                                failed_entries.append(filepath_value)
                             continue
 
                         if action == "added":
                             metadata_result = entry.get("metadata_result")
                             if not isinstance(metadata_result, Result):
-                                stats["errors"] += 1  # Keep as error
+                                failed_entries.append(filepath_value)
                                 continue
                             cache_store = bool(entry.get("cache_store"))
                             res = await self._add_asset(
@@ -907,20 +955,34 @@ class IndexScanner:
                                     int(entry.get("size") or 0),
                                 )
                                 stats["added"] += 1
-                                stats["errors"] -= 1  # Correct the error count
+                                stats["errors"] = max(0, stats["errors"] - 1)  # Correct the error count
                                 if entry.get("fast") and to_enrich is not None:
                                     to_enrich.append(entry.get("filepath") or str(entry.get("file_path") or ""))
                             else:
-                                stats["errors"] += 1  # Keep as error
+                                failed_entries.append(filepath_value)
                             continue
 
                         # Unknown action: count as skipped to be safe.
                         stats["skipped"] += 1
-                        stats["errors"] -= 1  # Correct the error count
+                        stats["errors"] = max(0, stats["errors"] - 1)  # Correct the error count
+                    if not tx.ok:
+                        failed_entries.append(filepath_value)
                 except Exception as individual_error:
                     # If individual processing also fails, log and keep as error
-                    logger.warning("Individual processing failed for entry: %s. Error: %s", str(entry.get("filepath", "unknown")), str(individual_error))
+                    failed_entries.append(filepath_value)
+                    logger.warning("Individual processing failed for entry: %s. Error: %s", filepath_value, str(individual_error))
                     # Error count is already correct
+            if failed_entries:
+                sample = failed_entries[:5]
+                logger.warning("Batch fallback completed with %s failures (sample: %s)", len(failed_entries), sample)
+
+        duration = time.perf_counter() - batch_start
+        if duration > 0.2:
+            logger.debug(
+                "_index_batch timing: %.3fs (batch=%s)",
+                duration,
+                len(batch) if batch is not None else 0,
+            )
 
     async def _prepare_index_entry(
         self,
@@ -1245,6 +1307,13 @@ class IndexScanner:
         mtime = int(stat.st_mtime)
         size = stat.st_size
 
+        # Normalize Windows path casing to avoid duplicate rows differing only by case.
+        if IS_WINDOWS:
+            try:
+                file_path = Path(str(file_path)).resolve(strict=True)
+            except Exception:
+                pass
+
         # Compute file fingerprint before any caching or journal logic (prevents use-before-set bugs)
         filepath = str(file_path)
         state_hash = self._compute_state_hash(filepath, mtime_ns, size)
@@ -1266,12 +1335,22 @@ class IndexScanner:
             existing_asset = existing_state
         else:
             existing = await self.db.aquery(
-                "SELECT id, mtime FROM assets WHERE filepath = ?",
+                "SELECT id, mtime, filepath FROM assets WHERE filepath = ?",
                 (filepath,)
             )
 
             if existing.ok and existing.data and len(existing.data) > 0:
                 existing_asset = existing.data[0]
+            elif IS_WINDOWS:
+                try:
+                    existing_ci = await self.db.aquery(
+                        "SELECT id, mtime, filepath FROM assets WHERE filepath = ? COLLATE NOCASE",
+                        (filepath,)
+                    )
+                    if existing_ci.ok and existing_ci.data and len(existing_ci.data) > 0:
+                        existing_asset = existing_ci.data[0]
+                except Exception:
+                    pass
 
         if existing_asset is not None:
             try:
@@ -1286,7 +1365,10 @@ class IndexScanner:
                 cached_metadata = await MetadataHelpers.retrieve_cached_metadata(self.db, filepath, state_hash)
                 if cached_metadata and cached_metadata.ok:
                     refreshed = False
-                    async with self.db.atransaction(mode="immediate"):
+                    async with self.db.atransaction(mode="immediate") as tx:
+                        if not tx.ok:
+                            logger.warning("Metadata refresh skipped (transaction begin failed) for %s: %s", filepath, tx.error)
+                            return Result.Ok({"action": "skipped"})
                         refreshed = await MetadataHelpers.refresh_metadata_if_needed(
                             self.db,
                             existing_id,
@@ -1300,6 +1382,9 @@ class IndexScanner:
                         )
                         if refreshed:
                             await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
+                    if not tx.ok:
+                        logger.warning("Metadata refresh commit failed for %s: %s", filepath, tx.error)
+                        return Result.Ok({"action": "skipped"})
                     action = "skipped_refresh" if refreshed else "skipped"
                     return Result.Ok({"action": action})
 
@@ -1361,7 +1446,9 @@ class IndexScanner:
             if incremental and existing_mtime == mtime and existing_id:
                 refreshed = False
                 # Keep write transactions short: metadata extraction is already done.
-                async with self.db.atransaction(mode="immediate"):
+                async with self.db.atransaction(mode="immediate") as tx:
+                    if not tx.ok:
+                        return Result.Err("DB_ERROR", tx.error or "Failed to begin transaction")
                     refreshed = await MetadataHelpers.refresh_metadata_if_needed(
                         self.db,
                         existing_id,
@@ -1375,12 +1462,16 @@ class IndexScanner:
                     )
                     if refreshed:
                         await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
+                if not tx.ok:
+                    return Result.Err("DB_ERROR", tx.error or "Commit failed")
                 action = "skipped_refresh" if refreshed else "skipped"
                 return Result.Ok({"action": action})
 
             # Update existing asset
             if existing_id:
-                async with self.db.atransaction(mode="immediate"):
+                async with self.db.atransaction(mode="immediate") as tx:
+                    if not tx.ok:
+                        return Result.Err("DB_ERROR", tx.error or "Failed to begin transaction")
                     result = await self._update_asset(
                         existing_id,
                         file_path,
@@ -1393,10 +1484,14 @@ class IndexScanner:
                     )
                     if result.ok:
                         await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
+                if not tx.ok:
+                    return Result.Err("DB_ERROR", tx.error or "Commit failed")
                 return result
 
         # Add new asset
-        async with self.db.atransaction(mode="immediate"):
+        async with self.db.atransaction(mode="immediate") as tx:
+            if not tx.ok:
+                return Result.Err("DB_ERROR", tx.error or "Failed to begin transaction")
             result = await self._add_asset(
                 filename,
                 subfolder,
@@ -1412,6 +1507,8 @@ class IndexScanner:
             )
             if result.ok:
                 await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
+        if not tx.ok:
+            return Result.Err("DB_ERROR", tx.error or "Commit failed")
         return result
 
     async def _add_asset(
@@ -1471,17 +1568,23 @@ class IndexScanner:
         if not asset_id:
             return Result.Err("INSERT_FAILED", "Failed to get inserted asset ID")
         if write_metadata:
-            metadata_write = await MetadataHelpers.write_asset_metadata_row(self.db, asset_id, metadata_result)
-            if not metadata_write.ok:
-                self._log_scan_event(
-                    logging.WARNING,
-                    "Failed to insert metadata row",
-                    asset_id=asset_id,
-                    error=metadata_write.error,
-                    stage="metadata_write"
+            async with self.db.lock_for_asset(asset_id):
+                metadata_write = await MetadataHelpers.write_asset_metadata_row(
+                    self.db,
+                    asset_id,
+                    metadata_result,
+                    filepath=filepath,
                 )
+                if not metadata_write.ok:
+                    self._log_scan_event(
+                        logging.WARNING,
+                        "Failed to insert metadata row",
+                        asset_id=asset_id,
+                        error=metadata_write.error,
+                        stage="metadata_write"
+                    )
 
-        return Result.Ok({"action": "added"})
+        return Result.Ok({"action": "added", "asset_id": asset_id})
 
     async def _update_asset(
         self,
@@ -1507,36 +1610,42 @@ class IndexScanner:
             height = meta.get("height")
             duration = meta.get("duration")
 
-        # Update assets table (NO workflow fields)
-        update_result = await self.db.aexecute(
-            """
-            UPDATE assets
-            SET width = COALESCE(?, width),
-                height = COALESCE(?, height),
-                duration = COALESCE(?, duration),
-                size = ?, mtime = ?,
-                source = ?, root_id = ?,
-                indexed_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (width, height, duration, size, mtime, str(source or "output"), str(root_id) if root_id else None, asset_id)
-        )
+        async with self.db.lock_for_asset(asset_id):
+            # Update assets table (NO workflow fields)
+            update_result = await self.db.aexecute(
+                """
+                UPDATE assets
+                SET width = COALESCE(?, width),
+                    height = COALESCE(?, height),
+                    duration = COALESCE(?, duration),
+                    size = ?, mtime = ?,
+                    source = ?, root_id = ?,
+                    indexed_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (width, height, duration, size, mtime, str(source or "output"), str(root_id) if root_id else None, asset_id)
+            )
 
-        if not update_result.ok:
-            return Result.Err("UPDATE_FAILED", update_result.error)
+            if not update_result.ok:
+                return Result.Err("UPDATE_FAILED", update_result.error)
 
-        if write_metadata:
-            metadata_write = await MetadataHelpers.write_asset_metadata_row(self.db, asset_id, metadata_result)
-            if not metadata_write.ok:
-                self._log_scan_event(
-                    logging.WARNING,
-                    "Failed to update metadata row",
-                    asset_id=asset_id,
-                    error=metadata_write.error,
-                    stage="metadata_write"
+            if write_metadata:
+                metadata_write = await MetadataHelpers.write_asset_metadata_row(
+                    self.db,
+                    asset_id,
+                    metadata_result,
+                    filepath=str(file_path) if file_path else None,
                 )
+                if not metadata_write.ok:
+                    self._log_scan_event(
+                        logging.WARNING,
+                        "Failed to update metadata row",
+                        asset_id=asset_id,
+                        error=metadata_write.error,
+                        stage="metadata_write"
+                    )
 
-        return Result.Ok({"action": "updated"})
+        return Result.Ok({"action": "updated", "asset_id": asset_id})
 
     def _scan_context(self, **kwargs) -> Dict[str, Any]:
         context = {"scan_id": self._current_scan_id} if self._current_scan_id else {}

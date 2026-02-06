@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from .shared import Result, get_logger
-from .config import INDEX_DIR
+from .config import INDEX_DIR, OUTPUT_ROOT
 
 logger = get_logger(__name__)
 
@@ -48,6 +48,16 @@ def _is_symlink_like(path: Path) -> bool:
     except Exception:
         pass
     return False
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        if hasattr(path, "is_relative_to"):
+            return path.is_relative_to(root)  # type: ignore[attr-defined]
+        path.relative_to(root)
+        return True
+    except Exception:
+        return False
 
 
 def _normalize_dir_path(path: str) -> Optional[Path]:
@@ -114,11 +124,14 @@ def list_custom_roots() -> Result[List[Dict[str, Any]]]:
             path = str(r.get("path") or "").strip()
             if not rid or not path:
                 continue
+            normalized = _normalize_dir_path(path)
+            if not normalized:
+                continue
             cleaned.append(
                 {
                     "id": rid,
-                    "path": path,
-                    "label": str(r.get("label") or "").strip() or Path(path).name or path,
+                    "path": str(normalized),
+                    "label": str(r.get("label") or "").strip() or normalized.name or str(normalized),
                     "created_at": r.get("created_at"),
                 }
             )
@@ -140,6 +153,26 @@ def add_custom_root(path: str, label: Optional[str] = None) -> Result[Dict[str, 
     created_at = _utc_now_iso()
     safe_label = (label or "").strip() or normalized.name or resolved
 
+    output_root = None
+    input_root = None
+    try:
+        if OUTPUT_ROOT:
+            output_root = Path(OUTPUT_ROOT).resolve()
+    except Exception:
+        output_root = None
+    try:
+        import folder_paths
+        input_root = Path(folder_paths.get_input_directory()).resolve()
+    except Exception:
+        input_root = None
+
+    if output_root:
+        if _path_is_relative_to(normalized, output_root) or _path_is_relative_to(output_root, normalized):
+            return Result.Err("OVERLAP", f"Root overlaps with output: {output_root}")
+    if input_root:
+        if _path_is_relative_to(normalized, input_root) or _path_is_relative_to(input_root, normalized):
+            return Result.Err("OVERLAP", f"Root overlaps with input: {input_root}")
+
     with _LOCK:
         store = _read_store()
         roots = store.get("roots") or []
@@ -158,6 +191,13 @@ def add_custom_root(path: str, label: Optional[str] = None) -> Result[Dict[str, 
                         "already_exists": True,
                     }
                 )
+            if existing_path:
+                try:
+                    existing_resolved = Path(str(existing_path)).expanduser().resolve(strict=False)
+                    if _path_is_relative_to(normalized, existing_resolved) or _path_is_relative_to(existing_resolved, normalized):
+                        return Result.Err("OVERLAP", f"Root overlaps with existing: {existing_resolved}")
+                except Exception:
+                    continue
 
         roots.append({"id": root_id, "path": resolved, "label": safe_label, "created_at": created_at})
         store["roots"] = roots

@@ -10,6 +10,7 @@ import { bindViewerContextMenu } from "../features/viewer/ViewerContextMenu.js";
 import { createFileBadge, createRatingBadge, createTagsBadge } from "./Badges.js";
 import { APP_CONFIG } from "../app/config.js";
 import { safeDispatchCustomEvent } from "../utils/events.js";
+import { safeClosest } from "../utils/dom.js";
 import { mountVideoControls } from "./VideoControls.js";
 import { createDefaultViewerState } from "../features/viewer/state.js";
 import { createViewerLifecycle, destroyMediaProcessorsIn, safeAddListener, safeCall } from "../features/viewer/lifecycle.js";
@@ -590,16 +591,16 @@ export function createViewer() {
                 }
 
                 const t = e.target;
-                if (t.closest(".mjr-viewer-header") ||
-                    t.closest(".mjr-viewer-footer") ||
-                    t.closest(".mjr-viewer-geninfo") ||
-                    t.closest(".mjr-video-controls") ||
-                    t.closest(".mjr-context-menu") ||
-                    t.closest(".mjr-ab-slider") ||
-                    t.closest(".mjr-viewer-loupe") ||
-                    t.closest(".mjr-viewer-probe") ||
-                    t.closest(".mjr-viewer-media") ||
-                    t.tagName === "IMG" || t.tagName === "VIDEO" || t.tagName === "CANVAS") {
+                if (safeClosest(t, ".mjr-viewer-header") ||
+                    safeClosest(t, ".mjr-viewer-footer") ||
+                    safeClosest(t, ".mjr-viewer-geninfo") ||
+                    safeClosest(t, ".mjr-video-controls") ||
+                    safeClosest(t, ".mjr-context-menu") ||
+                    safeClosest(t, ".mjr-ab-slider") ||
+                    safeClosest(t, ".mjr-viewer-loupe") ||
+                    safeClosest(t, ".mjr-viewer-probe") ||
+                    safeClosest(t, ".mjr-viewer-media") ||
+                    (t && (t.tagName === "IMG" || t.tagName === "VIDEO" || t.tagName === "CANVAS"))) {
                     return;
                 }
                 _requestCloseFromButton();

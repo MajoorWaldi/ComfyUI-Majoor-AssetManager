@@ -42,7 +42,7 @@ ComfyUI-Majoor-AssetsManager/
     adapters/
       db/                  # sqlite wrapper + schema + repos
       tools/               # exiftool/ffprobe wrappers
-      fs/                  # watcher + scan helpers
+      fs/                  # scan helpers
     features/
       index/               # scan + search + incremental indexing
       metadata/            # extraction metadata + caching

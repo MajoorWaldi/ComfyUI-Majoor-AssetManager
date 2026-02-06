@@ -1,4 +1,4 @@
 """
-Filesystem adapters (watchers, scan helpers, etc.).
+Filesystem adapters (scan helpers, etc.).
 """
 

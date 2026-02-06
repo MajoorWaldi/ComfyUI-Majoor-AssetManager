@@ -10,7 +10,9 @@ import { ASSET_RATING_CHANGED_EVENT, ASSET_TAGS_CHANGED_EVENT } from "../../app/
 import { createTagsEditor } from "../../components/TagsEditor.js";
 import { getViewerInstance } from "../../components/Viewer.js";
 import { safeDispatchCustomEvent } from "../../utils/events.js";
+import { safeClosest } from "../../utils/dom.js";
 import { showAddToCollectionMenu } from "../collections/contextmenu/addToCollectionMenu.js";
+import { removeAssetsFromGrid } from "../grid/GridView.js";
 import {
     getOrCreateMenu,
     createMenuItem,
@@ -49,6 +51,21 @@ const getSelectedAssets = (gridContainer) => {
     const assets = [];
     if (!gridContainer) return assets;
     try {
+        const raw = gridContainer.dataset?.mjrSelectedAssetIds;
+        if (raw) {
+            const ids = JSON.parse(raw);
+            if (Array.isArray(ids) && ids.length) {
+                const all = typeof gridContainer?._mjrGetAssets === "function" ? gridContainer._mjrGetAssets() : [];
+                const idSet = new Set(ids.map(String));
+                for (const a of all || []) {
+                    const id = String(a?.id || "");
+                    if (id && idSet.has(id)) assets.push(a);
+                }
+                if (assets.length) return assets;
+            }
+        }
+    } catch {}
+    try {
         const cards = gridContainer.querySelectorAll(".mjr-asset-card.is-selected");
         for (const card of cards) {
             const a = card?._mjrAsset;
@@ -70,12 +87,25 @@ const getAssetFilepath = (asset) => {
 const clearSelection = (gridContainer) => {
     if (!gridContainer) return;
     try {
+        if (typeof gridContainer?._mjrSetSelection === "function") {
+            gridContainer._mjrSetSelection([], "");
+            return;
+        }
         const cards = gridContainer.querySelectorAll('.mjr-asset-card.is-selected');
         for (const card of cards) {
             card.classList.remove('is-selected');
             card.setAttribute('aria-selected', 'false');
         }
     } catch {}
+    try {
+        delete gridContainer.dataset.mjrSelectedAssetIds;
+        delete gridContainer.dataset.mjrSelectedAssetId;
+    } catch {}
+    safeDispatchCustomEvent(
+        "mjr:selection-changed",
+        { selectedIds: [] },
+        { target: gridContainer, warnPrefix: "[GridContextMenu]" }
+    );
 };
 
 const selectCardForDetails = (gridContainer, card, asset, state) => {
@@ -92,8 +122,12 @@ const selectCardForDetails = (gridContainer, card, asset, state) => {
     const id = asset?.id != null ? String(asset.id) : "";
     if (id) {
         try {
-            gridContainer.dataset.mjrSelectedAssetIds = JSON.stringify([id]);
-            gridContainer.dataset.mjrSelectedAssetId = id;
+            if (typeof gridContainer?._mjrSetSelection === "function") {
+                gridContainer._mjrSetSelection([id], id);
+            } else {
+                gridContainer.dataset.mjrSelectedAssetIds = JSON.stringify([id]);
+                gridContainer.dataset.mjrSelectedAssetId = id;
+            }
         } catch {}
     } else {
         try {
@@ -116,6 +150,13 @@ const selectCardForDetails = (gridContainer, card, asset, state) => {
 const getAllAssetsInGrid = (gridContainer) => {
     const assets = [];
     if (!gridContainer) return assets;
+    try {
+        const getter = gridContainer._mjrGetAssets;
+        if (typeof getter === "function") {
+            const list = getter();
+            if (Array.isArray(list) && list.length) return list;
+        }
+    } catch {}
     try {
         const cards = gridContainer.querySelectorAll(".mjr-asset-card");
         for (const card of cards) {
@@ -303,7 +344,7 @@ export function bindGridContextMenu({
 
     const handler = async (e) => {
         // Check if the contextmenu event is on an asset card
-        const card = e.target.closest(".mjr-asset-card");
+        const card = safeClosest(e.target, ".mjr-asset-card");
         if (!card) return;
         
         e.preventDefault();
@@ -329,12 +370,17 @@ export function bindGridContextMenu({
         if (asset && asset.id && !selectedIds.has(String(asset.id))) {
              const newSelection = [String(asset.id)];
              try {
-                 gridContainer.dataset.mjrSelectedAssetIds = JSON.stringify(newSelection);
-                 // Dispatch event to sync state
-                 safeDispatchCustomEvent("mjr:selection-changed", {
-                     selectedIds: newSelection,
-                     selectedAssets: [asset]
-                 }, { target: gridContainer, warnPrefix: "[GridContextMenu]" });
+                 if (typeof gridContainer?._mjrSetSelection === "function") {
+                     gridContainer._mjrSetSelection(newSelection, newSelection[0]);
+                 } else {
+                     gridContainer.dataset.mjrSelectedAssetIds = JSON.stringify(newSelection);
+                     gridContainer.dataset.mjrSelectedAssetId = newSelection[0];
+                     safeDispatchCustomEvent("mjr:selection-changed", {
+                         selectedIds: newSelection,
+                         selectedAssets: [asset],
+                         activeId: newSelection[0]
+                     }, { target: gridContainer, warnPrefix: "[GridContextMenu]" });
+                 }
              } catch {}
              // Update local set for menu logic
              selectedIds = new Set(newSelection);
@@ -342,9 +388,15 @@ export function bindGridContextMenu({
              // Visually update immediately (toggle class) to give feedback
              try {
                 // Clear others
-                gridContainer.querySelectorAll('.mjr-asset-card.is-selected').forEach(el => el.classList.remove('is-selected'));
+                gridContainer.querySelectorAll('.mjr-asset-card.is-selected').forEach(el => {
+                    el.classList.remove('is-selected');
+                    el.setAttribute?.('aria-selected', 'false');
+                });
                 // Select target
-                if (card) card.classList.add('is-selected');
+                if (card) {
+                    card.classList.add('is-selected');
+                    card.setAttribute('aria-selected', 'true');
+                }
              } catch {}
         }
 
@@ -691,21 +743,27 @@ export function bindGridContextMenu({
                         // Delete each asset individually
                         let successCount = 0;
                         let errorCount = 0;
+                        const deletedIds = [];
 
                         for (const assetId of selectedIds) {
                             const result = await deleteAsset(assetId);
                             if (result?.ok) {
                                 successCount++;
-                                // Remove card from DOM
-                                const card = document.querySelector(`[data-mjr-asset-id="${safeEscapeSelector(assetId)}"]`);
-                                if (card) card.remove();
+                                deletedIds.push(String(assetId));
                             } else {
                                 errorCount++;
                             }
                         }
 
-                        // Clear selection
-                        clearSelection(gridContainer);
+                        if (deletedIds.length) {
+                            const removal = removeAssetsFromGrid(gridContainer, deletedIds);
+                            try {
+                                if (panelState && Array.isArray(removal?.selectedIds)) {
+                                    panelState.selectedAssetIds = removal.selectedIds;
+                                    panelState.activeAssetId = removal.selectedAssetIds[0] || "";
+                                }
+                            } catch {}
+                        }
 
                         if (errorCount === 0) {
                             comfyToast(`${successCount} files deleted successfully!`, "success");
@@ -724,10 +782,12 @@ export function bindGridContextMenu({
                     try {
                         const result = await deleteAsset(asset.id);
                         if (result?.ok) {
-                            // Remove the card from DOM
+                            const removal = removeAssetsFromGrid(gridContainer, [String(asset.id)]);
                             try {
-                                const cardToRemove = document.querySelector(`[data-mjr-asset-id="${safeEscapeSelector(asset.id)}"]`);
-                                cardToRemove?.remove?.();
+                                if (panelState && Array.isArray(removal?.selectedIds)) {
+                                    panelState.selectedAssetIds = removal.selectedIds;
+                                    panelState.activeAssetId = removal.selectedAssetIds[0] || "";
+                                }
                             } catch {}
                             comfyToast("File deleted successfully!", "success");
                         } else {

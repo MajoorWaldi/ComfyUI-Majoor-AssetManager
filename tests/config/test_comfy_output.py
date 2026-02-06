@@ -25,7 +25,9 @@ async def test_comfy_output(tmp_path):
 
     # Build services
     db_path = tmp_path / "comfy_output_test.db"
-    services = await build_services(str(db_path))
+    services_res = await build_services(str(db_path))
+    assert services_res.ok, services_res.error
+    services = services_res.data
     index_service = services["index"]
     # ComfyUI output directory.
     # Prefer explicit env override to avoid depending on local ComfyUI install.

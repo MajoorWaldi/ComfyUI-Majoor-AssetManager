@@ -176,8 +176,8 @@ class IndexSearcher:
                     a.width, a.height, a.duration, a.size, a.mtime,
                     COALESCE(m.rating, 0) as rating,
                     COALESCE(m.tags, '[]') as tags,
- {metadata_tags_text_clause}                    COALESCE(m.has_workflow, 0) as has_workflow,
-                    COALESCE(m.has_generation_data, 0) as has_generation_data,
+ {metadata_tags_text_clause}                    m.has_workflow as has_workflow,
+                    m.has_generation_data as has_generation_data,
                     json_extract(m.metadata_raw, '$.generation_time_ms') as generation_time_ms,
                     json_extract(m.metadata_raw, '$.file_info.ctime') as file_creation_time,
                     json_extract(m.metadata_raw, '$.file_info.birthtime') as file_birth_time
@@ -249,8 +249,8 @@ class IndexSearcher:
                     a.width, a.height, a.duration, a.size, a.mtime,
                     COALESCE(m.rating, 0) as rating,
                     COALESCE(m.tags, '[]') as tags,
- {metadata_tags_text_clause}                    COALESCE(m.has_workflow, 0) as has_workflow,
-                    COALESCE(m.has_generation_data, 0) as has_generation_data,
+ {metadata_tags_text_clause}                    m.has_workflow as has_workflow,
+                    m.has_generation_data as has_generation_data,
                     json_extract(m.metadata_raw, '$.generation_time_ms') as generation_time_ms,
                     json_extract(m.metadata_raw, '$.file_info.ctime') as file_creation_time,
                     json_extract(m.metadata_raw, '$.file_info.birthtime') as file_birth_time,
@@ -405,8 +405,8 @@ class IndexSearcher:
                     a.width, a.height, a.duration, a.size, a.mtime,
                     COALESCE(m.rating, 0) as rating,
                     COALESCE(m.tags, '[]') as tags,
-{metadata_tags_text_clause}                    COALESCE(m.has_workflow, 0) as has_workflow,
-                    COALESCE(m.has_generation_data, 0) as has_generation_data,
+{metadata_tags_text_clause}                    m.has_workflow as has_workflow,
+                    m.has_generation_data as has_generation_data,
                     json_extract(m.metadata_raw, '$.generation_time_ms') as generation_time_ms,
                     json_extract(m.metadata_raw, '$.file_info.ctime') as file_creation_time,
                     json_extract(m.metadata_raw, '$.file_info.birthtime') as file_birth_time
@@ -475,8 +475,8 @@ class IndexSearcher:
                     a.width, a.height, a.duration, a.size, a.mtime,
                     COALESCE(m.rating, 0) as rating,
                     COALESCE(m.tags, '[]') as tags,
-{metadata_tags_text_clause}                    COALESCE(m.has_workflow, 0) as has_workflow,
-                    COALESCE(m.has_generation_data, 0) as has_generation_data,
+{metadata_tags_text_clause}                    m.has_workflow as has_workflow,
+                    m.has_generation_data as has_generation_data,
                     json_extract(m.metadata_raw, '$.generation_time_ms') as generation_time_ms,
                     json_extract(m.metadata_raw, '$.file_info.ctime') as file_creation_time,
                     json_extract(m.metadata_raw, '$.file_info.birthtime') as file_birth_time,                    best.rank as rank
@@ -690,8 +690,8 @@ class IndexSearcher:
                 COALESCE(m.tags, '') AS tags,
                 COALESCE(m.tags_text, '') AS tags_text,
                 m.workflow_hash,
-                COALESCE(m.has_workflow, 0) AS has_workflow,
-                COALESCE(m.has_generation_data, 0) AS has_generation_data,
+                m.has_workflow AS has_workflow,
+                m.has_generation_data AS has_generation_data,
                 json_extract(m.metadata_raw, '$.generation_time_ms') as generation_time_ms,
                 COALESCE(m.metadata_raw, '{}') AS metadata_raw
             FROM assets a
@@ -743,8 +743,8 @@ class IndexSearcher:
                 COALESCE(m.tags, '') AS tags,
                 COALESCE(m.tags_text, '') AS tags_text,
                 m.workflow_hash,
-                COALESCE(m.has_workflow, 0) AS has_workflow,
-                COALESCE(m.has_generation_data, 0) AS has_generation_data,
+                m.has_workflow AS has_workflow,
+                m.has_generation_data AS has_generation_data,
                 COALESCE(m.metadata_quality, 'none') AS metadata_quality,
                 COALESCE(m.metadata_raw, '{{}}') AS metadata_raw
             FROM assets a
@@ -829,8 +829,8 @@ class IndexSearcher:
                 a.root_id,
                 COALESCE(m.rating, 0) as rating,
                 COALESCE(m.tags, '[]') as tags,
-                COALESCE(m.has_workflow, 0) as has_workflow,
-                COALESCE(m.has_generation_data, 0) as has_generation_data
+                m.has_workflow as has_workflow,
+                m.has_generation_data as has_generation_data
             FROM assets a
             LEFT JOIN asset_metadata m ON a.id = m.asset_id
             WHERE {IN_CLAUSE}

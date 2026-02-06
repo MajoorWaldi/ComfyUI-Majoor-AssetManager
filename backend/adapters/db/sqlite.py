@@ -25,6 +25,7 @@ import re
 import threading
 import time
 import uuid
+import os
 from contextlib import contextmanager, asynccontextmanager
 from pathlib import Path
 from queue import Empty, Queue
@@ -41,6 +42,8 @@ logger = get_logger(__name__)
 SQLITE_BUSY_TIMEOUT_MS = 5000
 # Negative cache_size is in KiB. -64000 ~= 64 MiB cache.
 SQLITE_CACHE_SIZE_KIB = -64000
+ASSET_LOCKS_MAX = int(os.getenv("MAJOOR_ASSET_LOCKS_MAX", "10000") or 10000)
+ASSET_LOCKS_TTL_S = float(os.getenv("MAJOOR_ASSET_LOCKS_TTL_SECONDS", "600") or 600.0)
 
 _TX_TOKEN: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("mjr_db_tx_token", default=None)
 _COLUMN_NAME_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?$")
@@ -311,7 +314,7 @@ class Sqlite:
         self._tx_state_lock = threading.Lock()
         # Thread-local storage for sync transactions (caller thread).
         self._tx_local = threading.local()
-        self._asset_locks: Dict[str, asyncio.Lock] = {}
+        self._asset_locks: Dict[str, Dict[str, Any]] = {}
         self._asset_locks_lock = threading.Lock()
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -407,14 +410,56 @@ class Sqlite:
         if self._write_lock is None:
             self._write_lock = asyncio.Lock()
 
+    def _prune_asset_locks_locked(self, now: float) -> None:
+        if not self._asset_locks:
+            return
+        cutoff = now - float(ASSET_LOCKS_TTL_S)
+        try:
+            for key, entry in list(self._asset_locks.items()):
+                try:
+                    lock = entry.get("lock")
+                    last = float(entry.get("last") or 0)
+                except Exception:
+                    continue
+                try:
+                    if lock is not None and getattr(lock, "locked", None) and lock.locked():
+                        continue
+                except Exception:
+                    pass
+                if last and last < cutoff:
+                    self._asset_locks.pop(key, None)
+        except Exception:
+            pass
+
+        if ASSET_LOCKS_MAX > 0 and len(self._asset_locks) > ASSET_LOCKS_MAX:
+            try:
+                items = sorted(self._asset_locks.items(), key=lambda kv: float(kv[1].get("last") or 0))
+                to_drop = max(0, len(items) - ASSET_LOCKS_MAX)
+                for key, entry in items[:to_drop]:
+                    try:
+                        lock = entry.get("lock")
+                        if lock is not None and getattr(lock, "locked", None) and lock.locked():
+                            continue
+                    except Exception:
+                        pass
+                    self._asset_locks.pop(key, None)
+            except Exception:
+                pass
+
     def _get_or_create_asset_lock(self, asset_id: Any) -> asyncio.Lock:
         key = _asset_lock_key(asset_id)
+        now = time.time()
         with self._asset_locks_lock:
-            lock = self._asset_locks.get(key)
-            if lock:
-                return lock
+            entry = self._asset_locks.get(key)
+            if entry:
+                try:
+                    entry["last"] = now
+                    return entry["lock"]
+                except Exception:
+                    pass
             lock = asyncio.Lock()
-            self._asset_locks[key] = lock
+            self._asset_locks[key] = {"lock": lock, "last": now}
+            self._prune_asset_locks_locked(now)
             return lock
 
     @asynccontextmanager
@@ -451,6 +496,18 @@ class Sqlite:
                 # best-effort; should not happen with sqlite3.Row
                 pass
         return out
+
+    async def _with_query_timeout(self, coro):
+        try:
+            timeout = float(self._query_timeout or 0)
+        except Exception:
+            timeout = 0.0
+        if timeout > 0:
+            try:
+                return await asyncio.wait_for(coro, timeout=timeout)
+            except asyncio.TimeoutError:
+                return Result.Err(ErrorCode.TIMEOUT, "Database operation timed out")
+        return await coro
 
     async def _execute_async(
         self,
@@ -497,36 +554,38 @@ class Sqlite:
         commit: bool,
         tx_token: Optional[str] = None,
     ) -> Result[Any]:
-        try:
-            lock = self._write_lock
-            is_write = self._is_write_sql(query)
-            if is_write and lock is not None:
-                # BEGIN acquires the write lock already; avoid deadlocking by reacquiring it
-                # for statements executed within the same transaction.
-                if tx_token:
-                    try:
-                        with self._tx_state_lock:
-                            in_tx = tx_token in self._tx_write_lock_tokens
-                    except Exception:
+        async def _execute_inner() -> Result[Any]:
+            try:
+                lock = self._write_lock
+                is_write = self._is_write_sql(query)
+                if is_write and lock is not None:
+                    # BEGIN acquires the write lock already; avoid deadlocking by reacquiring it
+                    # for statements executed within the same transaction.
+                    if tx_token:
+                        try:
+                            with self._tx_state_lock:
+                                in_tx = tx_token in self._tx_write_lock_tokens
+                        except Exception:
+                            in_tx = False
+                    else:
                         in_tx = False
-                else:
-                    in_tx = False
-                if in_tx:
-                    return await self._execute_on_conn_locked_async(conn, query, params, fetch, commit=commit)
-                async with lock:
-                    return await self._execute_on_conn_locked_async(conn, query, params, fetch, commit=commit)
-            return await self._execute_on_conn_locked_async(conn, query, params, fetch, commit=commit)
-        except sqlite3.IntegrityError as exc:
-            logger.warning("Integrity error: %s", exc)
-            return Result.Err(ErrorCode.DB_ERROR, f"Integrity error: {exc}")
-        except sqlite3.OperationalError as exc:
-            if "interrupted" in str(exc).lower():
-                return Result.Err(ErrorCode.TIMEOUT, "Database operation interrupted (query timeout)")
-            logger.error("Operational error: %s", exc)
-            return Result.Err(ErrorCode.DB_ERROR, f"Operational error: {exc}")
-        except Exception as exc:
-            logger.error("Unexpected database error: %s", exc)
-            return Result.Err(ErrorCode.DB_ERROR, str(exc))
+                    if in_tx:
+                        return await self._execute_on_conn_locked_async(conn, query, params, fetch, commit=commit)
+                    async with lock:
+                        return await self._execute_on_conn_locked_async(conn, query, params, fetch, commit=commit)
+                return await self._execute_on_conn_locked_async(conn, query, params, fetch, commit=commit)
+            except sqlite3.IntegrityError as exc:
+                logger.warning("Integrity error: %s", exc)
+                return Result.Err(ErrorCode.DB_ERROR, f"Integrity error: {exc}")
+            except sqlite3.OperationalError as exc:
+                if "interrupted" in str(exc).lower():
+                    return Result.Err(ErrorCode.TIMEOUT, "Database operation interrupted (query timeout)")
+                logger.error("Operational error: %s", exc)
+                return Result.Err(ErrorCode.DB_ERROR, f"Operational error: {exc}")
+            except Exception as exc:
+                logger.error("Unexpected database error: %s", exc)
+                return Result.Err(ErrorCode.DB_ERROR, str(exc))
+        return await self._with_query_timeout(_execute_inner())
 
     async def _execute_on_conn_locked_async(
         self,
@@ -687,33 +746,35 @@ class Sqlite:
         commit: bool,
         tx_token: Optional[str] = None,
     ) -> Result[int]:
-        try:
-            lock = self._write_lock
-            is_write = self._is_write_sql(query)
-            if is_write and lock is not None:
-                # Check if we're inside an existing transaction that holds the write lock.
-                # Use _tx_state_lock to avoid race conditions with concurrent rollback/commit.
-                if tx_token:
-                    try:
-                        with self._tx_state_lock:
-                            in_tx = tx_token in self._tx_write_lock_tokens
-                    except Exception:
+        async def _execute_inner() -> Result[int]:
+            try:
+                lock = self._write_lock
+                is_write = self._is_write_sql(query)
+                if is_write and lock is not None:
+                    # Check if we're inside an existing transaction that holds the write lock.
+                    # Use _tx_state_lock to avoid race conditions with concurrent rollback/commit.
+                    if tx_token:
+                        try:
+                            with self._tx_state_lock:
+                                in_tx = tx_token in self._tx_write_lock_tokens
+                        except Exception:
+                            in_tx = False
+                    else:
                         in_tx = False
-                else:
-                    in_tx = False
-                if in_tx:
-                    return await self._executemany_on_conn_locked_async(conn, query, params_list, commit=commit)
-                async with lock:
-                    return await self._executemany_on_conn_locked_async(conn, query, params_list, commit=commit)
-            return await self._executemany_on_conn_locked_async(conn, query, params_list, commit=commit)
-        except sqlite3.OperationalError as exc:
-            if "interrupted" in str(exc).lower():
-                return Result.Err(ErrorCode.TIMEOUT, "Database operation interrupted (query timeout)")
-            logger.error("Batch execute error: %s", exc)
-            return Result.Err(ErrorCode.DB_ERROR, str(exc))
-        except Exception as exc:
-            logger.error("Batch execute error: %s", exc)
-            return Result.Err(ErrorCode.DB_ERROR, str(exc))
+                    if in_tx:
+                        return await self._executemany_on_conn_locked_async(conn, query, params_list, commit=commit)
+                    async with lock:
+                        return await self._executemany_on_conn_locked_async(conn, query, params_list, commit=commit)
+                return await self._executemany_on_conn_locked_async(conn, query, params_list, commit=commit)
+            except sqlite3.OperationalError as exc:
+                if "interrupted" in str(exc).lower():
+                    return Result.Err(ErrorCode.TIMEOUT, "Database operation interrupted (query timeout)")
+                logger.error("Batch execute error: %s", exc)
+                return Result.Err(ErrorCode.DB_ERROR, str(exc))
+            except Exception as exc:
+                logger.error("Batch execute error: %s", exc)
+                return Result.Err(ErrorCode.DB_ERROR, str(exc))
+        return await self._with_query_timeout(_execute_inner())
 
     async def _executemany_on_conn_locked_async(
         self, conn: aiosqlite.Connection, query: str, params_list: List[Tuple], *, commit: bool
@@ -774,26 +835,28 @@ class Sqlite:
             await self._release_connection_async(conn)
 
     async def _executescript_on_conn_async(self, conn: aiosqlite.Connection, script: str, *, commit: bool) -> Result[bool]:
-        try:
-            for attempt in range(self._lock_retry_attempts + 1):
-                try:
-                    await conn.executescript(script)
-                    if commit:
-                        await conn.commit()
-                    return Result.Ok(True)
-                except sqlite3.OperationalError as exc:
-                    if self._is_locked_error(exc) and attempt < self._lock_retry_attempts:
-                        await self._sleep_backoff(attempt)
-                        continue
-                    raise
-        except sqlite3.OperationalError as exc:
-            if "interrupted" in str(exc).lower():
-                return Result.Err(ErrorCode.TIMEOUT, "Database operation interrupted (query timeout)")
-            logger.error("Script execution error: %s", exc)
-            return Result.Err(ErrorCode.DB_ERROR, str(exc))
-        except Exception as exc:
-            logger.error("Script execution error: %s", exc)
-            return Result.Err(ErrorCode.DB_ERROR, str(exc))
+        async def _execute_inner() -> Result[bool]:
+            try:
+                for attempt in range(self._lock_retry_attempts + 1):
+                    try:
+                        await conn.executescript(script)
+                        if commit:
+                            await conn.commit()
+                        return Result.Ok(True)
+                    except sqlite3.OperationalError as exc:
+                        if self._is_locked_error(exc) and attempt < self._lock_retry_attempts:
+                            await self._sleep_backoff(attempt)
+                            continue
+                        raise
+            except sqlite3.OperationalError as exc:
+                if "interrupted" in str(exc).lower():
+                    return Result.Err(ErrorCode.TIMEOUT, "Database operation interrupted (query timeout)")
+                logger.error("Script execution error: %s", exc)
+                return Result.Err(ErrorCode.DB_ERROR, str(exc))
+            except Exception as exc:
+                logger.error("Script execution error: %s", exc)
+                return Result.Err(ErrorCode.DB_ERROR, str(exc))
+        return await self._with_query_timeout(_execute_inner())
 
     def executescript(self, script: str) -> Result[bool]:
         """Execute a multi-statement SQL script (sync)."""
@@ -1190,17 +1253,22 @@ class Sqlite:
     def transaction(self, mode: str = "immediate"):
         """Context manager for a DB transaction (sync)."""
         # Back-compat sync transaction: routes token via thread-local.
+        tx_state = Result.Ok(True)
         begin_res = self._loop_thread.run(self._begin_tx_async(mode))
         if not begin_res.ok or not begin_res.data:
-            raise RuntimeError(str(begin_res.error or "Failed to begin transaction"))
+            tx_state = Result.Err(ErrorCode.DB_ERROR, str(begin_res.error or "Failed to begin transaction"))
+            yield tx_state
+            return
 
         token = str(begin_res.data)
         self._tx_local.token = token
         try:
-            yield
+            yield tx_state
             commit_res = self._loop_thread.run(self._commit_tx_async(token))
             if not commit_res.ok:
-                raise RuntimeError(str(commit_res.error or "Commit failed"))
+                tx_state.ok = False
+                tx_state.code = str(getattr(commit_res, "code", None) or ErrorCode.DB_ERROR)
+                tx_state.error = str(commit_res.error or "Commit failed")
         except Exception:
             try:
                 self._loop_thread.run(self._rollback_tx_async(token))
@@ -1217,17 +1285,22 @@ class Sqlite:
     @asynccontextmanager
     async def atransaction(self, mode: str = "immediate"):
         """Async context manager for a DB transaction."""
+        tx_state = Result.Ok(True)
         begin_res = await self._begin_tx_for_async(mode)
         if not begin_res.ok or not begin_res.data:
-            raise RuntimeError(str(begin_res.error or "Failed to begin transaction"))
+            tx_state = Result.Err(ErrorCode.DB_ERROR, str(begin_res.error or "Failed to begin transaction"))
+            yield tx_state
+            return
 
         token = str(begin_res.data)
         token_handle = _TX_TOKEN.set(token)
         try:
-            yield
+            yield tx_state
             commit_res = await self._commit_tx_for_async(token)
             if not commit_res.ok:
-                raise RuntimeError(str(commit_res.error or "Commit failed"))
+                tx_state.ok = False
+                tx_state.code = str(getattr(commit_res, "code", None) or ErrorCode.DB_ERROR)
+                tx_state.error = str(commit_res.error or "Commit failed")
         except Exception:
             try:
                 await self._rollback_tx_for_async(token)

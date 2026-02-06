@@ -26,6 +26,7 @@ from ..core import _json_response, _require_services, _csrf_error, _require_writ
 SECURITY_PREF_KEYS = {
     "safe_mode",
     "allow_write",
+    "allow_remote_write",
     "allow_delete",
     "allow_rename",
     "allow_open_in_folder",
@@ -89,6 +90,17 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
                 result.data["scope"] = scope
                 if scope == "custom":
                     result.data["custom_root_id"] = custom_root_id
+                try:
+                    watcher = svc.get("watcher") if isinstance(svc, dict) else None
+                    watcher_scope = svc.get("watcher_scope") if isinstance(svc, dict) else None
+                    result.data["watcher"] = {
+                        "enabled": bool(watcher is not None and getattr(watcher, "is_running", False)),
+                        "directories": watcher.watched_directories if watcher else [],
+                        "scope": (watcher_scope or {}).get("scope") if isinstance(watcher_scope, dict) else None,
+                        "custom_root_id": (watcher_scope or {}).get("custom_root_id") if isinstance(watcher_scope, dict) else None,
+                    }
+                except Exception:
+                    result.data["watcher"] = {"enabled": False, "directories": [], "scope": None, "custom_root_id": None}
         return _json_response(result)
 
     @routes.get("/mjr/am/config")

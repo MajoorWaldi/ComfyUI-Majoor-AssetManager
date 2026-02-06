@@ -54,13 +54,13 @@ _rate_limit_lock = threading.Lock()
 _rate_limit_cleanup_counter = 0
 
 
-def _env_truthy(name: str) -> bool:
+def _env_truthy(name: str, default: bool = False) -> bool:
     try:
         raw = os.environ.get(name)
     except Exception:
         raw = None
     if raw is None:
-        return False
+        return bool(default)
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
@@ -303,7 +303,8 @@ def _check_write_access(*, peer_ip: str, headers: Mapping[str, str]) -> "Result[
 
     configured = _get_write_token()
     require_auth = _env_truthy("MAJOOR_REQUIRE_AUTH")
-    allow_remote = _env_truthy("MAJOOR_ALLOW_REMOTE_WRITE")
+    # By default, remote write access is NOT allowed unless explicitly configured.
+    allow_remote = _env_truthy("MAJOOR_ALLOW_REMOTE_WRITE", default=False)
 
     client_ip = _resolve_client_ip(peer_ip, headers)
 

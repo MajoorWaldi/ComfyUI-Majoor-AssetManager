@@ -1,0 +1,34 @@
+name: Nightly build & prerelease
+on:
+  schedule:
+    - cron: '0 2 * * *' # daily at 02:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  nightly:
+    name: Nightly build and prerelease
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build nightly ZIP
+        run: |
+          TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
+          ZIP=mjr-am-nightly-${TIMESTAMP}.zip
+          git archive --format=zip --output="$ZIP" HEAD || (zip -r "$ZIP" . -x .github/** tests/** __pycache__/**)
+          echo "ZIP=$ZIP" >> $GITHUB_ENV
+
+      - name: Create nightly prerelease
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.ZIP }}
+          name: Nightly ${{ env.ZIP }}
+          body: Automated nightly build
+          prerelease: true
+          files: ${{ env.ZIP }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -31,6 +31,13 @@ from backend.config import (
 from backend.custom_roots import resolve_custom_root
 from backend.shared import Result, ErrorCode, get_logger
 from backend.utils import parse_bool
+from backend.features.index.metadata_helpers import MetadataHelpers
+from backend.features.index.watcher_scope import (
+    build_watch_paths,
+    normalize_scope,
+    WATCHER_SCOPE_KEY,
+    WATCHER_CUSTOM_ROOT_ID_KEY,
+)
 from ..core import (
     _json_response,
     _require_services,
@@ -144,7 +151,8 @@ async def _write_multipart_file_atomic(dest_dir: Path, filename: str, field) -> 
                 total += len(chunk)
                 if total > _MAX_UPLOAD_SIZE:
                     raise ValueError(f"File exceeds maximum size ({_MAX_UPLOAD_SIZE} bytes)")
-                f.write(chunk)
+                # Avoid blocking the event loop on large writes.
+                await asyncio.to_thread(f.write, chunk)
 
         tmp_obj = Path(str(tmp_path))
         final = dest_dir / safe_name
@@ -362,10 +370,14 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                     
                     out_res = results[0]
                     in_res = results[1]
-                    
-                    # Handle exceptions if any
-                    if isinstance(out_res, Exception): raise out_res
-                    if isinstance(in_res, Exception): raise in_res
+
+                    # Handle exceptions if any (never raise to UI).
+                    if isinstance(out_res, Exception):
+                        logger.error("Output scan failed: %s", out_res)
+                        return _json_response(Result.Err("SCAN_FAILED", safe_error_message(out_res, "Output scan failed")))
+                    if isinstance(in_res, Exception):
+                        logger.error("Input scan failed: %s", in_res)
+                        return _json_response(Result.Err("SCAN_FAILED", safe_error_message(in_res, "Input scan failed")))
                     
                 except asyncio.TimeoutError:
                     return _json_response(Result.Err("TIMEOUT", "Scan timed out"))
@@ -507,12 +519,14 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
         body = body_res.data or {}
 
         files = body.get("files")
+        origin = str(body.get("origin") or body.get("source") or "").strip().lower()
         if not isinstance(files, list) or not files:
             result = Result.Err("INVALID_INPUT", "Missing or invalid 'files' list")
             return _json_response(result)
 
         incremental = body.get("incremental", True)
         grouped_paths: Dict[Tuple[str, str, str], list] = {}
+        recent_generated_paths: list[str] = []
 
         pending_ops: list[dict[str, Any]] = []
 
@@ -521,10 +535,92 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                 continue
             filename = item.get("filename") or item.get("name")
             if not filename:
-                continue
+                filename = None
             subfolder = item.get("subfolder") or ""
             file_type = (item.get("type") or "output").lower()
             root_id = item.get("root_id") or item.get("custom_root_id")
+            raw_path = item.get("path") or item.get("filepath") or item.get("fullpath") or item.get("full_path")
+
+            # If an absolute path is provided, prefer it (more robust across ComfyUI variants).
+            if raw_path:
+                normalized = None
+                try:
+                    p = Path(str(raw_path)).expanduser()
+                    if p.is_absolute() or getattr(p, "drive", ""):
+                        normalized = p.resolve(strict=True)
+                except Exception:
+                    normalized = None
+
+                if normalized is not None:
+                    base_root = None
+                    base_type = None
+                    base_root_id = root_id
+
+                    try:
+                        out_root = Path(OUTPUT_ROOT).resolve(strict=True)
+                    except Exception:
+                        out_root = None
+                    try:
+                        in_root = Path(folder_paths.get_input_directory()).resolve(strict=True)
+                    except Exception:
+                        in_root = None
+
+                    if out_root and _is_within_root(normalized, out_root):
+                        base_root = str(out_root)
+                        base_type = "output"
+                        base_root_id = None
+                    elif in_root and _is_within_root(normalized, in_root):
+                        base_root = str(in_root)
+                        base_type = "input"
+                        base_root_id = None
+                    elif file_type == "custom":
+                        root_result = resolve_custom_root(str(root_id or ""))
+                        if root_result.ok:
+                            try:
+                                custom_root = Path(str(root_result.data)).resolve(strict=True)
+                            except Exception:
+                                custom_root = None
+                            if custom_root and _is_within_root(normalized, custom_root):
+                                base_root = str(custom_root)
+                                base_type = "custom"
+                    else:
+                        try:
+                            if _is_path_allowed_custom(normalized):
+                                from backend.custom_roots import list_custom_roots
+
+                                roots_res = list_custom_roots()
+                                if roots_res.ok and isinstance(roots_res.data, list):
+                                    for r in roots_res.data:
+                                        try:
+                                            rp = Path(str(r.get("path") or "")).resolve(strict=True)
+                                            if _is_within_root(normalized, rp):
+                                                base_root = str(rp)
+                                                base_type = "custom"
+                                                base_root_id = r.get("id") or root_id
+                                                break
+                                        except Exception:
+                                            continue
+                        except Exception:
+                            pass
+
+                    if base_root and base_type:
+                        # Enforce allowlist checks
+                        if base_type == "custom":
+                            if not _is_path_allowed_custom(normalized):
+                                continue
+                        else:
+                            if not _is_path_allowed(normalized):
+                                continue
+                        grouped_paths.setdefault((base_root, base_type, str(base_root_id or "")), []).append(normalized)
+                        if origin in ("generation", "executed", "comfy", "comfyui"):
+                            try:
+                                recent_generated_paths.append(str(normalized))
+                            except Exception:
+                                pass
+                        continue
+
+            if not filename:
+                continue
 
             if file_type == "input":
                 base_root = folder_paths.get_input_directory()
@@ -559,10 +655,22 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                     continue
 
             grouped_paths.setdefault((base_dir, file_type, str(root_id or "")), []).append(normalized)
+            if origin in ("generation", "executed", "comfy", "comfyui"):
+                try:
+                    recent_generated_paths.append(str(normalized))
+                except Exception:
+                    pass
 
         if not grouped_paths:
             result = Result.Err("INVALID_INPUT", "No valid files to index")
             return _json_response(result)
+
+        if recent_generated_paths:
+            try:
+                from backend.features.index.watcher import mark_recent_generated
+                mark_recent_generated(recent_generated_paths)
+            except Exception:
+                pass
 
         total_stats = {
             "scanned": 0,
@@ -629,7 +737,9 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
              try:
                  db_adapter = svc['db']
                  
-                 async with db_adapter.atransaction():
+                 async with db_adapter.atransaction() as tx:
+                     if not tx.ok:
+                         raise RuntimeError(tx.error or "Failed to begin transaction")
                      # A. Create Temp Table for Batch Processing
                      await db_adapter.aexecute("CREATE TEMPORARY TABLE IF NOT EXISTS temp_gen_updates (filename TEXT, subfolder TEXT, source TEXT, gen_time INTEGER)")
                      await db_adapter.aexecute("DELETE FROM temp_gen_updates")
@@ -669,17 +779,54 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                              upsert_params.append((asset_id, new_json))
                          
                          # D. Bulk Upsert (INSERT or UPDATE)
-                         # Use ON CONFLICT to handle both new and existing rows
+                         # Prefer per-asset locked writes using MetadataHelpers to avoid races
+                         # with other concurrent metadata writers (background enrichers, manual edits).
                          if upsert_params:
-                             await db_adapter.aexecutemany("""
-                                 INSERT INTO asset_metadata (asset_id, metadata_raw)
-                                 VALUES (?, ?)
-                                 ON CONFLICT(asset_id) DO UPDATE SET
-                                     metadata_raw = excluded.metadata_raw
-                             """, upsert_params)
+                             try:
+                                 from backend.features.index.metadata_helpers import MetadataHelpers
+                                 for asset_id, new_json in upsert_params:
+                                     try:
+                                         async with db_adapter.lock_for_asset(int(asset_id)):
+                                             # Load current metadata_raw for this asset (if any)
+                                             cur = await db_adapter.aquery("SELECT metadata_raw FROM asset_metadata WHERE asset_id = ? LIMIT 1", (int(asset_id),))
+                                             cur_meta = {}
+                                             if cur.ok and cur.data and cur.data[0].get("metadata_raw"):
+                                                 try:
+                                                     cur_meta = json.loads(cur.data[0].get("metadata_raw") or "{}")
+                                                 except Exception:
+                                                     cur_meta = {}
+
+                                             # Parse incoming partial metadata (e.g., {'generation_time_ms': 123})
+                                             incoming_meta = {}
+                                             try:
+                                                 incoming_meta = json.loads(new_json) if new_json else {}
+                                             except Exception:
+                                                 incoming_meta = {}
+
+                                             # Merge conservatively: preserve existing keys and update with incoming values
+                                             merged = dict(cur_meta)
+                                             merged.update(incoming_meta)
+
+                                             # Use MetadataHelpers to write merged metadata safely (it handles quality/tags/flags)
+                                             await MetadataHelpers.write_asset_metadata_row(db_adapter, int(asset_id), Result.Ok(merged))
+                                     except Exception:
+                                         logger.debug("Failed to upsert generation time for asset %s", asset_id)
+                             except Exception:
+                                 # Fallback: if per-asset path fails for any reason, try the original bulk upsert SQL
+                                 try:
+                                     await db_adapter.aexecutemany("""
+                                         INSERT INTO asset_metadata (asset_id, metadata_raw)
+                                         VALUES (?, ?)
+                                         ON CONFLICT(asset_id) DO UPDATE SET
+                                             metadata_raw = excluded.metadata_raw
+                                     """, upsert_params)
+                                 except Exception:
+                                     logger.debug("Fallback SQL bulk upsert failed")
                      
                      # Cleanup
                      await db_adapter.aexecute("DROP TABLE IF EXISTS temp_gen_updates")
+                 if not tx.ok:
+                     raise RuntimeError(tx.error or "Commit failed")
 
              except Exception as ex:
                  logger.debug("Failed during batch metadata enhancement: %s", ex)
@@ -964,7 +1111,9 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
 
         async def _do_clears() -> Result[dict]:
             # Make clears atomic and resistant to concurrent writers.
-            async with db.atransaction(mode="immediate"):
+            async with db.atransaction(mode="immediate") as tx:
+                if not tx.ok:
+                    return Result.Err("DB_ERROR", tx.error or "Failed to begin transaction")
                 if clear_scan_journal:
                     res = await _clear_table("scan_journal", cache_prefixes)
                     if not res.ok:
@@ -988,6 +1137,8 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                     if not res.ok:
                         return res
                     cleared["assets"] = int(res.data or 0)
+            if not tx.ok:
+                return Result.Err("DB_ERROR", tx.error or "Commit failed")
             return Result.Ok(cleared)
 
         try:
@@ -1007,7 +1158,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
         if scope == "all" and (clear_scan_journal or clear_metadata_cache):
             # 1. Vacuum DB to reclaim space and rebuild file
             try:
-                await db.aexecute("VACUUM")
+                await asyncio.to_thread(db.execute, "VACUUM")
                 logger.info("Database VACUUM completed during index reset")
             except Exception as exc:
                 logger.warning(f"Failed to VACUUM database: {exc}")
@@ -1015,7 +1166,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
             # 2. Cleanup physical stray files in index directory
             # Verify we are cleaning the right folder and safeguard critical files
             if reindex and INDEX_DIR_PATH.exists():
-                try:
+                def _cleanup_index_dir():
                     for item in INDEX_DIR_PATH.iterdir():
                         if item.name.startswith("assets.sqlite"):
                             continue
@@ -1033,6 +1184,9 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                             logger.info(f"Deleted stray index item: {item.name}")
                         except Exception as e:
                             logger.warning(f"Failed to delete {item.name}: {e}")
+
+                try:
+                    await asyncio.to_thread(_cleanup_index_dir)
                 except Exception as exc:
                     logger.warning(f"Index directory cleanup failed: {exc}")
 
@@ -1084,8 +1238,12 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
         rebuild_status = None
         if rebuild_fts_flag:
             try:
-                async with db.atransaction(mode="immediate"):
+                async with db.atransaction(mode="immediate") as tx:
+                    if not tx.ok:
+                        return _json_response(Result.Err("DB_ERROR", tx.error or "Failed to begin transaction"))
                     rebuild_result = await rebuild_fts(db)
+                if not tx.ok:
+                    return _json_response(Result.Err("DB_ERROR", tx.error or "Commit failed"))
             except Exception as exc:
                 logger.exception("FTS rebuild failed during index reset")
                 return _json_response(Result.Err("DB_ERROR", f"FTS rebuild failed: {exc}"))
@@ -1372,9 +1530,8 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
             purpose = request.query.get("purpose", "").lower().strip()
             skip_index = (purpose == "node_drop")
 
-            # Get input directory
+            # Get input directory (use module-level `folder_paths` so tests can monkeypatch)
             try:
-                import folder_paths
                 input_dir = Path(folder_paths.get_input_directory()).resolve()
             except Exception:
                 input_dir = Path(__file__).parent.parent.parent.parent / "input"
@@ -1412,4 +1569,179 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
             logger.error(f"Upload failed: {e}")
             return _json_response(Result.Err("UPLOAD_FAILED", "Upload failed"))
 
+    @routes.get("/mjr/am/watcher/status")
+    async def watcher_status(request):
+        """Get watcher status."""
+        svc, error_result = await _require_services()
+        if error_result:
+            return _json_response(error_result)
+
+        watcher = svc.get("watcher")
+        return _json_response(Result.Ok({
+            "enabled": watcher is not None and watcher.is_running,
+            "directories": watcher.watched_directories if watcher else [],
+        }))
+
+    @routes.post("/mjr/am/watcher/toggle")
+    async def watcher_toggle(request):
+        """Start or stop the file watcher."""
+        svc, error_result = await _require_services()
+        if error_result:
+            return _json_response(error_result)
+
+        csrf = _csrf_error(request)
+        if csrf:
+            return _json_response(Result.Err("CSRF", csrf))
+
+        body_res = await _read_json(request)
+        if not body_res.ok:
+            return _json_response(body_res)
+        body = body_res.data or {}
+
+        enabled = body.get("enabled", True)
+        watcher = svc.get("watcher")
+
+        if enabled:
+            # Start watcher
+            if watcher and watcher.is_running:
+                return _json_response(Result.Ok({"enabled": True, "directories": watcher.watched_directories}))
+
+            from backend.features.index.watcher import OutputWatcher
+
+            index_service = svc.get("index")
+            if not index_service:
+                return _json_response(Result.Err("SERVICE_UNAVAILABLE", "Index service not available"))
+
+            async def index_callback(filepaths, base_dir, source=None, root_id=None):
+                if not filepaths:
+                    return
+                try:
+                    # Give executed-event a moment to mark generated files.
+                    await asyncio.sleep(0.2)
+                except Exception:
+                    pass
+                try:
+                    from backend.features.index.watcher import is_recent_generated
+                    filepaths = [f for f in (filepaths or []) if f and not is_recent_generated(f)]
+                except Exception:
+                    pass
+                if not filepaths:
+                    return
+                paths = [Path(f) for f in filepaths if f]
+                if paths:
+                    await index_service.index_paths(
+                        paths=paths,
+                        base_dir=base_dir,
+                        incremental=True,
+                        source=source or "watcher",
+                        root_id=root_id,
+                    )
+
+            new_watcher = OutputWatcher(index_callback)
+            scope_cfg = svc.get("watcher_scope") if isinstance(svc, dict) else None
+            desired_scope = normalize_scope((scope_cfg or {}).get("scope"))
+            desired_root_id = (scope_cfg or {}).get("custom_root_id") or (scope_cfg or {}).get("root_id")
+            watch_paths = build_watch_paths(desired_scope, desired_root_id)
+
+            if watch_paths:
+                loop = asyncio.get_event_loop()
+                await new_watcher.start(watch_paths, loop)
+                svc["watcher"] = new_watcher
+                svc["watcher_scope"] = {"scope": desired_scope, "custom_root_id": desired_root_id or ""}
+                return _json_response(Result.Ok({"enabled": True, "directories": new_watcher.watched_directories}))
+            else:
+                return _json_response(Result.Err("NO_DIRECTORIES", "No directories to watch"))
+        else:
+            # Stop watcher
+            if watcher:
+                await watcher.stop()
+                svc["watcher"] = None
+            return _json_response(Result.Ok({"enabled": False, "directories": []}))
+
+    @routes.post("/mjr/am/watcher/scope")
+    async def watcher_scope(request):
+        """Configure watcher to follow a single scope (global mode)."""
+        svc, error_result = await _require_services()
+        if error_result:
+            return _json_response(error_result)
+
+        csrf = _csrf_error(request)
+        if csrf:
+            return _json_response(Result.Err("CSRF", csrf))
+
+        body_res = await _read_json(request)
+        if not body_res.ok:
+            return _json_response(body_res)
+        body = body_res.data or {}
+
+        scope = normalize_scope(body.get("scope"))
+        custom_root_id = body.get("custom_root_id") or body.get("root_id") or body.get("customRootId")
+        custom_root_id = str(custom_root_id or "").strip()
+
+        # Persist desired scope in memory even if watcher is disabled.
+        svc["watcher_scope"] = {"scope": scope, "custom_root_id": custom_root_id}
+        try:
+            db = svc.get("db")
+            if db:
+                await MetadataHelpers.set_metadata_value(db, WATCHER_SCOPE_KEY, str(scope))
+                await MetadataHelpers.set_metadata_value(db, WATCHER_CUSTOM_ROOT_ID_KEY, str(custom_root_id or ""))
+        except Exception:
+            pass
+
+        # If watcher is not enabled, just acknowledge.
+        watcher = svc.get("watcher")
+        if not watcher or not watcher.is_running:
+            return _json_response(Result.Ok({"enabled": False, "directories": [], "scope": scope}))
+
+        from backend.features.index.watcher import OutputWatcher
+
+        index_service = svc.get("index")
+        if not index_service:
+            return _json_response(Result.Err("SERVICE_UNAVAILABLE", "Index service not available"))
+
+        watch_paths = build_watch_paths(scope, custom_root_id)
+        if not watch_paths:
+            try:
+                if watcher and watcher.is_running:
+                    await watcher.stop()
+                    svc["watcher"] = None
+            except Exception:
+                pass
+            return _json_response(Result.Ok({"enabled": False, "directories": [], "scope": scope}))
+
+        try:
+            await watcher.stop()
+        except Exception:
+            pass
+
+        async def index_callback(filepaths, base_dir, source=None, root_id=None):
+            if not filepaths:
+                return
+            try:
+                # Give executed-event a moment to mark generated files.
+                await asyncio.sleep(0.2)
+            except Exception:
+                pass
+            try:
+                from backend.features.index.watcher import is_recent_generated
+                filepaths = [f for f in (filepaths or []) if f and not is_recent_generated(f)]
+            except Exception:
+                pass
+            if not filepaths:
+                return
+            paths = [Path(f) for f in filepaths if f]
+            if paths:
+                await index_service.index_paths(
+                    paths=paths,
+                    base_dir=base_dir,
+                    incremental=True,
+                    source=source or "watcher",
+                    root_id=root_id,
+                )
+
+        new_watcher = OutputWatcher(index_callback)
+        loop = asyncio.get_event_loop()
+        await new_watcher.start(watch_paths, loop)
+        svc["watcher"] = new_watcher
+        return _json_response(Result.Ok({"enabled": True, "directories": new_watcher.watched_directories, "scope": scope}))
 

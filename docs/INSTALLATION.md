@@ -171,11 +171,6 @@ export MAJOOR_FFPROBE_PATH="/path/to/ffprobe"
 # Set media probe backend (auto, exiftool, ffprobe, both)
 export MAJOOR_MEDIA_PROBE_BACKEND="auto"
 
-# Enable file watching for automatic reindexing
-export MAJOOR_ENABLE_FILE_WATCHER=true
-
-# Set watcher interval (in seconds)
-export MAJOOR_WATCHER_INTERVAL=15.0
 ```
 
 ### Windows Batch File Example
@@ -184,8 +179,6 @@ Create a batch file to set environment variables and start ComfyUI:
 ```batch
 @echo off
 set MAJOOR_MEDIA_PROBE_BACKEND=auto
-set MAJOOR_ENABLE_FILE_WATCHER=true
-set MAJOOR_WATCHER_INTERVAL=15.0
 
 REM Start ComfyUI with the environment variables
 cd /d "C:\path\to\ComfyUI"

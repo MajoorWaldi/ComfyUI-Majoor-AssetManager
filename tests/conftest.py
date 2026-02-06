@@ -15,7 +15,9 @@ async def services(tmp_path):
 
     db_path = str(tmp_path / "test_services.db")
     # build_services is now async
-    svc = await build_services(db_path)
+    svc_res = await build_services(db_path)
+    assert svc_res.ok, svc_res.error
+    svc = svc_res.data
     try:
         yield svc
     finally:

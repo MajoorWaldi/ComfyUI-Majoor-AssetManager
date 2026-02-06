@@ -107,8 +107,9 @@ export class VirtualGrid {
         // Style the container for absolute positioning
         this.container.style.position = "relative";
         this.container.style.display = "block"; // Override 'grid'
-        // Force no horizontal scrollbar
-        this.container.style.overflowX = "hidden";
+        // Use overflow: visible so IntersectionObserver can properly detect sentinel
+        // Parent wrapper (gridWrapper) handles scrolling and clipping with overflow: auto
+        this.container.style.overflow = "visible";
         this.container.style.width = "100%";
     }
 
@@ -303,6 +304,22 @@ export class VirtualGrid {
                      this.updateLayout();
                 }
             }
+        } catch {}
+    }
+
+    /**
+     * Best-effort re-measure after async content (badges/metadata) is applied.
+     * This avoids layout drift when card height changes after initial render.
+     */
+    scheduleRemeasure() {
+        if (this.measured) return;
+        try {
+            requestAnimationFrame(() => {
+                try { this.updateMetrics(); } catch {}
+            });
+            setTimeout(() => {
+                try { this.updateMetrics(); } catch {}
+            }, 60);
         } catch {}
     }
 

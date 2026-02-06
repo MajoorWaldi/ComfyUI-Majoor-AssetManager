@@ -12,14 +12,13 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from backend.shared import Result, classify_file, get_logger
-from backend.adapters.fs.list_cache_watcher import ensure_fs_list_cache_watching, get_fs_list_cache_token
 from backend.config import (
     FS_LIST_CACHE_MAX,
     FS_LIST_CACHE_TTL_SECONDS,
-    FS_LIST_CACHE_WATCHDOG,
     BG_SCAN_FAILURE_HISTORY_MAX,
     SCAN_PENDING_MAX,
     MANUAL_BG_SCAN_GRACE_SECONDS,
+    BG_SCAN_ON_LIST,
 )
 from shared.scan_throttle import normalize_scan_directory, should_skip_background_scan
 from ..core import _safe_rel_path, _is_within_root, _require_services
@@ -41,6 +40,18 @@ _FS_LIST_CACHE_LOCK = asyncio.Lock()
 _FS_LIST_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
 
+def _is_truthy_boolish(value: Any) -> bool:
+    if value is True:
+        return True
+    if value is False or value is None:
+        return False
+    if value in (1, "1"):
+        return True
+    if value in (0, "0"):
+        return False
+    return False
+
+
 async def _kickoff_background_scan(
     directory: str,
     *,
@@ -57,6 +68,8 @@ async def _kickoff_background_scan(
 
     Used to ensure input/custom folders get indexed without blocking list requests.
     """
+    if not BG_SCAN_ON_LIST:
+        return
     normalized_dir = normalize_scan_directory(directory)
     if should_skip_background_scan(normalized_dir, source, root_id, MANUAL_BG_SCAN_GRACE_SECONDS):
         return
@@ -237,20 +250,9 @@ async def _fs_cache_get_or_build(
 ) -> Result[dict[str, Any]]:
     # Made async to allow async locking if needed, though mostly sync logic
     try:
-        if FS_LIST_CACHE_WATCHDOG:
-            ensure_fs_list_cache_watching(str(base))
-    except Exception:
-        pass
-
-    try:
         dir_mtime_ns = target_dir_resolved.stat().st_mtime_ns
     except OSError as exc:
         return Result.Err("DIR_NOT_FOUND", f"Directory not found: {exc}")
-
-    try:
-        watch_token = get_fs_list_cache_token(str(base)) if FS_LIST_CACHE_WATCHDOG else 0
-    except Exception:
-        watch_token = 0
 
     cache_key = f"{str(base)}|{str(target_dir_resolved)}|{asset_type}|{str(root_id or '')}"
     
@@ -259,7 +261,6 @@ async def _fs_cache_get_or_build(
         if (
             cached
             and cached.get("dir_mtime_ns") == dir_mtime_ns
-            and cached.get("watch_token") == watch_token
             and isinstance(cached.get("entries"), list)
         ):
             try:
@@ -310,8 +311,8 @@ async def _fs_cache_get_or_build(
                     "duration": None,
                     "rating": 0,
                     "tags": [],
-                    "has_workflow": 0,
-                    "has_generation_data": 0,
+                    "has_workflow": None,
+                    "has_generation_data": None,
                     "type": asset_type,
                     "root_id": root_id,
                 }
@@ -320,9 +321,10 @@ async def _fs_cache_get_or_build(
         return Result.Err("LIST_FAILED", f"Failed to list directory: {exc}")
 
     async with _FS_LIST_CACHE_LOCK:
+        # `watch_token` may be implemented later (fs watch integration); keep None for now.
         _FS_LIST_CACHE[cache_key] = {
             "dir_mtime_ns": dir_mtime_ns,
-            "watch_token": watch_token,
+            "watch_token": None,
             "entries": entries,
             "cached_at": time.time(),
         }
@@ -419,9 +421,8 @@ async def _list_filesystem_assets(
                         asset["id"] = db_row.get("id")
                         asset["rating"] = int(db_row.get("rating") or 0)
                         asset["tags"] = db_row.get("tags") or []
-                        asset["has_workflow"] = int(db_row.get("has_workflow") or 0)
-                        has_gen = int(db_row.get("has_generation_data") or 0)
-                        asset["has_generation_data"] = has_gen
+                        asset["has_workflow"] = db_row.get("has_workflow")
+                        asset["has_generation_data"] = db_row.get("has_generation_data")
                         # Prefer stored root_id if present (custom)
                         if db_row.get("root_id"):
                             asset["root_id"] = db_row.get("root_id")
@@ -440,7 +441,7 @@ async def _list_filesystem_assets(
             continue
         if filter_min_rating > 0 and int(item.get("rating", 0)) < filter_min_rating:
             continue
-        if filter_workflow_only and not int(item.get("has_workflow", 0)):
+        if filter_workflow_only and not _is_truthy_boolish(item.get("has_workflow")):
             continue
         try:
             entry_mtime = int(item.get("mtime") or 0)

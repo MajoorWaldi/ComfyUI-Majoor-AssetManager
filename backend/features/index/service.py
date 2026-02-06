@@ -58,7 +58,6 @@ class IndexService:
         self._enricher = MetadataEnricher(
             db,
             metadata_service,
-            self._scan_lock,
             self._scanner._compute_state_hash,
             MetadataHelpers.prepare_metadata_fields,
             MetadataHelpers.metadata_error_payload,

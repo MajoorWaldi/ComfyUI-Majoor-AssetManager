@@ -17,6 +17,13 @@
     "search"
   ],
   "install_type": "git-clone",
+  "releases": {
+    "provider": "github",
+    "owner": "MajoorWaldi",
+    "repo": "ComfyUI-Majoor-AssetsManager",
+    "zip_url_template": "https://github.com/MajoorWaldi/ComfyUI-Majoor-AssetsManager/archive/refs/{ref}.zip",
+    "notes": "Use {ref}=tags/vX.Y.Z for a release tag or {ref}=heads/main for the nightly branch (heads/<branch>)."
+  },
   "js_path": "js",
   "nodename_pattern": "^Majoor"
 }

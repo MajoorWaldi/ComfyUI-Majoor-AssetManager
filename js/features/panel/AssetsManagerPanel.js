@@ -3,7 +3,7 @@ import { comfyConfirm, comfyPrompt } from "../../app/dialogs.js";
 import { comfyToast } from "../../app/toast.js";
 import { createStatusIndicator, setupStatusPolling, triggerScan } from "../status/StatusDot.js";
 import { createGridContainer, loadAssets, loadAssetsFromList, disposeGrid, refreshGrid } from "../grid/GridView.js";
-import { get, post, getCollectionAssets } from "../../api/client.js";
+import { get, post, getCollectionAssets, toggleWatcher, setWatcherScope } from "../../api/client.js";
 import { ENDPOINTS } from "../../api/endpoints.js";
 import { createSidebar, showAssetInSidebar, closeSidebar } from "../../components/SidebarView.js";
 import { createRatingBadge, createTagsBadge } from "../../components/Badges.js";
@@ -221,6 +221,21 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         }
     };
 
+    const applyWatcherForScope = async (nextScope) => {
+        const scope = String(nextScope || state.scope || "output").toLowerCase();
+        const settings = loadMajoorSettings();
+        const wantsEnabled = !!settings?.watcher?.enabled;
+        const shouldEnable = wantsEnabled && scope === "output";
+        try {
+            await toggleWatcher(shouldEnable);
+        } catch {}
+        if (shouldEnable) {
+            try {
+                await setWatcherScope({ scope: "output" });
+            } catch {}
+        }
+    };
+
     // Initial position (no reload needed).
     try {
         _sidebarPosition = ""; // force apply
@@ -238,6 +253,9 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
             // 2. Grid visuals (badges, details, sizes)
             // Use key from event to optimize? For now, refresh is cheap (VirtualGrid).
             refreshGrid(gridWrapper);
+        } catch {}
+        try {
+            applyWatcherForScope(state.scope);
         } catch {}
     };
     try {
@@ -304,6 +322,11 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         reloadGrid: gridController.reloadGrid,
         onChanged: () => {
             notifyContextChanged();
+        },
+        onScopeChanged: async () => {
+            try {
+                await applyWatcherForScope(state.scope);
+            } catch {}
         }
     });
 
@@ -422,7 +445,17 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     try {
         notifyContextChanged();
         const onStats = () => notifyContextChanged();
+        const onSelectionChanged = (e) => {
+            try {
+                const detail = e?.detail || {};
+                const ids = Array.isArray(detail.selectedIds) ? detail.selectedIds.map(String).filter(Boolean) : [];
+                state.selectedAssetIds = ids;
+                state.activeAssetId = String(detail.activeId || ids[0] || "");
+            } catch {}
+            notifyContextChanged();
+        };
         gridContainer.addEventListener("mjr:grid-stats", onStats);
+        gridContainer.addEventListener("mjr:selection-changed", onSelectionChanged);
         document.addEventListener?.("mjr-settings-changed", onStats);
 
         // Observe DOM changes for card count / selection class changes.
@@ -440,6 +473,9 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         gridContainer._mjrSummaryBarDispose = () => {
             try {
                 gridContainer.removeEventListener("mjr:grid-stats", onStats);
+            } catch {}
+            try {
+                gridContainer.removeEventListener("mjr:selection-changed", onSelectionChanged);
             } catch {}
             try {
                 document.removeEventListener?.("mjr-settings-changed", onStats);
@@ -671,13 +707,17 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
 
                     selected.forEach(id => {
                         const card = gridContainer.querySelector(`.mjr-asset-card[data-mjr-asset-id="${CSS?.escape ? CSS.escape(id) : id}"]`);
-                        if (card) card.classList.add("is-selected");
+                        if (card) {
+                            card.classList.add("is-selected");
+                            card.setAttribute?.("aria-selected", "true");
+                        }
                     });
 
                     if (activeId) {
                         const activeCard = gridContainer.querySelector(`.mjr-asset-card[data-mjr-asset-id="${CSS?.escape ? CSS.escape(activeId) : activeId}"]`);
                         if (activeCard) {
                             activeCard.classList.add("is-active");
+                            activeCard.setAttribute?.("aria-selected", "true");
                             // Scroll selection into view if not visible after scroll restore
                             if (state.scrollTop === 0) {
                                 activeCard.scrollIntoView?.({ block: "nearest", behavior: "instant" });

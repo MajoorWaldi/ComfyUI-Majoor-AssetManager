@@ -4,6 +4,7 @@ Application settings persisted in the local metadata store.
 from __future__ import annotations
 
 import threading
+import os
 import asyncio
 import time
 from typing import Any, Mapping, Optional
@@ -20,6 +21,7 @@ _VALID_PROBE_MODES = {"auto", "exiftool", "ffprobe", "both"}
 _SECURITY_PREFS_INFO: Mapping[str, dict[str, bool | str]] = {
     "safe_mode": {"env": "MAJOOR_SAFE_MODE", "default": False},
     "allow_write": {"env": "MAJOOR_ALLOW_WRITE", "default": False},
+    "allow_remote_write": {"env": "MAJOOR_ALLOW_REMOTE_WRITE", "default": True},
     "allow_delete": {"env": "MAJOOR_ALLOW_DELETE", "default": True},
     "allow_rename": {"env": "MAJOOR_ALLOW_RENAME", "default": True},
     "allow_open_in_folder": {"env": "MAJOOR_ALLOW_OPEN_IN_FOLDER", "default": True},
@@ -92,6 +94,13 @@ class AppSettings:
                 res = await self._write_setting(key, "1" if value else "0")
                 if not res.ok:
                     return Result.Err("DB_ERROR", res.error or f"Failed to persist {key}")
+                try:
+                    info = _SECURITY_PREFS_INFO.get(key) or {}
+                    env_var = str(info.get("env") or "").strip()
+                    if env_var:
+                        os.environ[env_var] = "1" if value else "0"
+                except Exception:
+                    pass
             bump = await self._bump_settings_version_locked()
             if not bump.ok:
                 try:

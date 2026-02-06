@@ -57,6 +57,11 @@ export const ENDPOINTS = {
     ASSET_DELETE: "/mjr/am/asset/delete",
     ASSET_RENAME: "/mjr/am/asset/rename",
 
+    // Watcher
+    WATCHER_STATUS: "/mjr/am/watcher/status",
+    WATCHER_TOGGLE: "/mjr/am/watcher/toggle",
+    WATCHER_SCOPE: "/mjr/am/watcher/scope",
+
     // Collections
     COLLECTIONS: "/mjr/am/collections"
 };

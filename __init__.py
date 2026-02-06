@@ -186,7 +186,6 @@ try:
             "aiohttp",
             "PIL",  # pillow
             "send2trash",
-            "watchdog",
             "aiosqlite",
         ]
         if os.name == "nt":

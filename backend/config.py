@@ -6,7 +6,7 @@ import sys
 import logging
 from pathlib import Path
 
-from .utils import env_bool, env_float
+from .utils import env_float
 
 logger = logging.getLogger(__name__)
 
@@ -67,24 +67,6 @@ def _env_int(name: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
 
-# [CHANGED] Default to True to enable real-time updates out-of-the-box
-ENABLE_FILE_WATCHER = env_bool("MAJOOR_ENABLE_FILE_WATCHER", True)
-WATCHER_INTERVAL_SECONDS = env_float("MAJOOR_WATCHER_INTERVAL", 15.0)
-WATCHER_JOIN_TIMEOUT = env_float("MAJOOR_WATCHER_JOIN_TIMEOUT", 5.0)
-WATCHER_PATHS = []
-for raw_path in os.getenv("MAJOOR_WATCHER_PATHS", OUTPUT_ROOT).split(os.pathsep):
-    cleaned = raw_path.strip()
-    if not cleaned:
-        continue
-    try:
-        WATCHER_PATHS.append(Path(cleaned).resolve())
-    except (OSError, RuntimeError, ValueError):
-        logger.warning("Invalid path in MAJOOR_WATCHER_PATHS: %r", raw_path)
-        continue
-
-if not WATCHER_PATHS:
-    WATCHER_PATHS = [OUTPUT_ROOT_PATH]
-
 # Tool timeouts
 EXIFTOOL_TIMEOUT = _env_int("MAJOOR_EXIFTOOL_TIMEOUT", 15)
 FFPROBE_TIMEOUT = _env_int("MAJOOR_FFPROBE_TIMEOUT", 10)
@@ -95,19 +77,32 @@ DB_MAX_CONNECTIONS = _env_int("MAJOOR_DB_MAX_CONNECTIONS", 8)
 DB_QUERY_TIMEOUT = env_float("MAJOOR_DB_QUERY_TIMEOUT", 30.0)
 TO_THREAD_TIMEOUT_S = env_float("MAJOOR_TO_THREAD_TIMEOUT", 30.0)
 MAX_METADATA_JSON_BYTES = _env_int("MAJOOR_MAX_METADATA_JSON_BYTES", 2 * 1024 * 1024)  # 2MB
+METADATA_CACHE_MAX = _env_int("MAJOOR_METADATA_CACHE_MAX", 100_000)
+METADATA_CACHE_TTL_SECONDS = env_float("MAJOOR_METADATA_CACHE_TTL_SECONDS", 90.0 * 24.0 * 3600.0)
+METADATA_CACHE_CLEANUP_INTERVAL_SECONDS = env_float("MAJOOR_METADATA_CACHE_CLEANUP_INTERVAL_SECONDS", 300.0)
+METADATA_EXTRACT_CONCURRENCY = _env_int("MAJOOR_METADATA_EXTRACT_CONCURRENCY", 1)
+
+# Index dedupe (avoid double-indexing bursts from multiple event sources)
+INDEX_DEDUPE_TTL_SECONDS = env_float("MAJOOR_INDEX_DEDUPE_TTL_SECONDS", 2.0)
+INDEX_DEDUPE_MAX = _env_int("MAJOOR_INDEX_DEDUPE_MAX", 5000)
+
+# File watcher (watches for manual file additions in output/custom directories)
+# Disable with MJR_ENABLE_WATCHER=0
+WATCHER_ENABLED = os.getenv("MJR_ENABLE_WATCHER", "1").strip().lower() not in ("0", "false", "no", "off")
+WATCHER_DEBOUNCE_MS = _env_int("MJR_WATCHER_DEBOUNCE_MS", 500)
+WATCHER_DEDUPE_TTL_MS = _env_int("MJR_WATCHER_DEDUPE_TTL_MS", 3000)
 
 # Background scan / filesystem listing tuning
 BG_SCAN_FAILURE_HISTORY_MAX = _env_int("MAJOOR_BG_SCAN_FAILURE_HISTORY_MAX", 50)
 SCAN_PENDING_MAX = _env_int("MAJOOR_SCAN_PENDING_MAX", 64)
 MANUAL_BG_SCAN_GRACE_SECONDS = env_float("MAJOOR_MANUAL_BG_SCAN_GRACE_SECONDS", 30.0)
+BG_SCAN_ON_LIST = os.getenv("MAJOOR_BG_SCAN_ON_LIST", "0").strip().lower() in ("1", "true", "yes", "on")
 SEARCH_MAX_LIMIT = _env_int("MAJOOR_SEARCH_MAX_LIMIT", 500)
 SEARCH_MAX_OFFSET = _env_int("MAJOOR_SEARCH_MAX_OFFSET", 10_000)
 
 # Filesystem listing cache (used by filesystem fallback search/list)
 FS_LIST_CACHE_MAX = _env_int("MAJOOR_FS_LIST_CACHE_MAX", 32)
 FS_LIST_CACHE_TTL_SECONDS = env_float("MAJOOR_FS_LIST_CACHE_TTL_SECONDS", 1.5)
-FS_LIST_CACHE_WATCHDOG = env_bool("MAJOOR_FS_LIST_CACHE_WATCHDOG", True)
-
 # Scanner batching (bounded transactions)
 # Tweak only if you know your workload; larger batches reduce transaction overhead but increase lock time.
 SCAN_BATCH_SMALL_THRESHOLD = _env_int("MAJOOR_SCAN_BATCH_SMALL_THRESHOLD", 100)

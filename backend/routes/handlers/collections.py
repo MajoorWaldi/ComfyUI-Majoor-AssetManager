@@ -68,8 +68,8 @@ def _minimal_asset_from_item(item: Dict[str, Any]) -> Dict[str, Any]:
             "duration": None,
             "rating": 0,
             "tags": [],
-            "has_workflow": 0,
-            "has_generation_data": 0,
+            "has_workflow": None,
+            "has_generation_data": None,
             "type": asset_type,
             "root_id": root_id,
         }
@@ -166,9 +166,8 @@ def register_collections_routes(routes: web.RouteTableDef) -> None:
                             a["id"] = db_row.get("id")
                             a["rating"] = int(db_row.get("rating") or 0)
                             a["tags"] = db_row.get("tags") or []
-                            a["has_workflow"] = int(db_row.get("has_workflow") or 0)
-                            has_gen = int(db_row.get("has_generation_data") or 0)
-                            a["has_generation_data"] = has_gen
+                            a["has_workflow"] = db_row.get("has_workflow")
+                            a["has_generation_data"] = db_row.get("has_generation_data")
                             if db_row.get("root_id"):
                                 a["root_id"] = db_row.get("root_id")
         except Exception as exc:

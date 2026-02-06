@@ -57,7 +57,30 @@ const _getSelectedAssets = (containerEl, draggedCard) => {
     const out = [];
     if (!containerEl || !draggedCard) return out;
 
-    // Prefer DOM selection state (fast, always available).
+    let selectedIds = [];
+    try {
+        const raw = containerEl.dataset?.mjrSelectedAssetIds;
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) selectedIds = parsed.map(String).filter(Boolean);
+        }
+    } catch {}
+
+    // If dataset is available, use full asset list (VirtualGrid-safe).
+    if (selectedIds.length) {
+        try {
+            const draggedId = draggedCard?.dataset?.mjrAssetId ? String(draggedCard.dataset.mjrAssetId) : "";
+            if (!draggedId || !selectedIds.includes(draggedId)) return out;
+            const allAssets = typeof containerEl?._mjrGetAssets === "function" ? containerEl._mjrGetAssets() : [];
+            for (const a of allAssets || []) {
+                const id = String(a?.id || "");
+                if (id && selectedIds.includes(id)) out.push(a);
+            }
+            if (out.length) return out;
+        } catch {}
+    }
+
+    // Fallback: DOM selection state (visible cards only).
     let selectedCards = [];
     try {
         selectedCards = Array.from(containerEl.querySelectorAll(".mjr-asset-card.is-selected")) || [];

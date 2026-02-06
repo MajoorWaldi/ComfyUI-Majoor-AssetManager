@@ -215,6 +215,12 @@ class HealthService:
             )
             last_scan_end = last_scan_result.data[0]["value"] if last_scan_result.ok and last_scan_result.data else None
 
+            last_index_result = await self.db.aexecute(
+                "SELECT value FROM metadata WHERE key = 'last_index_end'",
+                fetch=True
+            )
+            last_index_end = last_index_result.data[0]["value"] if last_index_result.ok and last_index_result.data else None
+
             # Get counts by kind
             by_kind = {}
             if kind_result.ok and kind_result.data and len(kind_result.data) > 0:
@@ -234,6 +240,7 @@ class HealthService:
                 "with_workflows": workflow_count,
                 "with_generation_data": generation_count,
                 "last_scan_end": last_scan_end,
+                "last_index_end": last_index_end,
                 "tool_availability": self._get_tool_capabilities(),
                 "tool_paths": get_tool_paths(),
             }

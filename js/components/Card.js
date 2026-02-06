@@ -17,8 +17,8 @@ import { APP_CONFIG } from "../app/config.js";
  * @property {string} [kind]
  * @property {number} [rating] - 0 to 5
  * @property {Array<string>|string|null} [tags] - Array of strings or JSON string
- * @property {boolean} [has_workflow]
- * @property {boolean} [has_generation_data]
+ * @property {boolean|null} [has_workflow]
+ * @property {boolean|null} [has_generation_data]
  * @property {boolean} [has_unknown_nodes]
  * @property {number} [width]
  * @property {number} [height]
@@ -419,7 +419,7 @@ const getVideoThumbManager = () => {
     };
 
     try {
-        window.addEventListener?.("unload", () => api.dispose());
+        window.addEventListener?.("pagehide", () => api.dispose());
         window[VIDEO_THUMBS_KEY] = api;
     } catch {}
     return api;

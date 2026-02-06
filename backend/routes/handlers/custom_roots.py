@@ -2,6 +2,7 @@
 Custom roots management endpoints.
 """
 import os
+import errno
 from pathlib import Path
 from aiohttp import web
 from backend.custom_roots import (
@@ -11,8 +12,17 @@ from backend.custom_roots import (
     resolve_custom_root,
 )
 from backend.shared import Result, get_logger
-from backend.adapters.fs.list_cache_watcher import ensure_fs_list_cache_watching
-from ..core import _json_response, _csrf_error, _safe_rel_path, _is_within_root, _read_json, _guess_content_type_for_file, _is_allowed_view_media_file
+from ..core import (
+    _json_response,
+    _csrf_error,
+    _safe_rel_path,
+    _is_within_root,
+    _read_json,
+    _guess_content_type_for_file,
+    _is_allowed_view_media_file,
+    _require_services,
+)
+from ..core.security import _check_rate_limit
 from .filesystem import _kickoff_background_scan
 
 # Import tkinter only when needed to avoid startup issues
@@ -36,6 +46,10 @@ def register_custom_roots_routes(routes: web.RouteTableDef) -> None:
     async def browse_folder_dialog(request):
         import sys
         import os
+
+        allowed, retry_after = _check_rate_limit(request, "browse_folder", max_requests=3, window_seconds=30)
+        if not allowed:
+            return _json_response(Result.Err("RATE_LIMIT", "Too many browse requests", retry_after=retry_after))
 
         # Check if tkinter is available
         if tk is None or filedialog is None:
@@ -95,17 +109,21 @@ def register_custom_roots_routes(routes: web.RouteTableDef) -> None:
         label = body.get("label")
         result = add_custom_root(str(path or ""), label=str(label) if label is not None else None)
         if result.ok and isinstance(result.data, dict):
+            root_path = str(result.data.get("path") or "")
+            root_id = str(result.data.get("id") or "")
+            # Add to watcher if available
             try:
-                root_path = str(result.data.get("path") or "")
-                root_id = str(result.data.get("id") or "")
+                svc, _ = await _require_services()
+                watcher = svc.get("watcher") if svc else None
+                if watcher and root_path:
+                    watcher.add_path(root_path, source="custom", root_id=root_id)
+            except Exception:
+                pass
+            # Trigger background scan
+            try:
                 if root_path and root_id:
                     await _kickoff_background_scan(root_path, source="custom", root_id=root_id, recursive=True, incremental=True)
-                    try:
-                        ensure_fs_list_cache_watching(root_path)
-                    except Exception:
-                        pass
             except Exception as exc:
-                # Best-effort: never fail the request because background scan scheduling failed.
                 logger.debug("Background scan kickoff skipped: %s", exc)
         return _json_response(result)
 
@@ -121,7 +139,32 @@ def register_custom_roots_routes(routes: web.RouteTableDef) -> None:
         body = body_res.data or {}
 
         rid = body.get("id") or body.get("root_id")
+        root_path = None
+        try:
+            resolved = resolve_custom_root(str(rid or ""))
+            if resolved.ok:
+                root_path = resolved.data
+        except Exception:
+            root_path = None
+
         result = remove_custom_root(str(rid or ""))
+        if result.ok and root_path:
+            try:
+                svc, _ = await _require_services()
+                if svc:
+                    # Remove from watcher
+                    watcher = svc.get("watcher")
+                    if watcher:
+                        watcher.remove_path(str(root_path))
+                    # Clean up database
+                    db = svc.get("db")
+                    if db:
+                        await db.aexecute(
+                            "DELETE FROM assets WHERE source = 'custom' AND root_id = ?",
+                            (str(rid or ""),),
+                        )
+            except Exception:
+                pass
         return _json_response(result)
 
     @routes.get("/mjr/am/custom-view")
@@ -160,8 +203,24 @@ def register_custom_roots_routes(routes: web.RouteTableDef) -> None:
         if not _is_within_root(candidate, root_dir):
             return _json_response(Result.Err("INVALID_INPUT", "Path outside root"))
 
-        # Fix TOCTOU: Use FileResponse directly and let it handle file existence
-        # This avoids race condition between exists() check and file serving
+        def _validate_no_symlink_open(path: Path) -> bool:
+            try:
+                flags = os.O_RDONLY
+                if os.name == "nt" and hasattr(os, "O_BINARY"):
+                    flags |= os.O_BINARY
+                # Best-effort: disallow following symlinks where supported.
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                fd = os.open(str(path), flags)
+                os.close(fd)
+                return True
+            except OSError as exc:
+                if getattr(exc, "errno", None) in (errno.ELOOP, errno.EACCES, errno.EPERM):
+                    return False
+                return False
+            except Exception:
+                return False
+
         try:
             resolved_path = candidate.resolve(strict=True)
             # Prevent symlink/junction escapes: ensure the resolved target is still under the root.
@@ -169,6 +228,8 @@ def register_custom_roots_routes(routes: web.RouteTableDef) -> None:
                 return _json_response(Result.Err("FORBIDDEN", "Path escapes root"))
             if not resolved_path.is_file():
                 return _json_response(Result.Err("NOT_FOUND", "File not found or not a regular file"))
+            if not _validate_no_symlink_open(resolved_path):
+                return _json_response(Result.Err("FORBIDDEN", "Symlinked file not allowed"))
 
             # Viewer hardening: only serve image/video media files from custom roots.
             if not _is_allowed_view_media_file(resolved_path):

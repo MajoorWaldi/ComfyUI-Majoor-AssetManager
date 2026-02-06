@@ -13,6 +13,7 @@ from backend.config import MANUAL_BG_SCAN_GRACE_SECONDS
 
 _LOCK = threading.Lock()
 _MANUAL_SCAN_TIMES: dict[str, float] = {}
+_RECENT_SCAN_TIMES: dict[str, float] = {}
 _MAX_ENTRY_AGE = max(600, int(MANUAL_BG_SCAN_GRACE_SECONDS * 5))
 
 
@@ -54,11 +55,28 @@ def mark_directory_indexed(
         _cleanup_locked(now)
 
 
+def mark_directory_scanned(
+    directory: str,
+    source: str = "output",
+    root_id: Optional[str] = None,
+) -> None:
+    """
+    Record that a background scan was scheduled/executed, regardless of metadata completeness.
+    Used to avoid repeated fast scans when the DB is empty.
+    """
+    now = time.time()
+    key = _scan_key(directory, source, root_id)
+    with _LOCK:
+        _RECENT_SCAN_TIMES[key] = now
+        _cleanup_locked(now)
+
+
 def should_skip_background_scan(
     directory: str,
     source: str = "output",
     root_id: Optional[str] = None,
     grace_seconds: float = MANUAL_BG_SCAN_GRACE_SECONDS,
+    include_recent: bool = False,
 ) -> bool:
     """
     Return True if a recent manual index was recorded for the same directory/source/root.
@@ -68,11 +86,17 @@ def should_skip_background_scan(
     with _LOCK:
         ts = _MANUAL_SCAN_TIMES.get(key)
         if ts is None:
-            return False
+            if include_recent:
+                ts = _RECENT_SCAN_TIMES.get(key)
+                if ts is None:
+                    return False
+            else:
+                return False
         if now - ts < grace_seconds:
             return True
         if now - ts > _MAX_ENTRY_AGE:
-            del _MANUAL_SCAN_TIMES[key]
+            _MANUAL_SCAN_TIMES.pop(key, None)
+            _RECENT_SCAN_TIMES.pop(key, None)
     return False
 
 
@@ -82,3 +106,6 @@ def _cleanup_locked(now: float) -> None:
     keys_to_remove = [k for k, v in _MANUAL_SCAN_TIMES.items() if v < cutoff]
     for k in keys_to_remove:
         _MANUAL_SCAN_TIMES.pop(k, None)
+    keys_to_remove = [k for k, v in _RECENT_SCAN_TIMES.items() if v < cutoff]
+    for k in keys_to_remove:
+        _RECENT_SCAN_TIMES.pop(k, None)

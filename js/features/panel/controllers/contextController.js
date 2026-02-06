@@ -51,21 +51,39 @@ export function createContextController({
             } catch {}
         },
         clearScope: async () => {
+            let didSetScope = false;
             try {
-                state.scope = "output";
                 state.customRootId = "";
-                scopeController?.setActiveTabStyles?.();
+                state.subfolder = "";
+                delete gridContainer?.dataset?.mjrSubfolder;
+                if (typeof scopeController?.setScope === "function") {
+                    await scopeController.setScope("output");
+                    didSetScope = true;
+                } else {
+                    state.scope = "output";
+                    scopeController?.setActiveTabStyles?.();
+                }
             } catch {}
             try {
-                await reloadGrid?.();
+                if (!didSetScope) await reloadGrid?.();
             } catch {}
         },
         clearCustomRoot: async () => {
+            let didSetScope = false;
             try {
                 state.customRootId = "";
+                if (String(state.scope || "").toLowerCase() === "custom") {
+                    if (typeof scopeController?.setScope === "function") {
+                        await scopeController.setScope("output");
+                        didSetScope = true;
+                    } else {
+                        state.scope = "output";
+                        scopeController?.setActiveTabStyles?.();
+                    }
+                }
             } catch {}
             try {
-                await reloadGrid?.();
+                if (!didSetScope) await reloadGrid?.();
             } catch {}
         },
         clearFolder: async () => {
@@ -134,6 +152,7 @@ export function createContextController({
             } catch {}
         },
         clearAll: async () => {
+            let didSetScope = false;
             try {
                 _safeSetValue(searchInputEl, "");
             } catch {}
@@ -147,8 +166,15 @@ export function createContextController({
                 state.dateExactFilter = "";
                 state.sort = "mtime_desc";
                 state.customRootId = "";
-                state.scope = "output";
-                scopeController?.setActiveTabStyles?.();
+                state.subfolder = "";
+                delete gridContainer?.dataset?.mjrSubfolder;
+                if (typeof scopeController?.setScope === "function") {
+                    await scopeController.setScope("output");
+                    didSetScope = true;
+                } else {
+                    state.scope = "output";
+                    scopeController?.setActiveTabStyles?.();
+                }
             } catch {}
             try {
                 _safeSetValue(kindSelect, "");
@@ -162,7 +188,7 @@ export function createContextController({
                 sortController?.renderSortMenu?.();
             } catch {}
             try {
-                await reloadGrid?.();
+                if (!didSetScope) await reloadGrid?.();
             } catch {}
         }
     };

@@ -18,6 +18,7 @@ const DICTIONARY = {
         "cat.scanning": "Scanning",
         "cat.advanced": "Advanced",
         "cat.security": "Security",
+        "cat.remote": "Remote Access",
 
         // ─── Settings: Grid ───
         "setting.grid.minsize.name": "Majoor: Thumbnail Size (px)",
@@ -28,8 +29,6 @@ const DICTIONARY = {
         "setting.sidebar.pos.desc": "Show details sidebar on the left or the right. Reload required.",
         "setting.siblings.hide.name": "Majoor: Hide PNG Siblings",
         "setting.siblings.hide.desc": "If a video has a corresponding .png preview, hide the .png from the grid.",
-        "setting.grid.pagesize.name": "Majoor: Files per Page",
-        "setting.grid.pagesize.desc": "Number of files loaded per request. More = faster scrolling but more memory.",
         "setting.nav.infinite.name": "Majoor: Infinite Scroll",
         "setting.nav.infinite.desc": "Automatically load more files when scrolling.",
 
@@ -42,6 +41,8 @@ const DICTIONARY = {
         // ─── Settings: Scanning ───
         "setting.scan.startup.name": "Majoor: Auto-scan on Startup",
         "setting.scan.startup.desc": "Start a background scan as soon as ComfyUI loads.",
+        "setting.watcher.name": "Majoor: File Watcher",
+        "setting.watcher.desc": "Watch output and custom folders for manually added files and auto-index them in real time.",
         "setting.sync.rating.name": "Majoor: Sync Rating/Tags to Files",
         "setting.sync.rating.desc": "Write ratings and tags into file metadata (ExifTool).",
 
@@ -56,6 +57,8 @@ const DICTIONARY = {
         // ─── Settings: Security ───
         "setting.sec.safe.name": "Majoor: Safe Mode",
         "setting.sec.safe.desc": "When enabled, rating/tags writes are blocked unless explicitly authorized.",
+        "setting.sec.remote.name": "Majoor: Allow Remote Full Access",
+        "setting.sec.remote.desc": "Allow non-local clients to perform write operations. Disabling blocks writes unless a token is configured.",
         "setting.sec.write.name": "Majoor: Allow Write",
         "setting.sec.write.desc": "Allow writing ratings and tags.",
         "setting.sec.del.name": "Majoor: Allow Delete",
@@ -156,6 +159,10 @@ const DICTIONARY = {
         "status.withWorkflows": "With workflows: {workflows}  -  Generation data: {gendata}",
         "status.lastScan": "Last scan: {date}",
         "status.scanStats": "Added: {added}  -  Updated: {updated}  -  Skipped: {skipped}",
+        "status.watcher.enabled": "Watcher: enabled",
+        "status.watcher.enabledScoped": "Watcher: enabled ({scope})",
+        "status.watcher.disabled": "Watcher: disabled",
+        "status.watcher.disabledScoped": "Watcher: disabled ({scope})",
         "status.apiNotFound": "Majoor API endpoints not found (404)",
         "status.apiNotFoundHint": "Backend routes are not loaded. Restart ComfyUI and check the terminal for Majoor import errors.",
         "status.errorChecking": "Error checking status",
@@ -283,6 +290,7 @@ const DICTIONARY = {
         "cat.scanning": "Scan",
         "cat.advanced": "Avancé",
         "cat.security": "Sécurité",
+        "cat.remote": "Accès distant",
 
         // ─── Settings: Grille ───
         "setting.grid.minsize.name": "Majoor: Taille des vignettes (px)",
@@ -293,8 +301,6 @@ const DICTIONARY = {
         "setting.sidebar.pos.desc": "Afficher la sidebar à gauche ou à droite. Recharger la page pour appliquer.",
         "setting.siblings.hide.name": "Majoor: Masquer aperçus PNG",
         "setting.siblings.hide.desc": "Si une vidéo a un fichier .png correspondant, masquer le .png de la grille.",
-        "setting.grid.pagesize.name": "Majoor: Fichiers par page",
-        "setting.grid.pagesize.desc": "Nombre de fichiers chargés par requête. Plus = plus rapide mais plus de mémoire.",
         "setting.nav.infinite.name": "Majoor: Défilement infini",
         "setting.nav.infinite.desc": "Charger automatiquement plus de fichiers en scrollant.",
 
@@ -307,6 +313,8 @@ const DICTIONARY = {
         // ─── Settings: Scan ───
         "setting.scan.startup.name": "Majoor: Auto-scan au démarrage",
         "setting.scan.startup.desc": "Lancer un scan en arrière-plan dès le chargement de ComfyUI.",
+        "setting.watcher.name": "Majoor: Surveillance fichiers",
+        "setting.watcher.desc": "Surveiller les dossiers output et custom pour indexer automatiquement les fichiers ajoutés manuellement.",
         "setting.sync.rating.name": "Majoor: Sync rating/tags vers fichiers",
         "setting.sync.rating.desc": "Écrire les notes et tags dans les métadonnées des fichiers (ExifTool).",
 
@@ -321,6 +329,8 @@ const DICTIONARY = {
         // ─── Settings: Sécurité ───
         "setting.sec.safe.name": "Majoor: Mode sécurisé",
         "setting.sec.safe.desc": "Quand activé, les écritures rating/tags sont bloquées sauf autorisation explicite.",
+        "setting.sec.remote.name": "Majoor: Autoriser l'accès distant complet",
+        "setting.sec.remote.desc": "Autorise les clients non locaux à écrire. Désactiver bloque les écritures sauf si un token est configuré.",
         "setting.sec.write.name": "Majoor: Autoriser écriture",
         "setting.sec.write.desc": "Autorise l'écriture des notes et tags.",
         "setting.sec.del.name": "Majoor: Autoriser suppression",
@@ -421,6 +431,10 @@ const DICTIONARY = {
         "status.withWorkflows": "Avec workflows: {workflows}  -  Données de génération: {gendata}",
         "status.lastScan": "Dernier scan: {date}",
         "status.scanStats": "Ajoutés: {added}  -  Mis à jour: {updated}  -  Ignorés: {skipped}",
+        "status.watcher.enabled": "Watcher : activé",
+        "status.watcher.enabledScoped": "Watcher : activé ({scope})",
+        "status.watcher.disabled": "Watcher : désactivé",
+        "status.watcher.disabledScoped": "Watcher : désactivé ({scope})",
         "status.apiNotFound": "Endpoints API Majoor introuvables (404)",
         "status.apiNotFoundHint": "Les routes backend ne sont pas chargées. Redémarrez ComfyUI et vérifiez le terminal pour les erreurs d'import Majoor.",
         "status.errorChecking": "Erreur lors de la vérification",

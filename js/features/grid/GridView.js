@@ -375,6 +375,22 @@ export function createGridContainer() {
     const container = document.createElement("div");
     container.id = "mjr-assets-grid";
     container.classList.add("mjr-grid");
+
+    // Provide a stable accessor for full asset lists (VirtualGrid-safe).
+    try {
+        container._mjrGetAssets = () => {
+            try {
+                const state = GRID_STATE.get(container);
+                return Array.isArray(state?.assets) ? state.assets : [];
+            } catch {
+                return [];
+            }
+        };
+    } catch {}
+    try {
+        container._mjrSetSelection = (ids, activeId = "") => setSelectionIds(container, ids, { activeId });
+        container._mjrSyncSelection = (ids) => syncSelectionClasses(container, ids);
+    } catch {}
     
     // Initial class application
     _updateGridSettingsClasses(container);
@@ -707,8 +723,26 @@ function ensureVirtualGrid(gridContainer, state) {
             return card;
         },
         onItemRendered: (asset, card) => {
+            // Ensure selection classes are clean before applying any selection logic.
+            try {
+                card.classList.remove("is-selected");
+                card.classList.remove("is-active");
+                card.setAttribute("aria-selected", "false");
+            } catch {}
+            // Re-apply selection if this asset is selected.
+            try {
+                const selectedIds = getSelectedIdSet(gridContainer);
+                if (asset?.id != null && selectedIds.has(String(asset.id))) {
+                    card.classList.add("is-selected");
+                    card.setAttribute("aria-selected", "true");
+                }
+            } catch {}
+
             // Hydrate ratings
             enqueueRatingTagsHydration(gridContainer, card, asset);
+            try {
+                state.virtualGrid?.scheduleRemeasure?.();
+            } catch {}
             
             // Track rendered card for live updates (collisions)
             const fnKey = _getFilenameKey(asset?.filename);
@@ -725,6 +759,15 @@ function ensureVirtualGrid(gridContainer, state) {
             if (card) {
                 card._mjrAsset = asset;
                 _updateCardRatingTagsBadges(card, asset.rating, asset.tags);
+                try {
+                    state.virtualGrid?.scheduleRemeasure?.();
+                } catch {}
+                // Reset selection classes on reuse to avoid ghost selection
+                try {
+                    card.classList.remove("is-selected");
+                    card.classList.remove("is-active");
+                    card.setAttribute("aria-selected", "false");
+                } catch {}
                 
                 const selectedIds = getSelectedIdSet(gridContainer);
                 if (selectedIds && asset.id != null) {
@@ -759,6 +802,11 @@ function ensureVirtualGrid(gridContainer, state) {
               } catch {}
               try {
                    cleanupCardMediaHandlers(card);
+              } catch {}
+              try {
+                   card.classList.remove("is-selected");
+                   card.classList.remove("is-active");
+                   card.setAttribute("aria-selected", "false");
               } catch {}
         }
     });
@@ -811,6 +859,60 @@ function getSelectedIdSet(gridContainer) {
         if (id) selected.add(String(id));
     } catch {}
     return selected;
+}
+
+function _setSelectedIdsDataset(gridContainer, selectedSet, activeId = "") {
+    const list = Array.from(selectedSet || []);
+    const active = activeId ? String(activeId) : (list[0] ? String(list[0]) : "");
+    try {
+        if (list.length) {
+            gridContainer.dataset.mjrSelectedAssetIds = JSON.stringify(list);
+            if (active) gridContainer.dataset.mjrSelectedAssetId = String(active);
+            else delete gridContainer.dataset.mjrSelectedAssetId;
+        } else {
+            delete gridContainer.dataset.mjrSelectedAssetIds;
+            delete gridContainer.dataset.mjrSelectedAssetId;
+        }
+    } catch {}
+    return list;
+}
+
+export function syncSelectionClasses(gridContainer, selectedIds) {
+    if (!gridContainer) return;
+    const set = selectedIds instanceof Set ? selectedIds : new Set(Array.from(selectedIds || []).map(String));
+    try {
+        for (const card of gridContainer.querySelectorAll(".mjr-asset-card")) {
+            const id = card?.dataset?.mjrAssetId;
+            if (id && set.has(String(id))) {
+                card.classList.add("is-selected");
+                card.setAttribute("aria-selected", "true");
+            } else {
+                card.classList.remove("is-selected");
+                card.setAttribute("aria-selected", "false");
+            }
+        }
+    } catch {}
+}
+
+export function setSelectionIds(gridContainer, selectedIds, { activeId = "" } = {}) {
+    if (!gridContainer) return [];
+    const set = new Set(Array.from(selectedIds || []).map(String).filter(Boolean));
+    const list = _setSelectedIdsDataset(gridContainer, set, activeId);
+    syncSelectionClasses(gridContainer, set);
+    try {
+        gridContainer.dispatchEvent?.(
+            new CustomEvent("mjr:selection-changed", { detail: { selectedIds: list, activeId: activeId || list[0] || "" } })
+        );
+    } catch {}
+    return list;
+}
+
+function _safeEscapeId(value) {
+    try {
+        return CSS?.escape ? CSS.escape(String(value)) : String(value).replace(/["\\]/g, "\\$&");
+    } catch {
+        return String(value).replace(/["\\]/g, "\\$&");
+    }
 }
 
 function _getFilenameKey(filename) {
@@ -1607,6 +1709,110 @@ export async function loadAssetsFromList(gridContainer, assets, options = {}) {
     }
 }
 
+/**
+ * Remove assets from grid state + UI (used after delete).
+ * Keeps selection dataset consistent and avoids UI re-appearance on scroll.
+ * @param {HTMLElement} gridContainer
+ * @param {Array<string|number|Object>} assetIds
+ * @param {Object} [options]
+ * @param {boolean} [options.updateSelection=true]
+ * @returns {{ok: boolean, removed: number, selectedIds: string[]}}
+ */
+export function removeAssetsFromGrid(gridContainer, assetIds, { updateSelection = true } = {}) {
+    if (!gridContainer) {
+        return { ok: false, removed: 0, selectedIds: [] };
+    }
+    const ids = new Set();
+    const list = Array.isArray(assetIds) ? assetIds : [assetIds];
+    for (const raw of list) {
+        if (raw == null) continue;
+        if (typeof raw === "object" && raw?.id != null) {
+            ids.add(String(raw.id));
+        } else {
+            ids.add(String(raw));
+        }
+    }
+    if (!ids.size) {
+        return { ok: false, removed: 0, selectedIds: Array.from(getSelectedIdSet(gridContainer)) };
+    }
+
+    let selectedIds = getSelectedIdSet(gridContainer);
+    if (updateSelection) {
+        for (const id of ids) selectedIds.delete(String(id));
+        _setSelectedIdsDataset(gridContainer, selectedIds);
+    }
+
+    // Best-effort selection class sync for visible cards.
+    try {
+        for (const card of gridContainer.querySelectorAll(".mjr-asset-card.is-selected")) {
+            const id = card?.dataset?.mjrAssetId;
+            if (!id || !selectedIds.has(String(id))) {
+                card.classList.remove("is-selected");
+                card.setAttribute("aria-selected", "false");
+            }
+        }
+    } catch {}
+
+    const state = GRID_STATE.get(gridContainer);
+    let removedCount = 0;
+    if (state?.assets && state.assets.length) {
+        const next = [];
+        for (const asset of state.assets) {
+            const id = asset?.id != null ? String(asset.id) : "";
+            if (id && ids.has(id)) {
+                removedCount += 1;
+            } else {
+                next.push(asset);
+            }
+        }
+        if (removedCount) {
+            state.assets = next;
+            try {
+                if (Number.isFinite(state.total)) state.total = Math.max(0, Number(state.total) - removedCount);
+            } catch {}
+            try {
+                if (Number.isFinite(state.offset)) state.offset = Math.max(0, Number(state.offset) - removedCount);
+            } catch {}
+            if (state.virtualGrid) {
+                state.virtualGrid.setItems(state.assets);
+            } else {
+                for (const id of ids) {
+                    try {
+                        const card = gridContainer.querySelector(`[data-mjr-asset-id="${_safeEscapeId(id)}"]`);
+                        card?.remove?.();
+                    } catch {}
+                }
+            }
+        }
+    } else {
+        for (const id of ids) {
+            try {
+                const card = gridContainer.querySelector(`[data-mjr-asset-id="${_safeEscapeId(id)}"]`);
+                if (card) {
+                    card.remove?.();
+                    removedCount += 1;
+                }
+            } catch {}
+        }
+    }
+
+    const selectedList = Array.from(selectedIds);
+    try {
+        gridContainer?.dispatchEvent?.(new CustomEvent("mjr:selection-changed", { detail: { selectedIds: selectedList } }));
+    } catch {}
+    try {
+        const count = Number(state?.assets?.length ?? null);
+        const total = Number(state?.total ?? null);
+        if (Number.isFinite(count) || Number.isFinite(total)) {
+            gridContainer?.dispatchEvent?.(
+                new CustomEvent("mjr:grid-stats", { detail: { count, total } })
+            );
+        }
+    } catch {}
+
+    return { ok: true, removed: removedCount, selectedIds: selectedList };
+}
+
 export function disposeGrid(gridContainer) {
     const state = GRID_STATE.get(gridContainer);
     if (!state) return;
@@ -1778,10 +1984,17 @@ function _flushUpsertBatch(gridContainer) {
 
                     state.seenKeys.add(key);
                     
+                    // If insertion is near the top, mark re-sort to avoid large index shifts.
+                    const shouldResort = insertPos <= Math.min(10, state.assets.length);
                     if (insertPos === -1) {
                         state.assets.push(asset);
                     } else {
                         state.assets.splice(insertPos, 0, asset);
+                    }
+                    if (shouldResort) {
+                        try {
+                            state._mjrResortPending = true;
+                        } catch {}
                     }
                     modified = true;
                 }
@@ -1790,6 +2003,20 @@ function _flushUpsertBatch(gridContainer) {
 
         // Single setItems call for all changes
         if (modified && vg) {
+            // If many top inserts occurred, full re-sort to stabilize indices.
+            if (state._mjrResortPending) {
+                try {
+                    const sortKey = gridContainer.dataset.mjrSort || "mtime_desc";
+                    state.assets.sort((a, b) => {
+                        const av = getSortValue(a, sortKey);
+                        const bv = getSortValue(b, sortKey);
+                        if (av < bv) return -1;
+                        if (av > bv) return 1;
+                        return 0;
+                    });
+                } catch {}
+                try { state._mjrResortPending = false; } catch {}
+            }
             vg.setItems(state.assets);
         }
     } catch (err) {
@@ -1973,7 +2200,7 @@ export function refreshGrid(gridContainer) {
 // [ISSUE 1] Real-time Refresh Implementation
 // Listens for the event dispatched by entry.js (relayed from backend)
 try {
-    window.addEventListener("mjr:scan-complete", (e) => {
+    const onScanComplete = (e) => {
         const detail = e.detail;
         
         // Find all active grids
@@ -2003,7 +2230,11 @@ try {
                 console.warn("[Majoor] Auto-refresh error:", err);
             }
         }
-    });
+    };
+
+    // Canonical event name: mjr-scan-complete (keep legacy alias for safety).
+    window.addEventListener("mjr-scan-complete", onScanComplete);
+    window.addEventListener("mjr:scan-complete", onScanComplete);
 } catch (e) {
     console.warn("Failed to register global scan listener:", e);
 }

@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import os
 import asyncio
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 
-from ...shared import get_logger
+from ...shared import get_logger, Result
 from ...adapters.db.sqlite import Sqlite
 from ..metadata import MetadataService
 
@@ -28,7 +28,6 @@ class MetadataEnricher:
         self,
         db: Sqlite,
         metadata_service: MetadataService,
-        scan_lock: asyncio.Lock,
         compute_state_hash_fn,
         prepare_metadata_fields_fn,
         metadata_error_payload_fn,
@@ -39,14 +38,12 @@ class MetadataEnricher:
         Args:
             db: Database adapter instance
             metadata_service: Metadata service for extraction
-            scan_lock: Shared lock for database writes
             compute_state_hash_fn: Function to compute state hash
             prepare_metadata_fields_fn: Function to prepare metadata fields
             metadata_error_payload_fn: Function to create error payload
         """
         self.db = db
         self.metadata = metadata_service
-        self._scan_lock = scan_lock
         self._compute_state_hash = compute_state_hash_fn
         self._prepare_metadata_fields = prepare_metadata_fields_fn
         self._metadata_error_payload = metadata_error_payload_fn
@@ -124,8 +121,7 @@ class MetadataEnricher:
             if fp and aid:
                 id_by_fp[str(fp)] = aid
 
-        asset_updates: List[Tuple[Any, Any, Any, int]] = []
-        meta_updates: List[Tuple[int, Any]] = []
+        updates: List[Dict[str, Any]] = []
 
         # Import helper locally to use shared logic (including FTS population)
         from .metadata_helpers import MetadataHelpers
@@ -159,28 +155,76 @@ class MetadataEnricher:
                 height = meta.get("height")
                 duration = meta.get("duration")
 
-            asset_updates.append((width, height, duration, asset_id))
-            meta_updates.append((asset_id, metadata_result))
+            updates.append(
+                {
+                    "asset_id": asset_id,
+                    "width": width,
+                    "height": height,
+                    "duration": duration,
+                    "metadata_result": metadata_result,
+                    "filepath": fp,
+                }
+            )
 
-        if not asset_updates and not meta_updates:
+        if not updates:
             return
 
-        # Keep DB writes serialized with scans/index_files to avoid lock contention.
-        async with self._scan_lock:
-            async with self.db.atransaction(mode="immediate"):
-                if asset_updates:
-                    await self.db.aexecutemany(
-                        """
-                        UPDATE assets
-                        SET width = COALESCE(?, width),
-                            height = COALESCE(?, height),
-                            duration = COALESCE(?, duration),
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                        """,
-                        asset_updates,
-                    )
-                if meta_updates:
-                    # Use shared helper to write metadata (ensures tags_text/FTS is populated with prompt/geninfo)
-                    for asset_id, meta_res in meta_updates:
-                        await MetadataHelpers.write_asset_metadata_row(self.db, asset_id, meta_res)
+        for item in updates:
+            asset_id = item.get("asset_id")
+            if not asset_id:
+                continue
+            meta_res = item.get("metadata_result")
+            if not isinstance(meta_res, Result):
+                continue
+            try:
+                async with self.db.lock_for_asset(asset_id):
+                    async with self.db.atransaction(mode="immediate") as tx:
+                        if not tx.ok:
+                            logger.warning(
+                                "Metadata enrichment skipped (transaction begin failed) for asset_id=%s: %s",
+                                asset_id,
+                                tx.error,
+                            )
+                            continue
+                        await self.db.aexecute(
+                            """
+                            UPDATE assets
+                            SET width = COALESCE(?, width),
+                                height = COALESCE(?, height),
+                                duration = COALESCE(?, duration),
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                            """,
+                            (item.get("width"), item.get("height"), item.get("duration"), asset_id),
+                        )
+                        # Use shared helper to write metadata (ensures tags_text/FTS is populated with prompt/geninfo)
+                        await MetadataHelpers.write_asset_metadata_row(
+                            self.db,
+                            asset_id,
+                            meta_res,
+                            filepath=item.get("filepath"),
+                        )
+                    if not tx.ok:
+                        logger.warning("Metadata enrichment commit failed for asset_id=%s: %s", asset_id, tx.error)
+                    else:
+                        # Notify frontend so workflow dot updates promptly.
+                        try:
+                            res = await self.db.aquery(
+                                """
+                                SELECT a.id, m.has_workflow AS has_workflow,
+                                       m.has_generation_data AS has_generation_data
+                                FROM assets a
+                                LEFT JOIN asset_metadata m ON a.id = m.asset_id
+                                WHERE a.id = ?
+                                LIMIT 1
+                                """,
+                                (int(asset_id),),
+                            )
+                            if res.ok and res.data:
+                                payload = dict(res.data[0])
+                                from ...routes.registry import PromptServer
+                                PromptServer.instance.send_sync("mjr-asset-updated", payload)
+                        except Exception:
+                            pass
+            except Exception as exc:
+                logger.warning("Metadata enrichment update failed for asset_id=%s: %s", asset_id, exc)

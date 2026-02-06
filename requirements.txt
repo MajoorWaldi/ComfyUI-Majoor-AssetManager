@@ -13,12 +13,11 @@ pillow>=11.0.0
 # Safe file deletion (recycle bin support)
 send2trash>=1.8.0
 
-# File system monitoring for auto-reindexing
-watchdog>=2.1.0
+# File system monitoring for auto-reindexing (optional, enable with MJR_ENABLE_WATCHER=1)
+watchdog>=3.0.0
 
 # Windows-specific: Windows Property System metadata support
 # Only required on Windows; gracefully skipped on other platforms
-pywin32>=300; sys_platform == 'win32'
 pywin32>=300; sys_platform == 'win32'
 
 # Note: tkinter is required for native folder browser functionality

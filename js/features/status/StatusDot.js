@@ -2,7 +2,7 @@
  * Status Dot Feature - Health indicator
  */
 
-import { get, getToolsStatus, post, resetIndex } from "../../api/client.js";
+import { get, getToolsStatus, post, resetIndex, getWatcherStatus } from "../../api/client.js";
 import { ENDPOINTS } from "../../api/endpoints.js";
 import { APP_CONFIG } from "../../app/config.js";
 import { comfyToast } from "../../app/toast.js";
@@ -53,10 +53,42 @@ function setStatusWithHint(statusText, mainText, hintText) {
     statusText.appendChild(span);
 }
 
+function formatWatcherScopeLabel(scope) {
+    const s = String(scope || "").toLowerCase();
+    if (s === "all") return t("scope.allFull", "All (Inputs + Outputs)");
+    if (s === "input" || s === "inputs") return t("scope.input", "Inputs");
+    if (s === "custom") return t("scope.custom", "Custom");
+    return t("scope.output", "Outputs");
+}
+
+function formatWatcherLine(watcher, desiredScope = "") {
+    if (!watcher || typeof watcher !== "object") {
+        if (desiredScope) {
+            return t("status.watcher.disabledScoped", "Watcher: disabled ({scope})", { scope: formatWatcherScopeLabel(desiredScope) });
+        }
+        return t("status.watcher.disabled", "Watcher: disabled");
+    }
+    const enabled = !!watcher.enabled;
+    const scope = watcher.scope ? String(watcher.scope) : "";
+    if (!enabled) {
+        if (scope || desiredScope) {
+            const effective = desiredScope && scope && scope !== desiredScope ? desiredScope : (scope || desiredScope);
+            return t("status.watcher.disabledScoped", "Watcher: disabled ({scope})", { scope: formatWatcherScopeLabel(effective) });
+        }
+        return t("status.watcher.disabled", "Watcher: disabled");
+    }
+    if (scope) {
+        return t("status.watcher.enabledScoped", `Watcher: enabled (${scope})`, { scope: formatWatcherScopeLabel(scope) });
+    }
+    return t("status.watcher.enabled", "Watcher: enabled");
+}
+
 /**
  * Create status indicator section
  */
-export function createStatusIndicator() {
+export function createStatusIndicator(options = {}) {
+    const getScanContext =
+        typeof options?.getScanContext === "function" ? options.getScanContext : null;
     const section = document.createElement("div");
     section.style.cssText = "margin-bottom: 20px; padding: 12px; background: var(--bg-color, #1a1a1a); border-radius: 6px; border: 1px solid var(--border-color, #333); cursor: pointer; transition: all 0.2s;";
 
@@ -138,7 +170,7 @@ export function createStatusIndicator() {
     };
     resetBtn.onclick = async (event) => {
         event.stopPropagation();
-        
+
         comfyToast(t("toast.resetTriggered"), "warning", 3000);
 
         const originalText = resetBtn.textContent;
@@ -150,10 +182,16 @@ export function createStatusIndicator() {
         statusDot.style.background = "var(--mjr-status-warning, #FFA726)"; // Orange (working)
 
         try {
+            const ctx = getScanContext ? getScanContext() : {};
+            const scope = String(ctx?.scope || "output").toLowerCase();
+            const customRootId = ctx?.customRootId || ctx?.custom_root_id || ctx?.root_id || null;
+            const isAll = scope === "all";
+
             const res = await resetIndex({
-                scope: "all",
+                scope,
+                customRootId,
                 reindex: true,
-                hard_reset_db: true,
+                hard_reset_db: isAll,
                 clear_scan_journal: true,
                 clear_metadata_cache: true,
                 clear_asset_metadata: true,
@@ -216,6 +254,32 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
     const desiredScope = String(scanTarget?.scope || "output").toLowerCase();
     const desiredCustomRootId = scanTarget?.customRootId || scanTarget?.custom_root_id || scanTarget?.root_id || null;
 
+    // Prevent overlapping scans (manual or polling-triggered).
+    try {
+        const now = Date.now();
+        const inflight = globalThis?._mjrScanInFlight;
+        if (inflight && typeof inflight === "object") {
+            const ageMs = now - Number(inflight.at || 0);
+            if (ageMs >= 0 && ageMs < 10 * 60_000) {
+                setStatusWithHint(
+                    statusText,
+                    t("status.scanInProgress", "Scan already running..."),
+                    t("status.scanInProgressHint", "Please wait for the current scan to finish")
+                );
+                return;
+            }
+        }
+        globalThis._mjrScanInFlight = { at: now, scope: desiredScope, root_id: desiredCustomRootId || null };
+    } catch {}
+
+    const clearScanInFlight = () => {
+        try {
+            if (globalThis?._mjrScanInFlight) {
+                globalThis._mjrScanInFlight = null;
+            }
+        } catch {}
+    };
+
     // Incremental is always favored.
     // Shift+Click logic is handled by caller (if applicable), but here we default to true.
     const shouldIncremental = true;
@@ -232,6 +296,7 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
         const configResult = await get(ENDPOINTS.CONFIG);
         if (!configResult.ok) {
             statusText.textContent = t("status.errorGetConfig");
+            clearScanInFlight();
             return;
         }
         roots = { output_directory: configResult.data.output_directory };
@@ -269,15 +334,21 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
         if (!desiredCustomRootId) {
             statusDot.style.background = "var(--mjr-status-error, #f44336)";
             statusText.textContent = t("status.selectCustomFolder");
+            clearScanInFlight();
             return;
         }
         payload.custom_root_id = desiredCustomRootId;
     }
 
-    // Trigger scan
-    const scanResult = await post(ENDPOINTS.SCAN, payload);
+    let scanResult = null;
+    try {
+        // Trigger scan
+        scanResult = await post(ENDPOINTS.SCAN, payload);
+    } finally {
+        clearScanInFlight();
+    }
 
-    if (scanResult.ok) {
+    if (scanResult?.ok) {
         const stats = scanResult.data;
         statusDot.style.background = "var(--mjr-status-success, #4CAF50)"; // Green
         setStatusWithHint(
@@ -292,7 +363,7 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
         }, 2000);
     } else {
         statusDot.style.background = "var(--mjr-status-error, #f44336)"; // Red
-        setStatusLines(statusText, [t("toast.scanFailed") + `: ${scanResult.error || "Unknown error"}`]);
+        setStatusLines(statusText, [t("toast.scanFailed") + `: ${scanResult?.error || "Unknown error"}`]);
 
         // Restore status after 3 seconds
         setTimeout(() => {
@@ -446,6 +517,20 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
         const lastScanText = lastScanRaw ? new Date(lastScanRaw).toLocaleString() : "N/A";
         const toolAvailability = counters.tool_availability || {};
         const toolPaths = counters.tool_paths || {};
+        let watcherInfo = counters.watcher;
+        try {
+            if (!watcherInfo || typeof watcherInfo.enabled !== "boolean") {
+                const wres = await getWatcherStatus();
+                if (wres?.ok && wres.data) {
+                    watcherInfo = {
+                        enabled: !!wres.data.enabled,
+                        scope: (counters?.watcher?.scope || desiredScope),
+                        custom_root_id: desiredCustomRootId || null,
+                    };
+                }
+            }
+        } catch {}
+        const watcherLine = formatWatcherLine(watcherInfo, desiredScope);
 
         renderCapabilities(capabilitiesSection, toolAvailability, toolPaths);
         renderToolsStatusLine(capabilitiesSection, toolStatusData, toolAvailability);
@@ -465,7 +550,7 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
             setStatusWithHint(
                 statusText,
                 t("status.noAssets", `No assets indexed yet (${scopeLabel})`, { scope: scopeLabel }),
-                t("status.clickToScan", "Click the dot to start a scan")
+                [t("status.clickToScan", "Click the dot to start a scan"), watcherLine].filter(Boolean).join("  •  ")
             );
         } else {
             // Assets indexed - green
@@ -476,6 +561,7 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
                     t("status.assetsIndexed", `${totalAssets.toLocaleString()} assets indexed (${scopeLabel})`, { count: totalAssets.toLocaleString(), scope: scopeLabel }),
                     t("status.imagesVideos", `Images: ${counters.images || 0}  -  Videos: ${counters.videos || 0}`, { images: counters.images || 0, videos: counters.videos || 0 }),
                     t("status.withWorkflows", `With workflows: ${withWorkflows}  -  Generation data: ${withGenerationData}`, { workflows: withWorkflows, gendata: withGenerationData }),
+                    watcherLine,
                 ],
                 t("status.lastScan", `Last scan: ${lastScanText}`, { date: lastScanText })
             );

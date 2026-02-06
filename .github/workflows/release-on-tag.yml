@@ -1,0 +1,32 @@
+name: Release on tag
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build ZIP and create Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build ZIP artifact
+        run: |
+          REF_NAME=${{ github.ref_name }}
+          ZIP_NAME=mjr-assets-manager-${REF_NAME}.zip
+          git archive --format=zip --output="$ZIP_NAME" ${{ github.ref }} || (zip -r "$ZIP_NAME" . -x .github/** tests/** __pycache__/**)
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+
+      - name: Create GitHub Release and upload asset
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          files: ${{ env.ZIP_NAME }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

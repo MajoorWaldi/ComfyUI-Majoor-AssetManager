@@ -58,7 +58,6 @@ tests/
 │   ├── test_collections_service.py
 │   ├── test_batch_zip.py
 │   ├── test_fast_scan.py
-│   ├── test_watcher_restart.py
 │   ├── test_date_histogram.py
 │   └── test_viewer_grid_mask.py
 │
@@ -154,7 +153,6 @@ pytest tests/ --cov=backend --cov-report=html
 
 - Collections CRUD
 - Multi-file ZIP export
-- File watcher
 - Date histogram
 - Viewer grid masks
 

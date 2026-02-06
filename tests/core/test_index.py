@@ -26,7 +26,9 @@ async def test_index_service(tmp_path):
     # Build services
     db_path = tmp_path / "test_index.db"
 
-    services = await build_services(str(db_path))
+    services_res = await build_services(str(db_path))
+    assert services_res.ok, services_res.error
+    services = services_res.data
     index_service = services["index"]
     parser_dir = Path(__file__).parent.parent / "parser"
     logger.info(f"\nTest 1: Scanning {parser_dir}")

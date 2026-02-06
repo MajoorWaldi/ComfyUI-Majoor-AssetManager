@@ -147,6 +147,8 @@ CREATE INDEX IF NOT EXISTS idx_assets_kind_mtime ON assets(kind, mtime);
 CREATE INDEX IF NOT EXISTS idx_assets_source ON assets(source);
 CREATE INDEX IF NOT EXISTS idx_assets_root_id ON assets(root_id);
 CREATE INDEX IF NOT EXISTS idx_assets_source_root_id ON assets(source, root_id);
+-- Prevent duplicate entries for the same path/source/root (best-effort; filepath is already UNIQUE).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_filepath_source_root ON assets(filepath, source, root_id);
 CREATE INDEX IF NOT EXISTS idx_metadata_rating ON asset_metadata(rating);
 CREATE INDEX IF NOT EXISTS idx_metadata_workflow_hash ON asset_metadata(workflow_hash);
 CREATE INDEX IF NOT EXISTS idx_metadata_quality_workflow ON asset_metadata(metadata_quality, has_workflow);
@@ -319,7 +321,9 @@ async def _repair_asset_metadata_fts(db) -> Result[bool]:
     logger.warning("Repairing asset_metadata_fts (schema/triggers)")
 
     try:
-        async with db.atransaction(mode="immediate"):
+        async with db.atransaction(mode="immediate") as tx:
+            if not tx.ok:
+                return Result.Err("DB_ERROR", tx.error or "Failed to begin transaction")
             if needs_table_rebuild:
                 await db.aexecutescript(
                     """
@@ -374,6 +378,8 @@ async def _repair_asset_metadata_fts(db) -> Result[bool]:
                 FROM asset_metadata;
                 """
             )
+        if not tx.ok:
+            return Result.Err("DB_ERROR", tx.error or "Commit failed")
         return Result.Ok(True)
     except Exception as exc:
         logger.warning("Failed to repair asset_metadata_fts: %s", exc)

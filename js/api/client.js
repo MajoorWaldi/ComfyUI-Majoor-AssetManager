@@ -484,6 +484,22 @@ export async function resetIndex(options = {}) {
     return post(ENDPOINTS.INDEX_RESET, body);
 }
 
+export async function setWatcherScope({ scope = "output", customRootId = "" } = {}) {
+    const s = String(scope || "output").trim().toLowerCase() || "output";
+    const rid = String(customRootId || "").trim();
+    const body = { scope: s };
+    if (rid) body.custom_root_id = rid;
+    return post(ENDPOINTS.WATCHER_SCOPE, body);
+}
+
+export async function getWatcherStatus() {
+    return get(ENDPOINTS.WATCHER_STATUS);
+}
+
+export async function toggleWatcher(enabled = true) {
+    return post(ENDPOINTS.WATCHER_TOGGLE, { enabled: !!enabled });
+}
+
 export async function getToolsStatus(options = {}) {
     return get(ENDPOINTS.TOOLS_STATUS, options);
 }

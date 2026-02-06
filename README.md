@@ -73,6 +73,23 @@ Optional attribution request (non-binding): see `NOTICE`.
 ### ComfyUI Manager (recommended)
 Install via the ComfyUI Manager UI.
 
+### Installing a specific version or nightly build
+You can install a specific release tag or the nightly branch by using the GitHub ZIP archive URL. Example patterns:
+
+- Release tag (example):
+
+  https://github.com/MajoorWaldi/ComfyUI-Majoor-AssetsManager/archive/refs/tags/v2.2.3.zip
+
+- Nightly / latest main branch (example):
+
+  https://github.com/MajoorWaldi/ComfyUI-Majoor-AssetsManager/archive/refs/heads/main.zip
+
+If your ComfyUI registry or manager accepts a zip URL, paste one of the above URLs to install that specific ref. The extension manifest includes a `releases.zip_url_template` that tools can use to programmatically construct these URLs; the template is:
+
+`https://github.com/MajoorWaldi/ComfyUI-Majoor-AssetsManager/archive/refs/{ref}.zip`
+
+Use `{ref}` = `tags/vX.Y.Z` for a tag, or `{ref}` = `heads/<branch>` (for example `heads/main`) for branch installs (nightly).
+
 ### Manual
 ```bash
 cd ComfyUI/custom_nodes
@@ -181,6 +198,17 @@ Settings are stored under the `mjrSettings` key in `localStorage` (browser-side)
 Backend persistence is currently limited to `probeBackend.mode` (stored in the SQLite `metadata` table). It uses a version bump so changes propagate quickly even with multiple backend instances. Other settings are intentionally browser-local and won't sync across machines/browsers.
 
 - Page size (assets per request)
+
+## Compatibility
+
+This project officially supports Python 3.10 and 3.11. A CI matrix is provided in `.github/workflows/ci-python.yml` which runs the test-suite on both interpreters.
+
+Run tests across multiple Python versions locally with `tox` (requires those Python versions installed):
+
+```bash
+pip install tox
+tox
+```
 - Auto-scan (on open / on startup)
 - Status poll interval
 - Sidebar position (left/right)

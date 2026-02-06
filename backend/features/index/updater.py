@@ -50,16 +50,17 @@ class AssetUpdater:
         if not check_result.ok or not check_result.data or len(check_result.data) == 0:
             return Result.Err("NOT_FOUND", f"Asset not found: {asset_id}")
 
-        # Update or insert asset_metadata
-        result = await self.db.aexecute(
-            """
-            INSERT INTO asset_metadata (asset_id, rating, tags)
-            VALUES (?, ?, '[]')
-            ON CONFLICT(asset_id) DO UPDATE SET
-                rating = excluded.rating
-            """,
-            (asset_id, rating)
-        )
+        # Update or insert asset_metadata (serialize per-asset to avoid race with enrichers)
+        async with self.db.lock_for_asset(asset_id):
+            result = await self.db.aexecute(
+                """
+                INSERT INTO asset_metadata (asset_id, rating, tags)
+                VALUES (?, ?, '[]')
+                ON CONFLICT(asset_id) DO UPDATE SET
+                    rating = excluded.rating
+                """,
+                (asset_id, rating)
+            )
 
         if not result.ok:
             return Result.Err("UPDATE_FAILED", result.error)
@@ -101,28 +102,29 @@ class AssetUpdater:
         # Build tags_text for FTS5 (if column exists)
         tags_text = " ".join(sanitized) if self._has_tags_text_column else None
 
-        # Update or insert asset_metadata
-        if self._has_tags_text_column:
-            result = await self.db.aexecute(
-                """
-                INSERT INTO asset_metadata (asset_id, rating, tags, tags_text)
-                VALUES (?, 0, ?, ?)
-                ON CONFLICT(asset_id) DO UPDATE SET
-                    tags = excluded.tags,
-                    tags_text = excluded.tags_text
-                """,
-                (asset_id, tags_json, tags_text)
-            )
-        else:
-            result = await self.db.aexecute(
-                """
-                INSERT INTO asset_metadata (asset_id, rating, tags)
-                VALUES (?, 0, ?)
-                ON CONFLICT(asset_id) DO UPDATE SET
-                    tags = excluded.tags
-                """,
-                (asset_id, tags_json)
-            )
+        # Update or insert asset_metadata (serialize per-asset to avoid race with enrichers)
+        async with self.db.lock_for_asset(asset_id):
+            if self._has_tags_text_column:
+                result = await self.db.aexecute(
+                    """
+                    INSERT INTO asset_metadata (asset_id, rating, tags, tags_text)
+                    VALUES (?, 0, ?, ?)
+                    ON CONFLICT(asset_id) DO UPDATE SET
+                        tags = excluded.tags,
+                        tags_text = excluded.tags_text
+                    """,
+                    (asset_id, tags_json, tags_text)
+                )
+            else:
+                result = await self.db.aexecute(
+                    """
+                    INSERT INTO asset_metadata (asset_id, rating, tags)
+                    VALUES (?, 0, ?)
+                    ON CONFLICT(asset_id) DO UPDATE SET
+                        tags = excluded.tags
+                    """,
+                    (asset_id, tags_json)
+                )
 
         if not result.ok:
             return Result.Err("UPDATE_FAILED", result.error)

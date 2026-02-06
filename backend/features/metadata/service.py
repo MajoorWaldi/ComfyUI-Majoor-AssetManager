@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 from ...shared import Result, ErrorCode, get_logger, classify_file, log_structured
+from ...config import METADATA_EXTRACT_CONCURRENCY
 from ...adapters.tools import ExifTool, FFProbe
 from ...settings import AppSettings
 from ...probe_router import pick_probe_backend
@@ -156,6 +157,13 @@ class MetadataService:
         self.exiftool = exiftool
         self.ffprobe = ffprobe
         self._settings = settings
+        try:
+            max_concurrency = int(METADATA_EXTRACT_CONCURRENCY or 1)
+        except Exception:
+            max_concurrency = 1
+        if max_concurrency <= 0:
+            max_concurrency = 1
+        self._extract_sem = asyncio.Semaphore(max_concurrency)
 
     async def _enrich_with_geninfo_async(self, combined: Dict[str, Any]) -> None:
         """Helper to parse geninfo from prompt/workflow in combined metadata (Worker Thread)."""
@@ -215,6 +223,15 @@ class MetadataService:
         if not os.path.exists(file_path):
             return Result.Err(ErrorCode.NOT_FOUND, f"File not found: {file_path}")
 
+        async with self._extract_sem:
+            return await self._get_metadata_impl(file_path, scan_id=scan_id, probe_mode_override=probe_mode_override)
+
+    async def _get_metadata_impl(
+        self,
+        file_path: str,
+        scan_id: Optional[str] = None,
+        probe_mode_override: Optional[str] = None
+    ) -> Result[Dict[str, Any]]:
         # Get file kind
         kind = classify_file(file_path)
         if kind == "unknown":
@@ -534,6 +551,22 @@ class MetadataService:
         Returns:
             Dict mapping file path to Result with metadata
         """
+        if not file_paths:
+            return {}
+
+        async with self._extract_sem:
+            return await self._get_metadata_batch_impl(
+                file_paths,
+                scan_id=scan_id,
+                probe_mode_override=probe_mode_override,
+            )
+
+    async def _get_metadata_batch_impl(
+        self,
+        file_paths: list[str],
+        scan_id: Optional[str] = None,
+        probe_mode_override: Optional[str] = None,
+    ) -> Dict[str, Result[Dict[str, Any]]]:
         if not file_paths:
             return {}
 

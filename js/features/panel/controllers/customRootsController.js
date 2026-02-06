@@ -10,7 +10,8 @@ export function createCustomRootsController({
     get,
     post,
     ENDPOINTS,
-    reloadGrid
+    reloadGrid,
+    onRootChanged = null
 }) {
     const isSensitivePath = (input) => {
         try {
@@ -98,6 +99,9 @@ export function createCustomRootsController({
             if (!customSelect.disabled) {
                 state.customRootId = customSelect.value || "";
                 customRemoveBtn.disabled = !state.customRootId;
+                try {
+                    await onRootChanged?.(state);
+                } catch {}
                 await reloadGrid();
             }
         });

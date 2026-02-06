@@ -34,28 +34,6 @@ async def _dispose_services():
             logger.warning(error_msg, exc_info=True)
             disposal_errors.append(error_msg)
 
-    # Dispose watcher
-    watcher = _services.get("watcher")
-    if watcher:
-        try:
-            watcher.stop()
-            logger.debug("File watcher stopped successfully")
-        except Exception as exc:
-            error_msg = f"Error stopping watcher: {exc}"
-            logger.warning(error_msg, exc_info=True)
-            disposal_errors.append(error_msg)
-
-    # Stop filesystem list cache watcher (watchdog) if any.
-    try:
-        from backend.adapters.fs.list_cache_watcher import stop_global_fs_list_cache_watcher
-
-        stop_global_fs_list_cache_watcher()
-    except Exception as exc:
-        try:
-            logger.debug("Error stopping fs cache watcher: %s", exc)
-        except Exception:
-            pass
-
     # Clear services reference
     _services = None
 
@@ -74,14 +52,22 @@ async def _build_services(force: bool = False):
             await _dispose_services()
 
         try:
-            _services = await build_services()
-            _services_error = None
-            return _services
+            services_result = await build_services()
         except Exception as exc:
             _services_error = str(exc)
             logger.error(f"Failed to initialize services: {exc}", exc_info=True)
             _services = None
             return None
+
+        if not services_result or not getattr(services_result, "ok", False):
+            _services_error = getattr(services_result, "error", None) or "Initialization failed"
+            logger.error("Failed to initialize services: %s", _services_error)
+            _services = None
+            return None
+
+        _services = services_result.data
+        _services_error = None
+        return _services
 
 
 async def _require_services():

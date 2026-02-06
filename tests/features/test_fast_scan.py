@@ -11,7 +11,9 @@ async def test_fast_scan_enriches_metadata_in_background(tmp_path: Path):
     from backend.deps import build_services
 
     db_path = tmp_path / "fast_scan.db"
-    services = await build_services(db_path=str(db_path))
+    services_res = await build_services(db_path=str(db_path))
+    assert services_res.ok, services_res.error
+    services = services_res.data
     index = services["index"]
     db = services["db"]
 

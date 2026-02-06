@@ -4,10 +4,17 @@ Metadata helpers - shared utilities for metadata operations.
 import hashlib
 import asyncio
 import json
+import time
+from datetime import datetime, timedelta, UTC
 from typing import Dict, Any, Tuple, Optional
 
-from ...config import MAX_METADATA_JSON_BYTES
-from ...shared import Result
+from ...config import (
+    MAX_METADATA_JSON_BYTES,
+    METADATA_CACHE_MAX,
+    METADATA_CACHE_TTL_SECONDS,
+    METADATA_CACHE_CLEANUP_INTERVAL_SECONDS,
+)
+from ...shared import Result, get_logger
 from ...adapters.db.sqlite import Sqlite
 from ..metadata.parsing_utils import (
     looks_like_comfyui_workflow,
@@ -16,6 +23,9 @@ from ..metadata.parsing_utils import (
 )
 
 MAX_TAG_LENGTH = 100
+logger = get_logger(__name__)
+_METADATA_CACHE_CLEANUP_LOCK = asyncio.Lock()
+_METADATA_CACHE_LAST_CLEANUP = 0.0
 
 
 class MetadataHelpers:
@@ -27,7 +37,7 @@ class MetadataHelpers:
     """
 
     @staticmethod
-    def prepare_metadata_fields(metadata_result: Result[Dict[str, Any]]) -> Tuple[bool, bool, str, str]:
+    def prepare_metadata_fields(metadata_result: Result[Dict[str, Any]]) -> Tuple[Optional[bool], Optional[bool], str, str]:
         """
         Extract the workflow/generation metadata attributes and JSON payload.
 
@@ -37,8 +47,8 @@ class MetadataHelpers:
         Returns:
             Tuple of (has_workflow, has_generation_data, metadata_quality, metadata_raw_json)
         """
-        has_workflow = False
-        has_generation_data = False
+        has_workflow: Optional[bool] = None
+        has_generation_data: Optional[bool] = None
         metadata_quality = "none"
         metadata_raw_json = "{}"
 
@@ -90,7 +100,7 @@ class MetadataHelpers:
                 return parsed if isinstance(parsed, dict) else None
             return None
 
-        if metadata_result and metadata_result.ok and metadata_result.data:
+        if metadata_result and metadata_result.ok and isinstance(metadata_result.data, dict) and metadata_result.data:
             meta = metadata_result.data
 
             raw_workflow = meta.get("workflow")
@@ -130,6 +140,14 @@ class MetadataHelpers:
         return has_workflow, has_generation_data, metadata_quality, metadata_raw_json
 
     @staticmethod
+    def _bool_to_db(value: Optional[bool]) -> Optional[int]:
+        if value is True:
+            return 1
+        if value is False:
+            return 0
+        return None
+
+    @staticmethod
     def metadata_error_payload(metadata_result: Result[Dict[str, Any]], filepath: str) -> Result[Dict[str, Any]]:
         """
         Build a degraded metadata payload when extraction failed.
@@ -159,7 +177,12 @@ class MetadataHelpers:
         return Result.Ok(payload, quality=quality)
 
     @staticmethod
-    async def write_asset_metadata_row(db: Sqlite, asset_id: int, metadata_result: Result[Dict[str, Any]]) -> Result[Any]:
+    async def write_asset_metadata_row(
+        db: Sqlite,
+        asset_id: int,
+        metadata_result: Result[Dict[str, Any]],
+        filepath: Optional[str] = None,
+    ) -> Result[Any]:
         """
         Insert or update the asset_metadata row with the latest metadata flags.
 
@@ -172,18 +195,24 @@ class MetadataHelpers:
             Result from database operation
         """
         has_workflow, has_generation_data, metadata_quality, metadata_raw_json = MetadataHelpers.prepare_metadata_fields(metadata_result)
+        db_has_workflow = MetadataHelpers._bool_to_db(has_workflow)
+        db_has_generation = MetadataHelpers._bool_to_db(has_generation_data)
 
         # Guard against pathological/huge JSON payloads; keep DB stable.
         try:
             max_bytes = int(MAX_METADATA_JSON_BYTES or 0)
         except Exception:
             max_bytes = 0
+        truncated = False
+        original_bytes = 0
         if max_bytes and isinstance(metadata_raw_json, str):
             try:
                 nbytes = len(metadata_raw_json.encode("utf-8", errors="ignore"))
             except Exception:
                 nbytes = 0
             if nbytes > max_bytes:
+                truncated = True
+                original_bytes = int(nbytes)
                 try:
                     metadata_raw_json = json.dumps(
                         {"_truncated": True, "original_bytes": int(nbytes)},
@@ -192,6 +221,27 @@ class MetadataHelpers:
                     )
                 except Exception:
                     metadata_raw_json = "{}"
+        if truncated:
+            try:
+                metadata_result.meta["truncated"] = True
+                metadata_result.meta["original_bytes"] = int(original_bytes)
+                metadata_result.meta["max_bytes"] = int(max_bytes)
+            except Exception:
+                pass
+            try:
+                fp = filepath
+                if not fp and metadata_result and isinstance(metadata_result.data, dict):
+                    fp = metadata_result.data.get("filepath")
+                suffix = f" filepath={fp}" if isinstance(fp, str) and fp else ""
+                logger.warning(
+                    "Metadata JSON truncated for asset_id=%s%s (bytes=%s > max=%s)",
+                    asset_id,
+                    suffix,
+                    original_bytes,
+                    max_bytes,
+                )
+            except Exception:
+                pass
 
         extracted_rating = 0
         extracted_tags_json = "[]"
@@ -333,8 +383,8 @@ class MetadataHelpers:
                 extracted_rating,
                 extracted_tags_json,
                 extracted_tags_text,
-                1 if has_workflow else 0,
-                1 if has_generation_data else 0,
+                db_has_workflow,
+                db_has_generation,
                 metadata_quality,
                 metadata_raw_json,
             ),
@@ -379,17 +429,19 @@ class MetadataHelpers:
 
             current = result.data[0] if result.data else None
             new_has_workflow, new_has_generation_data, _, new_metadata_raw = MetadataHelpers.prepare_metadata_fields(metadata_result)
+            new_has_workflow_db = MetadataHelpers._bool_to_db(new_has_workflow)
+            new_has_generation_db = MetadataHelpers._bool_to_db(new_has_generation_data)
 
-            current_has_workflow = current["has_workflow"] if current else 0
-            current_has_generation = current["has_generation_data"] if current else 0
+            current_has_workflow = current.get("has_workflow") if current else None
+            current_has_generation = current.get("has_generation_data") if current else None
             current_raw = current["metadata_raw"] if current else ""
 
-            if (current_has_workflow == (1 if new_has_workflow else 0) and
-                    current_has_generation == (1 if new_has_generation_data else 0) and
+            if (current_has_workflow == new_has_workflow_db and
+                    current_has_generation == new_has_generation_db and
                     current_raw == new_metadata_raw):
                 return False
 
-            write_result = await MetadataHelpers.write_asset_metadata_row(db, asset_id, metadata_result)
+            write_result = await MetadataHelpers.write_asset_metadata_row(db, asset_id, metadata_result, filepath=filepath)
             if write_result.ok:
                 # We assume write_journal_fn is async now
                 await write_journal_fn(filepath, base_dir, state_hash, mtime, size)
@@ -430,6 +482,71 @@ class MetadataHelpers:
             return None
 
     @staticmethod
+    async def _maybe_cleanup_metadata_cache(db: Sqlite) -> None:
+        global _METADATA_CACHE_LAST_CLEANUP
+        try:
+            max_entries = int(METADATA_CACHE_MAX or 0)
+        except Exception:
+            max_entries = 0
+        try:
+            ttl_seconds = float(METADATA_CACHE_TTL_SECONDS or 0)
+        except Exception:
+            ttl_seconds = 0.0
+        try:
+            interval = float(METADATA_CACHE_CLEANUP_INTERVAL_SECONDS or 0)
+        except Exception:
+            interval = 0.0
+
+        if max_entries <= 0 and ttl_seconds <= 0:
+            return
+
+        now = time.time()
+        if interval > 0 and (now - _METADATA_CACHE_LAST_CLEANUP) < interval:
+            return
+
+        async with _METADATA_CACHE_CLEANUP_LOCK:
+            now = time.time()
+            if interval > 0 and (_METADATA_CACHE_LAST_CLEANUP and (now - _METADATA_CACHE_LAST_CLEANUP) < interval):
+                return
+            _METADATA_CACHE_LAST_CLEANUP = now
+
+            if ttl_seconds > 0:
+                try:
+                    cutoff = datetime.now(UTC) - timedelta(seconds=ttl_seconds)
+                    cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+                    await db.aexecute(
+                        "DELETE FROM metadata_cache WHERE last_updated < ?",
+                        (cutoff_str,),
+                    )
+                except Exception:
+                    pass
+
+            if max_entries > 0:
+                try:
+                    count_res = await db.aquery("SELECT COUNT(1) AS count FROM metadata_cache")
+                    if count_res.ok and count_res.data:
+                        total = int(count_res.data[0].get("count") or 0)
+                    else:
+                        total = 0
+                    if total > max_entries:
+                        to_remove = max(0, total - max_entries)
+                        if to_remove:
+                            await db.aexecute(
+                                """
+                                DELETE FROM metadata_cache
+                                WHERE filepath IN (
+                                    SELECT filepath
+                                    FROM metadata_cache
+                                    ORDER BY last_updated ASC
+                                    LIMIT ?
+                                )
+                                """,
+                                (to_remove,),
+                            )
+                except Exception:
+                    pass
+
+    @staticmethod
     async def store_metadata_cache(db: Sqlite, filepath: str, state_hash: str, metadata_result: Result[Dict[str, Any]]) -> Result[Any]:
         """
         Store metadata in cache for future use.
@@ -462,10 +579,24 @@ class MetadataHelpers:
             except Exception:
                 nbytes = 0
             if nbytes > max_bytes:
-                return Result.Err("CACHE_SKIPPED", "Metadata JSON too large to cache")
+                try:
+                    logger.warning(
+                        "Metadata cache skipped (payload too large) for %s (bytes=%s > max=%s)",
+                        filepath,
+                        int(nbytes),
+                        int(max_bytes),
+                    )
+                except Exception:
+                    pass
+                return Result.Err(
+                    "CACHE_SKIPPED",
+                    "Metadata JSON too large to cache",
+                    original_bytes=int(nbytes),
+                    max_bytes=int(max_bytes),
+                )
         metadata_hash = MetadataHelpers.compute_metadata_hash(metadata_raw)
 
-        return await db.aexecute(
+        write_res = await db.aexecute(
             """
             INSERT INTO metadata_cache
             (filepath, state_hash, metadata_hash, metadata_raw)
@@ -478,6 +609,11 @@ class MetadataHelpers:
             """,
             (filepath, state_hash, metadata_hash, metadata_raw)
         )
+        try:
+            await MetadataHelpers._maybe_cleanup_metadata_cache(db)
+        except Exception:
+            pass
+        return write_res
 
     @staticmethod
     def compute_metadata_hash(raw_json: str) -> str:

@@ -60,7 +60,7 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
         It is gated behind the same security checks as /mjr/am/index/reset.
         """
         import asyncio
-        from backend.config import WATCHER_PATHS
+        from backend.config import OUTPUT_ROOT_PATH
         from ..core.security import _require_operation_enabled, _require_write_access, _resolve_security_prefs
 
         csrf = _csrf_error(request)
@@ -94,8 +94,12 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
 
         # 2. Trigger Rescan
         started_scans = []
-        for path in WATCHER_PATHS:
-             asyncio.create_task(index_service.scan_directory(str(path), recursive=True, incremental=False))
-             started_scans.append(str(path))
+        try:
+            base_path = str(OUTPUT_ROOT_PATH)
+        except Exception:
+            base_path = ""
+        if base_path:
+            asyncio.create_task(index_service.scan_directory(base_path, recursive=True, incremental=False))
+            started_scans.append(base_path)
              
         return _json_response(Result.Ok({"reset": True, "scans_triggered": started_scans, "file_ops": (reset_res.meta or {})}))

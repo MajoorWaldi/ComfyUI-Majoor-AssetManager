@@ -10,6 +10,71 @@ const safeCall = (fn, fallback = null) => {
     return res === undefined ? fallback : res;
 };
 
+const GENINFO_CACHE_TTL_MS = APP_CONFIG?.VIEWER_GENINFO_TTL_MS ?? 30_000;
+const GENINFO_ERROR_TTL_MS = APP_CONFIG?.VIEWER_GENINFO_ERROR_TTL_MS ?? 8_000;
+const GENINFO_CACHE_MAX = APP_CONFIG?.VIEWER_GENINFO_MAX_ENTRIES ?? 300;
+
+const GENINFO_CACHE = new Map(); // key -> { at, data }
+const GENINFO_ERROR_CACHE = new Map(); // key -> { at, error }
+const GENINFO_INFLIGHT = new Map(); // key -> Promise
+
+const _pruneCache = (cache, ttl, maxEntries) => {
+    try {
+        const now = Date.now();
+        for (const [key, value] of cache.entries()) {
+            if (!value) {
+                cache.delete(key);
+                continue;
+            }
+            if (now - (value.at || 0) > ttl) {
+                cache.delete(key);
+            }
+        }
+        if (cache.size <= maxEntries) return;
+        const sorted = Array.from(cache.entries()).sort((a, b) => (a?.[1]?.at || 0) - (b?.[1]?.at || 0));
+        const excess = cache.size - maxEntries;
+        for (let i = 0; i < excess; i++) {
+            const key = sorted[i]?.[0];
+            if (key != null) cache.delete(key);
+        }
+    } catch {}
+};
+
+const _cacheGet = (cache, key, ttl) => {
+    try {
+        const v = cache.get(key);
+        if (!v) return null;
+        if (Date.now() - (v.at || 0) > ttl) {
+            cache.delete(key);
+            return null;
+        }
+        return v.data ?? null;
+    } catch {
+        return null;
+    }
+};
+
+const _cacheSet = (cache, key, data, ttl, maxEntries) => {
+    try {
+        cache.set(key, { at: Date.now(), data });
+        _pruneCache(cache, ttl, maxEntries);
+    } catch {}
+};
+
+const _getCacheKey = (asset) => {
+    try {
+        const id = asset?.id;
+        if (id != null) return `id:${id}`;
+        const fp = getFilePath(asset);
+        if (fp) return `fp:${fp}`;
+        const name = String(asset?.filename || asset?.name || "").trim();
+        const sub = String(asset?.subfolder || "").trim();
+        const type = String(asset?.source || asset?.type || "output").trim().toLowerCase();
+        if (name) return `name:${type}:${sub}:${name}`;
+    } catch {}
+    return null;
+};
+
 const getGenInfoStatus = (asset) => {
     try {
         if (!asset || typeof asset !== "object") return null;
@@ -222,8 +287,30 @@ export async function ensureViewerMetadataAsset(
 ) {
     if (!asset || typeof asset !== "object") return asset;
     const id = asset?.id ?? null;
+    const cacheKey = _getCacheKey(asset);
 
     let full = asset;
+    const cachedGen = cacheKey ? _cacheGet(GENINFO_CACHE, cacheKey, GENINFO_CACHE_TTL_MS) : null;
+    if (cachedGen && typeof cachedGen === "object") {
+        return { ...asset, ...cachedGen };
+    }
+
+    const cachedError = cacheKey ? _cacheGet(GENINFO_ERROR_CACHE, cacheKey, GENINFO_ERROR_TTL_MS) : null;
+    if (cachedError) {
+        try { setGenInfoStatus(full, cachedError); } catch {}
+        return full;
+    }
+
+    if (cacheKey && GENINFO_INFLIGHT.has(cacheKey)) {
+        try {
+            const inflight = GENINFO_INFLIGHT.get(cacheKey);
+            if (inflight && typeof inflight.then === "function") {
+                return await inflight;
+            }
+        } catch {}
+    }
+
+    const run = async () => {
     const cached = id != null ? safeCall(() => metadataCache?.getCached?.(id)?.data || null, null) : null;
     if (cached && typeof cached === "object") full = { ...asset, ...cached };
 
@@ -305,7 +392,22 @@ export async function ensureViewerMetadataAsset(
             setGenInfoStatus(full, lastError);
         }
     }
+        if (_hasUsefulGenOrWorkflowPayload(full) && cacheKey) {
+            _cacheSet(GENINFO_CACHE, cacheKey, full, GENINFO_CACHE_TTL_MS, GENINFO_CACHE_MAX);
+        } else if (lastError && cacheKey) {
+            _cacheSet(GENINFO_ERROR_CACHE, cacheKey, lastError, GENINFO_ERROR_TTL_MS, GENINFO_CACHE_MAX);
+        }
     return full;
+    };
+
+    if (cacheKey) {
+        const p = run().finally(() => {
+            try { GENINFO_INFLIGHT.delete(cacheKey); } catch {}
+        });
+        GENINFO_INFLIGHT.set(cacheKey, p);
+        return await p;
+    }
+    return await run();
 }
 
 export function buildViewerMetadataBlocks({ title, asset, ui } = {}) {

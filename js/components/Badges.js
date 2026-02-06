@@ -138,17 +138,24 @@ export function createWorkflowDot(asset) {
     const hasGen = toBoolish(asset?.has_generation_data ?? asset?.hasGenerationData);
 
     let color = "var(--mjr-status-neutral, #666)";
-    let title = "Not parsed yet";
+    let title = "Pending: parsing metadata\u2026";
+
+    const anyTrue = hasWorkflow === true || hasGen === true;
+    const anyFalse = hasWorkflow === false || hasGen === false;
+    const anyUnknown = hasWorkflow === null || hasGen === null;
 
     if (hasWorkflow === true && hasGen === true) {
         color = "var(--mjr-status-success, #4CAF50)";
-        title = "Complete: Workflow + Generation data";
-    } else if (hasWorkflow === true || hasGen === true) {
+        title = "Complete: workflow + generation data detected";
+    } else if (anyTrue) {
         color = "var(--mjr-status-warning, #FF9800)";
-        title = hasWorkflow === true ? "Partial: Workflow only" : "Partial: Generation data only";
-    } else if (hasWorkflow === false && hasGen === false) {
+        title = hasWorkflow === true ? "Partial: workflow only (generation data missing)" : "Partial: generation data only (workflow missing)";
+    } else if (anyFalse && !anyTrue && !anyUnknown) {
         color = "var(--mjr-status-error, #f44336)";
-        title = "No workflow or generation data";
+        title = "None: no workflow or generation data found";
+    } else if (anyUnknown) {
+        color = "var(--mjr-status-info, #64B5F6)";
+        title = "Pending: metadata not parsed yet";
     }
 
     dot.textContent = "\u25CF";

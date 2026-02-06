@@ -118,7 +118,11 @@ def main():
     try:
         # Build services (manual run uses direct build)
         from backend.deps import build_services
-        services = build_services("test_integration.db")
+        import asyncio
+        services_res = asyncio.run(build_services("test_integration.db"))
+        if not services_res.ok:
+            raise RuntimeError(services_res.error or "Failed to build services")
+        services = services_res.data
         print()
 
         # Test health
