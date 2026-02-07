@@ -36,6 +36,8 @@ import { normalizeAssetId, pickRootId } from "../utils/ids.js";
 let _obsCache = { value: null, at: 0 };
 let _rtSyncCache = { value: null, at: 0 };
 let _tagsCache = { value: null, at: 0 };
+const AUTH_TOKEN_CACHE_TTL_MS = 2000;
+let _authTokenCache = { value: "", at: 0 };
 const TAGS_CACHE_TTL_MS = 30_000;
 const DEFAULT_TAGS_CACHE_TTL_MS = TAGS_CACHE_TTL_MS;
 const CLIENT_GLOBAL_KEY = "__MJR_API_CLIENT__";
@@ -52,6 +54,24 @@ function _getTagsCacheTTL() {
         return Math.max(1_000, Math.min(10 * 60_000, Math.floor(n)));
     } catch {
         return DEFAULT_TAGS_CACHE_TTL_MS;
+    }
+}
+
+function _readAuthToken() {
+    const now = Date.now();
+    const elapsed = now - (_authTokenCache.at || 0);
+    if (elapsed >= 0 && elapsed < AUTH_TOKEN_CACHE_TTL_MS) {
+        return _authTokenCache.value;
+    }
+    try {
+        const raw = localStorage?.getItem?.(SETTINGS_KEY);
+        const parsed = raw ? JSON.parse(raw) : null;
+        const token = String(parsed?.security?.apiToken || "").trim();
+        _authTokenCache = { value: token, at: now };
+        return token;
+    } catch {
+        _authTokenCache = { value: "", at: now };
+        return "";
     }
 }
 
@@ -96,6 +116,10 @@ export function invalidateTagsCache() {
     _tagsCache = { value: null, at: 0 };
 }
 
+function invalidateAuthTokenCache() {
+    _authTokenCache = { value: "", at: 0 };
+}
+
 // Best-effort cache invalidation when settings change (ComfyUI settings, dev tools, etc.).
 try {
     const w = typeof window !== "undefined" ? window : null;
@@ -108,6 +132,7 @@ try {
                     invalidateObsCache();
                     invalidateRatingTagsSyncCache();
                     invalidateTagsCache();
+                    invalidateAuthTokenCache();
                 }
             } catch {}
         });
@@ -116,6 +141,7 @@ try {
             invalidateObsCache();
             invalidateRatingTagsSyncCache();
             invalidateTagsCache();
+            invalidateAuthTokenCache();
         });
     }
 } catch {}
@@ -191,6 +217,19 @@ export async function fetchAPI(url, options = {}, retryCount = 0) {
                 headers["X-MJR-OBS"] = obsEnabled ? "on" : "off";
             }
         } catch {}
+
+        const authToken = _readAuthToken();
+        if (authToken) {
+            try {
+                if (headers instanceof Headers) {
+                    if (!headers.has("X-MJR-Token")) headers.set("X-MJR-Token", authToken);
+                    if (!headers.has("Authorization")) headers.set("Authorization", `Bearer ${authToken}`);
+                } else {
+                    if (!("X-MJR-Token" in headers)) headers["X-MJR-Token"] = authToken;
+                    if (!("Authorization" in headers)) headers["Authorization"] = `Bearer ${authToken}`;
+                }
+            } catch {}
+        }
 
         const response = await fetch(url, { ...options, headers });
         const contentType = response.headers.get("content-type") || "";

@@ -98,6 +98,7 @@ const DEFAULT_SETTINGS = {
         allowRename: true,
         allowOpenInFolder: true,
         allowResetIndex: true,
+        apiToken: "",
     },
 };
 
@@ -728,6 +729,29 @@ export const registerMajoorSettings = (app, onApplied) => {
         };
 
         registerMinimapToggle("Enabled", "enabled", "setting.minimap.enabled.name", "setting.minimap.enabled.desc");
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Security.ApiToken`,
+            category: cat(t("cat.remote"), t("setting.sec.token.name").replace("Majoor: ", "")),
+            name: t("setting.sec.token.name", "Majoor: API Token"),
+            tooltip: t(
+                "setting.sec.token.desc",
+                "Store the API token used for write operations. Majoor sends it via X-MJR-Token and Authorization headers."
+            ),
+            type: "string",
+            defaultValue: settings.security?.apiToken || "",
+            attrs: {
+                placeholder: t("setting.sec.token.placeholder", "Leave blank to disable."),
+                type: "password",
+                autocomplete: "new-password",
+            },
+            onChange: (value) => {
+                settings.security = settings.security || {};
+                settings.security.apiToken = typeof value === "string" ? value.trim() : "";
+                saveMajoorSettings(settings);
+                notifyApplied("security.apiToken");
+            },
+        });
 
         const registerSecurityToggle = (key, nameKey, descKey, sectionKey = "cat.security") => {
             safeAddSetting({

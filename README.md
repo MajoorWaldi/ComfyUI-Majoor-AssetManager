@@ -6,6 +6,7 @@
 [![GitHub Issues](https://img.shields.io/github/issues/MajoorWaldi/ComfyUI-Majoor-AssetsManager?style=flat)](https://github.com/MajoorWaldi/ComfyUI-Majoor-AssetsManager/issues)
 [![License](https://img.shields.io/github/license/MajoorWaldi/ComfyUI-Majoor-AssetsManager?style=flat)](LICENSE)
 [![CI](https://github.com/MajoorWaldi/ComfyUI-Majoor-AssetsManager/actions/workflows/python-tests.yml/badge.svg)](https://github.com/MajoorWaldi/ComfyUI-Majoor-AssetsManager/actions/workflows/python-tests.yml)
+[![Buy Me a White Monster Drink](https://img.shields.io/badge/Ko--fi-Buy_Me_a_White_Monster_Drink-ff5e5b?logo=ko-fi)](https://ko-fi.com/majoorwaldi)
 
 Majoor Assets Manager is an advanced asset browser for ComfyUI that provides a comprehensive solution for managing, organizing, and viewing your generated assets. It integrates directly into ComfyUI, offering features like full-text search, metadata extraction, rating and tagging systems, and advanced viewing capabilities.
 
@@ -243,6 +244,40 @@ tox
 - `MAJOOR_ALLOW_DELETE` - set to `1` to enable asset deletion (disabled by default)
 - `MAJOOR_ALLOW_RENAME` - set to `1` to enable asset renaming (disabled by default)
 - `MAJOOR_ALLOW_OPEN_IN_FOLDER` - set to `1` to enable `/mjr/am/open-in-folder` (disabled by default)
+
+### API Token Setup
+
+The `MAJOOR_API_TOKEN` is not obtained from an external service — **you define it yourself** as an environment variable before starting ComfyUI. Choose any secret string you like.
+
+**Windows (PowerShell):**
+
+```powershell
+$env:MAJOOR_API_TOKEN = "my-secret-token"
+```
+
+**Windows (CMD):**
+
+```cmd
+set MAJOOR_API_TOKEN=my-secret-token
+```
+
+**Linux / macOS:**
+
+```bash
+export MAJOOR_API_TOKEN="my-secret-token"
+```
+
+Once set, include the token in your API requests via one of these headers:
+- `X-MJR-Token: my-secret-token`
+- `Authorization: Bearer my-secret-token`
+
+| Scenario | Behavior |
+| --- | --- |
+| No token set (default) | Write operations allowed only from localhost (`127.0.0.1` / `::1`) |
+| Token set | All write operations require the token |
+| `MAJOOR_REQUIRE_AUTH=1` | Forces token auth even for localhost |
+You can persist the same secret in ComfyUI's Settings modal under **Security → Majoor: API Token**. The Assets Manager stores it in browser storage and automatically sends both `X-MJR-Token` and `Authorization: Bearer …` on behalf of the UI, so remote clients only need to match the shared secret between the backend environment and the settings field.
+The backend still requires the environment variable (`MAJOOR_API_TOKEN`/`MJR_API_TOKEN`) when ComfyUI starts; the UI control just remembers it for you so the headers stay in sync.
 
 ## Security Model (high level)
 

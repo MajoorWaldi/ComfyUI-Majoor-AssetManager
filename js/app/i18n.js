@@ -69,6 +69,9 @@ const DICTIONARY = {
         "setting.sec.open.desc": "Allow opening file location in OS file manager.",
         "setting.sec.reset.name": "Majoor: Allow Index Reset",
         "setting.sec.reset.desc": "Allow resetting the index cache and triggering a full rescan.",
+        "setting.sec.token.name": "Majoor: API Token",
+        "setting.sec.token.desc": "Store the write authorization token. Majoor inserts it in the Authorization and X-MJR-Token headers.",
+        "setting.sec.token.placeholder": "Leave blank to disable.",
 
         // ─── Panel: Tabs ───
         "tab.output": "Output",
@@ -341,6 +344,9 @@ const DICTIONARY = {
         "setting.sec.open.desc": "Active l'ouverture dans le dossier.",
         "setting.sec.reset.name": "Majoor: Autoriser reset index",
         "setting.sec.reset.desc": "Reset le cache d'index et relance un scan complet.",
+        "setting.sec.token.name": "Majoor: Token API",
+        "setting.sec.token.desc": "Stocke le token d'autorisation pour les écritures. Majoor l'envoie via les en-têtes Authorization et X-MJR-Token.",
+        "setting.sec.token.placeholder": "Laisser vide pour désactiver.",
 
         // ─── Panel: Onglets ───
         "tab.output": "Sortie",

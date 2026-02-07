@@ -28,8 +28,6 @@ function getExtensionMetadata() {
 
 function applyExtensionMetadata(badge, isNightly) {
     getExtensionMetadata().then((info) => {
-        const repo = (typeof info?.repository === "string" ? info.repository.trim() : "") || DEFAULT_REPO_URL;
-        badge.href = repo;
         if (!isNightly) {
             const version = (typeof info?.version === "string" ? info.version.trim() : "") || "";
             if (version) {
@@ -111,15 +109,15 @@ export function createHeaderView() {
     headerTitle.classList.add("mjr-am-header-title");
     headerTitle.textContent = "Assets Manager";
 
-    // Version badge with link to GitHub
+    // Version badge with link to Ko-fi
     const versionBadge = document.createElement("a");
-    versionBadge.href = REPO_URL;
+    versionBadge.href = "https://ko-fi.com/majoorwaldi";
     versionBadge.target = "_blank";
     versionBadge.rel = "noopener noreferrer";
     versionBadge.className = "mjr-am-version-badge";
     versionBadge.style.position = "relative";
     versionBadge.textContent = IS_NIGHTLY ? "nightly" : `v${VERSION}`;
-    versionBadge.title = "Open GitHub repository";
+    versionBadge.title = "Buy Me a White Monster Drink";
     versionBadge.style.cssText = `
         font-size: 10px;
         opacity: 0.6;
