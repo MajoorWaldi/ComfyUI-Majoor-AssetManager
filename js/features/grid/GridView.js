@@ -2198,44 +2198,74 @@ export function refreshGrid(gridContainer) {
   }
 
 // [ISSUE 1] Real-time Refresh Implementation
-// Listens for the event dispatched by entry.js (relayed from backend)
-try {
-    const onScanComplete = (e) => {
-        const detail = e.detail;
-        
-        // Find all active grids
+// Manages the global scan-complete handlers so we can teardown on panel unload.
+const GRID_SCAN_EVENT_NAMES = ["mjr-scan-complete", "mjr:scan-complete"];
+let _gridScanListenersBound = false;
+
+const _onScanComplete = (e) => {
+    try {
+        if (typeof document === "undefined" || !document.querySelectorAll) return;
         const grids = document.querySelectorAll(".mjr-grid-container");
         for (const grid of grids) {
             try {
-                if (!grid.isConnected) continue;
-                
-                // Get state
+                if (!grid?.isConnected) continue;
+
                 const state = GRID_STATE.get(grid);
                 if (!state) continue;
-                
-                // Debounce refresh
+
                 if (grid._mjrRefreshTimer) clearTimeout(grid._mjrRefreshTimer);
-                
+
                 grid._mjrRefreshTimer = setTimeout(() => {
                     grid._mjrRefreshTimer = null;
                     if (!grid.isConnected) return;
-                    
-                    // Trigger reload with reset to ensure we get newest items at top
-                    // Only reload if user hasn't scrolled deep? 
-                    // Actually, for "Issue 1", update > perfect UX.
                     loadAssets(grid, state.query, { reset: true });
                 }, 500);
-                
             } catch (err) {
                 console.warn("[Majoor] Auto-refresh error:", err);
             }
         }
-    };
+    } catch {
+        // swallow to avoid leaking errors into the global listener
+    }
+};
 
-    // Canonical event name: mjr-scan-complete (keep legacy alias for safety).
-    window.addEventListener("mjr-scan-complete", onScanComplete);
-    window.addEventListener("mjr:scan-complete", onScanComplete);
-} catch (e) {
-    console.warn("Failed to register global scan listener:", e);
+const _attachGridScanListeners = () => {
+    if (_gridScanListenersBound) return;
+    if (typeof window === "undefined") return;
+
+    try {
+        for (const name of GRID_SCAN_EVENT_NAMES) {
+            window.addEventListener(name, _onScanComplete);
+        }
+        _gridScanListenersBound = true;
+    } catch (err) {
+        console.warn("Failed to register global scan listener:", err);
+    }
+};
+
+const _detachGridScanListeners = () => {
+    if (!_gridScanListenersBound) return;
+    if (typeof window === "undefined") {
+        _gridScanListenersBound = false;
+        return;
+    }
+
+    try {
+        for (const name of GRID_SCAN_EVENT_NAMES) {
+            window.removeEventListener(name, _onScanComplete);
+        }
+    } catch (err) {
+        console.warn("Failed to unregister global scan listener:", err);
+    } finally {
+        _gridScanListenersBound = false;
+    }
+};
+
+export function bindGridScanListeners() {
+    _attachGridScanListeners();
+}
+
+export function disposeGridScanListeners() {
+    _detachGridScanListeners();
 }
 

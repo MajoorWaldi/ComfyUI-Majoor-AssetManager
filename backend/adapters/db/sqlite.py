@@ -100,6 +100,37 @@ _KNOWN_COLUMNS = {
 }
 _KNOWN_COLUMNS_LOWER = {c.lower(): c for c in _KNOWN_COLUMNS}
 
+def _populate_known_columns_from_schema(db_path: Path) -> None:
+    global _KNOWN_COLUMNS, _KNOWN_COLUMNS_LOWER
+    try:
+        if not db_path.exists():
+            return
+        tables = {
+            "assets": "a",
+            "asset_metadata": "m",
+            "scan_journal": None,
+            "metadata_cache": None,
+        }
+        with sqlite3.connect(str(db_path)) as conn:
+            cursor = conn.cursor()
+            for table, alias in tables.items():
+                try:
+                    cursor.execute(f"PRAGMA table_info({table})")
+                    for row in cursor.fetchall() or []:
+                        if not row or len(row) < 2:
+                            continue
+                        col = str(row[1]).strip()
+                        if not col:
+                            continue
+                        _KNOWN_COLUMNS.add(col)
+                        if alias:
+                            _KNOWN_COLUMNS.add(f"{alias}.{col}")
+                except Exception:
+                    pass
+            _KNOWN_COLUMNS_LOWER = {c.lower(): c for c in _KNOWN_COLUMNS}
+    except Exception as exc:
+        logger.warning("Failed to refresh known columns from schema: %s", exc)
+
 _IN_QUERY_FORBIDDEN = re.compile(
     r"(--|/\*|\*/|;|\bpragma\b|\battach\b|\bdetach\b|\bvacuum\b|\balter\b|\bdrop\b|\binsert\b|\bupdate\b|\bdelete\b)",
     re.IGNORECASE,
@@ -319,6 +350,7 @@ class Sqlite:
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+        _populate_known_columns_from_schema(self.db_path)
 
     def _is_locked_error(self, exc: Exception) -> bool:
         try:

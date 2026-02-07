@@ -7,7 +7,7 @@ This guide provides detailed instructions for installing and configuring the Maj
 
 ### System Requirements
 - ComfyUI installation
-- Python 3.10 or 3.11 (3.11 recommended; the extension is tested on both versions)
+- Python 3.10–3.12 (ComfyUI upstream recommends 3.13 with 3.12 as the stable fallback, so running 3.12 keeps the Assets Manager aligned with the official guidance).
 - At least 500MB free disk space for the extension and dependencies
 - Administrator privileges (for installation and optional tool installations)
 

@@ -61,6 +61,9 @@ export class VirtualGrid {
         this.rafId = 0;
         this.lastWidth = 0;
         this._resizeDebounce = 0;
+        this._lastLayoutWidth = 0;
+        this._lastLayoutHeight = 0;
+        this._layoutGuardThreshold = 12;
 
         // Observer for container width changes
         const scheduleResize = (width) => {
@@ -139,10 +142,12 @@ export class VirtualGrid {
             // Reset measurement state in case layout settings changed (e.g. badges affecting height)
             this.measured = false;
             this.measureSamples = [];
+            this._lastLayoutWidth = 0;
+            this._lastLayoutHeight = 0;
         }
 
         this.items = items || [];
-        this.updateLayout();
+        this.updateLayout(force);
     }
 
     /**
@@ -254,7 +259,7 @@ export class VirtualGrid {
      * Updates container height and triggers render.
      * @private
      */
-    updateLayout() {
+    updateLayout(force = false) {
         if (!this.items.length) {
             this.container.style.height = "0px";
             return;
@@ -264,6 +269,19 @@ export class VirtualGrid {
         const totalRows = Math.ceil(this.items.length / this.columnCount);
         const totalHeight = totalRows * this.rowHeight + (totalRows - 1) * gap;
         
+        const containerWidth = this.container.clientWidth || this.container.offsetWidth || this.lastWidth || 0;
+        if (!force && containerWidth > 0) {
+            const widthDelta = Math.abs(containerWidth - this._lastLayoutWidth);
+            const heightDelta = Math.abs(totalHeight - this._lastLayoutHeight);
+            const threshold = this._layoutGuardThreshold;
+            if (widthDelta <= threshold && heightDelta <= threshold) {
+                // Skip heavy recalculation when size didn't change significantly.
+                return;
+            }
+        }
+
+        this._lastLayoutWidth = containerWidth;
+        this._lastLayoutHeight = totalHeight;
         this.container.style.height = `${totalHeight}px`;
         this.render();
     }
@@ -293,15 +311,15 @@ export class VirtualGrid {
                      this.metaHeight = sorted[mid];
                      if (this.metaHeight < 20) this.metaHeight = 50; 
 
-                     this.rowHeight = this.itemWidth + this.metaHeight;
-                     this.measured = true;
-                     this.updateLayout();
+                    this.rowHeight = this.itemWidth + this.metaHeight;
+                    this.measured = true;
+                    this.updateLayout(true);
                 } else if (this.measureSamples.length === 1) {
                      // Initial update to ensure grid has some height
                      let tempMeta = meta;
                      if (tempMeta < 20) tempMeta = 50;
                      this.rowHeight = this.itemWidth + tempMeta;
-                     this.updateLayout();
+                     this.updateLayout(true);
                 }
             }
         } catch {}

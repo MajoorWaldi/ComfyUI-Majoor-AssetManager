@@ -2,7 +2,15 @@
 import { comfyConfirm, comfyPrompt } from "../../app/dialogs.js";
 import { comfyToast } from "../../app/toast.js";
 import { createStatusIndicator, setupStatusPolling, triggerScan } from "../status/StatusDot.js";
-import { createGridContainer, loadAssets, loadAssetsFromList, disposeGrid, refreshGrid } from "../grid/GridView.js";
+import {
+    createGridContainer,
+    loadAssets,
+    loadAssetsFromList,
+    disposeGrid,
+    refreshGrid,
+    bindGridScanListeners,
+    disposeGridScanListeners,
+} from "../grid/GridView.js";
 import { get, post, getCollectionAssets, toggleWatcher, setWatcherScope } from "../../api/client.js";
 import { ENDPOINTS } from "../../api/endpoints.js";
 import { createSidebar, showAssetInSidebar, closeSidebar } from "../../components/SidebarView.js";
@@ -164,6 +172,9 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     gridContainer = createGridContainer();
     gridWrapper.appendChild(gridContainer);
     _activeGridContainer = gridContainer;
+    try {
+        bindGridScanListeners();
+    } catch {}
 
     // Bind grid context menu
     bindGridContextMenu({
@@ -571,13 +582,16 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
             searchTimeout = null;
         } catch {}
         try {
-            sidebar?._dispose?.();
+            sidebar?.dispose?.();
         } catch {}
         try {
             sidebarController?.dispose?.();
         } catch {}
         try {
             window.removeEventListener?.("mjr-settings-changed", onSettingsChanged);
+        } catch {}
+        try {
+            disposeGridScanListeners();
         } catch {}
         try {
             if (gridContainer) disposeGrid(gridContainer);

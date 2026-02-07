@@ -7,6 +7,7 @@ import os
 import time
 import threading
 import asyncio
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Empty, Queue
@@ -49,6 +50,14 @@ try:
             _EXT_TO_KIND[str(_ext).lower()] = _kind  # type: ignore[assignment]
 except Exception:
     _EXT_TO_KIND = {}
+
+
+def _is_fatal_db_error(exc: Exception) -> bool:
+    if not isinstance(exc, sqlite3.DatabaseError):
+        return False
+    if isinstance(exc, sqlite3.BusyError):
+        return False
+    return True
 
 
 class IndexScanner:
@@ -825,6 +834,13 @@ class IndexScanner:
             if not tx.ok:
                 raise RuntimeError(tx.error or "Commit failed")
         except Exception as batch_error:
+            if _is_fatal_db_error(batch_error):
+                logger.error(
+                    "Batch transaction failed with fatal database error (%s); aborting fallback.",
+                    type(batch_error).__name__,
+                    exc_info=batch_error,
+                )
+                raise
             # If the entire batch transaction fails, fall back to processing items individually
             batch_failed = True
             logger.warning("Batch transaction failed: %s. Falling back to individual processing.", str(batch_error))
@@ -1443,72 +1459,106 @@ class IndexScanner:
                 existing_mtime = 0
                 existing_id = 0
 
-            if incremental and existing_mtime == mtime and existing_id:
-                refreshed = False
-                # Keep write transactions short: metadata extraction is already done.
-                async with self.db.atransaction(mode="immediate") as tx:
-                    if not tx.ok:
-                        return Result.Err("DB_ERROR", tx.error or "Failed to begin transaction")
-                    refreshed = await MetadataHelpers.refresh_metadata_if_needed(
-                        self.db,
-                        existing_id,
-                        metadata_result,
-                        filepath,
-                        base_dir,
-                        state_hash,
-                        mtime,
-                        size,
-                        self._write_scan_journal_entry,
-                    )
-                    if refreshed:
-                        await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
-                if not tx.ok:
-                    return Result.Err("DB_ERROR", tx.error or "Commit failed")
-                action = "skipped_refresh" if refreshed else "skipped"
-                return Result.Ok({"action": action})
+        if incremental and existing_mtime == mtime and existing_id:
+            refreshed = False
+            tx_state = None
+            try:
+                async with self.db.lock_for_asset(existing_id):
+                    try:
+                        async with self.db.atransaction(mode="immediate") as tx:
+                            tx_state = tx
+                            if not tx_state.ok:
+                                return Result.Err("DB_ERROR", tx_state.error or "Failed to begin transaction")
+                            refreshed = await MetadataHelpers.refresh_metadata_if_needed(
+                                self.db,
+                                existing_id,
+                                metadata_result,
+                                filepath,
+                                base_dir,
+                                state_hash,
+                                mtime,
+                                size,
+                                self._write_scan_journal_entry,
+                            )
+                            if refreshed:
+                                await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
+                    except sqlite3.BusyError as exc:
+                        logger.warning("Database busy while refreshing metadata (asset=%s): %s", existing_id, exc)
+                        stats["errors"] += 1
+                        raise
+            except sqlite3.BusyError:
+                return Result.Err("DB_BUSY", "Database busy while refreshing metadata")
+            if not tx_state or not tx_state.ok:
+                return Result.Err("DB_ERROR", tx_state.error or "Commit failed")
+            action = "skipped_refresh" if refreshed else "skipped"
+            return Result.Ok({"action": action})
 
             # Update existing asset
             if existing_id:
-                async with self.db.atransaction(mode="immediate") as tx:
-                    if not tx.ok:
-                        return Result.Err("DB_ERROR", tx.error or "Failed to begin transaction")
-                    result = await self._update_asset(
-                        existing_id,
-                        file_path,
-                        mtime,
-                        size,
-                        metadata_result,
-                        source=source,
-                        root_id=root_id,
-                        write_metadata=(not fast),
-                    )
-                    if result.ok:
-                        await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
-                if not tx.ok:
-                    return Result.Err("DB_ERROR", tx.error or "Commit failed")
+                tx_state = None
+                try:
+                    async with self.db.lock_for_asset(existing_id):
+                        try:
+                            async with self.db.atransaction(mode="immediate") as tx:
+                                tx_state = tx
+                                if not tx_state.ok:
+                                    return Result.Err("DB_ERROR", tx_state.error or "Failed to begin transaction")
+                                result = await self._update_asset(
+                                    existing_id,
+                                    file_path,
+                                    mtime,
+                                    size,
+                                    metadata_result,
+                                    source=source,
+                                    root_id=root_id,
+                                    write_metadata=False,
+                                    skip_lock=True,
+                                )
+                                if result.ok:
+                                    await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
+                        except sqlite3.BusyError as exc:
+                            logger.warning("Database busy while updating asset %s: %s", existing_id, exc)
+                            stats["errors"] += 1
+                            raise
+                except sqlite3.BusyError:
+                    return Result.Err("DB_BUSY", "Database busy while updating asset")
+                if not tx_state or not tx_state.ok:
+                    return Result.Err("DB_ERROR", tx_state.error or "Commit failed")
+                if not fast:
+                    await self._write_metadata_row(existing_id, metadata_result, filepath=str(file_path))
                 return result
 
         # Add new asset
-        async with self.db.atransaction(mode="immediate") as tx:
-            if not tx.ok:
-                return Result.Err("DB_ERROR", tx.error or "Failed to begin transaction")
-            result = await self._add_asset(
-                filename,
-                subfolder,
-                filepath,
-                kind,
-                mtime,
-                size,
-                file_path,
-                metadata_result,
-                source=source,
-                root_id=root_id,
-                write_metadata=True,
-            )
-            if result.ok:
-                await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
-        if not tx.ok:
-            return Result.Err("DB_ERROR", tx.error or "Commit failed")
+        tx_state = None
+        try:
+            async with self.db.atransaction(mode="immediate") as tx:
+                tx_state = tx
+                if not tx_state.ok:
+                    return Result.Err("DB_ERROR", tx_state.error or "Failed to begin transaction")
+                result = await self._add_asset(
+                    filename,
+                    subfolder,
+                    filepath,
+                    kind,
+                    mtime,
+                    size,
+                    file_path,
+                    metadata_result,
+                    source=source,
+                    root_id=root_id,
+                    write_metadata=False,
+                    skip_lock=True,
+                )
+                if result.ok:
+                    await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
+        except sqlite3.BusyError as exc:
+            logger.warning("Database busy while inserting asset %s: %s", filepath, exc)
+            stats["errors"] += 1
+            return Result.Err("DB_BUSY", "Database busy while inserting asset")
+        if not tx_state or not tx_state.ok:
+            return Result.Err("DB_ERROR", tx_state.error or "Commit failed")
+        if result.ok:
+            await self._write_metadata_row(result.data.get("asset_id"), metadata_result, filepath=filepath)
         return result
 
     async def _add_asset(
@@ -1524,6 +1574,7 @@ class IndexScanner:
         source: str = "output",
         root_id: Optional[str] = None,
         write_metadata: bool = True,
+        skip_lock: bool = False,
     ) -> Result[Dict[str, str]]:
         """
         Add new asset to database.
@@ -1567,22 +1618,21 @@ class IndexScanner:
         asset_id = insert_result.data if insert_result.ok else None
         if not asset_id:
             return Result.Err("INSERT_FAILED", "Failed to get inserted asset ID")
-        if write_metadata:
-            async with self.db.lock_for_asset(asset_id):
-                metadata_write = await MetadataHelpers.write_asset_metadata_row(
-                    self.db,
-                    asset_id,
-                    metadata_result,
-                    filepath=filepath,
+        if write_metadata and not skip_lock:
+            metadata_write = await MetadataHelpers.write_asset_metadata_row(
+                self.db,
+                asset_id,
+                metadata_result,
+                filepath=filepath,
+            )
+            if not metadata_write.ok:
+                self._log_scan_event(
+                    logging.WARNING,
+                    "Failed to insert metadata row",
+                    asset_id=asset_id,
+                    error=metadata_write.error,
+                    stage="metadata_write"
                 )
-                if not metadata_write.ok:
-                    self._log_scan_event(
-                        logging.WARNING,
-                        "Failed to insert metadata row",
-                        asset_id=asset_id,
-                        error=metadata_write.error,
-                        stage="metadata_write"
-                    )
 
         return Result.Ok({"action": "added", "asset_id": asset_id})
 
@@ -1596,6 +1646,7 @@ class IndexScanner:
         source: str = "output",
         root_id: Optional[str] = None,
         write_metadata: bool = True,
+        skip_lock: bool = False,
     ) -> Result[Dict[str, str]]:
         """
         Update existing asset in database.
@@ -1610,8 +1661,7 @@ class IndexScanner:
             height = meta.get("height")
             duration = meta.get("duration")
 
-        async with self.db.lock_for_asset(asset_id):
-            # Update assets table (NO workflow fields)
+        async def _run_update():
             update_result = await self.db.aexecute(
                 """
                 UPDATE assets
@@ -1629,7 +1679,7 @@ class IndexScanner:
             if not update_result.ok:
                 return Result.Err("UPDATE_FAILED", update_result.error)
 
-            if write_metadata:
+            if write_metadata and not skip_lock:
                 metadata_write = await MetadataHelpers.write_asset_metadata_row(
                     self.db,
                     asset_id,
@@ -1644,6 +1694,13 @@ class IndexScanner:
                         error=metadata_write.error,
                         stage="metadata_write"
                     )
+            return Result.Ok({"action": "updated", "asset_id": asset_id})
+
+        if skip_lock:
+            return await _run_update()
+
+        async with self.db.lock_for_asset(asset_id):
+            return await _run_update()
 
         return Result.Ok({"action": "updated", "asset_id": asset_id})
 
@@ -1654,3 +1711,26 @@ class IndexScanner:
 
     def _log_scan_event(self, level: int, message: str, **context):
         log_structured(logger, level, message, **self._scan_context(**context))
+
+    async def _write_metadata_row(
+        self,
+        asset_id: int,
+        metadata_result: Result[Dict[str, Any]],
+        filepath: Optional[str] = None,
+    ) -> None:
+        if not metadata_result.ok:
+            return
+        metadata_write = await MetadataHelpers.write_asset_metadata_row(
+            self.db,
+            asset_id,
+            metadata_result,
+            filepath=filepath,
+        )
+        if not metadata_write.ok:
+            self._log_scan_event(
+                logging.WARNING,
+                "Failed to write metadata row after transaction",
+                asset_id=asset_id,
+                error=metadata_write.error,
+                stage="metadata_write"
+            )

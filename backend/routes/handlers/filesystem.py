@@ -27,9 +27,10 @@ logger = get_logger(__name__)
 
 # Locks for async concurrency safety
 _BACKGROUND_SCAN_LOCK = asyncio.Lock()
-_BACKGROUND_SCAN_LAST: dict[str, dict[str, Any]] = {}
+_BACKGROUND_SCAN_LAST: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _BACKGROUND_SCAN_FAILURES: list[dict[str, Any]] = []
 _MAX_FAILURE_HISTORY = int(BG_SCAN_FAILURE_HISTORY_MAX)
+_BACKGROUND_SCAN_HISTORY_MAX = 1000
 
 _SCAN_PENDING_LOCK = asyncio.Lock()
 _SCAN_PENDING: OrderedDict[str, dict[str, Any]] = OrderedDict()
@@ -128,7 +129,7 @@ async def _kickoff_background_scan(
                 _SCAN_PENDING.popitem(last=False)
 
         # Only mark as enqueued once we've successfully updated _SCAN_PENDING.
-        _BACKGROUND_SCAN_LAST[key] = {"last": now, "in_progress": False}
+        _set_background_entry(key, {"last": now, "in_progress": False})
     except Exception:
         return
 
@@ -139,6 +140,16 @@ def _ensure_worker() -> None:
         return
     
     _SCAN_TASK = asyncio.create_task(_worker_loop())
+
+
+def _set_background_entry(key: str, value: dict[str, Any]) -> None:
+    _BACKGROUND_SCAN_LAST[key] = value
+    try:
+        _BACKGROUND_SCAN_LAST.move_to_end(key)
+    except Exception:
+        pass
+    while len(_BACKGROUND_SCAN_LAST) > _BACKGROUND_SCAN_HISTORY_MAX:
+        _BACKGROUND_SCAN_LAST.popitem(last=False)
 
 
 async def _worker_loop() -> None:
@@ -226,12 +237,13 @@ def _record_scan_failure(directory: str, source: str, code: str, error: str) -> 
 def _ensure_background_entry(key: str) -> dict[str, Any]:
     entry = _BACKGROUND_SCAN_LAST.get(key)
     if isinstance(entry, dict):
+        _set_background_entry(key, entry)
         return entry
     if isinstance(entry, (int, float)):
         entry = {"last": float(entry), "in_progress": False}
     else:
         entry = {"last": 0.0, "in_progress": False}
-    _BACKGROUND_SCAN_LAST[key] = entry
+    _set_background_entry(key, entry)
     return entry
 
 
@@ -240,6 +252,55 @@ def _build_task_key(task: dict[str, Any]) -> str:
     root_id = str(task.get("root_id") or "")
     directory = normalize_scan_directory(str(task.get("directory") or ""))
     return f"{source}|{root_id}|{directory}"
+
+
+def _collect_filesystem_entries(
+    target_dir_resolved: Path,
+    base: Path,
+    asset_type: str,
+    root_id: Optional[str],
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for entry in target_dir_resolved.iterdir():
+        if not entry.is_file():
+            continue
+        filename = entry.name
+        kind = classify_file(filename)
+        if kind == "unknown":
+            continue
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+
+        try:
+            rel_to_root = entry.parent.relative_to(base)
+            sub = "" if str(rel_to_root) == "." else str(rel_to_root).replace("\\", "/")
+        except ValueError:
+            sub = ""
+
+        entries.append(
+            {
+                "id": None,
+                "filename": filename,
+                "subfolder": sub,
+                "filepath": str(entry),
+                "kind": kind,
+                "ext": entry.suffix.lower(),
+                "size": stat.st_size,
+                "mtime": int(stat.st_mtime),
+                "width": None,
+                "height": None,
+                "duration": None,
+                "rating": 0,
+                "tags": [],
+                "has_workflow": None,
+                "has_generation_data": None,
+                "type": asset_type,
+                "root_id": root_id,
+            }
+        )
+    return entries
 
 
 async def _fs_cache_get_or_build(
@@ -273,50 +334,14 @@ async def _fs_cache_get_or_build(
                 pass
             _FS_LIST_CACHE.move_to_end(cache_key)
 
-    entries: list[dict[str, Any]] = []
     try:
-        # Note: os.scandir/iterdir is synchronous I/O. 
-        # For large directories, this will block the loop.
-        # Ideally this should run in a thread executor, but for now we keep it simple.
-        for entry in target_dir_resolved.iterdir():
-            if not entry.is_file():
-                continue
-            filename = entry.name
-            kind = classify_file(filename)
-            if kind == "unknown":
-                continue
-            try:
-                stat = entry.stat()
-            except OSError:
-                continue
-
-            try:
-                rel_to_root = entry.parent.relative_to(base)
-                sub = "" if str(rel_to_root) == "." else str(rel_to_root).replace("\\", "/")
-            except ValueError:
-                sub = ""
-                
-            entries.append(
-                {
-                    "id": None,
-                    "filename": filename,
-                    "subfolder": sub,
-                    "filepath": str(entry),
-                    "kind": kind,
-                    "ext": entry.suffix.lower(),
-                    "size": stat.st_size,
-                    "mtime": int(stat.st_mtime),
-                    "width": None,
-                    "height": None,
-                    "duration": None,
-                    "rating": 0,
-                    "tags": [],
-                    "has_workflow": None,
-                    "has_generation_data": None,
-                    "type": asset_type,
-                    "root_id": root_id,
-                }
-            )
+        entries = await asyncio.to_thread(
+            _collect_filesystem_entries,
+            target_dir_resolved,
+            base,
+            asset_type,
+            root_id,
+        )
     except OSError as exc:
         return Result.Err("LIST_FAILED", f"Failed to list directory: {exc}")
 

@@ -40,7 +40,7 @@ export function createSidebar(position = "right") {
     const unsubs = [];
     const ac = typeof AbortController !== "undefined" ? new AbortController() : null;
     sidebar._mjrAbortController = ac;
-    sidebar._dispose = () => {
+    const disposeSidebar = () => {
         try {
             ac?.abort?.();
         } catch {}
@@ -51,6 +51,8 @@ export function createSidebar(position = "right") {
             unsubs.length = 0;
         } catch {}
     };
+    sidebar.dispose = disposeSidebar;
+    sidebar._dispose = disposeSidebar;
 
     const matchesCurrent = (assetId) => {
         const id = sidebar._currentAsset?.id ?? sidebar._currentFullAsset?.id ?? null;

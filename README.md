@@ -202,7 +202,7 @@ Backend persistence is currently limited to `probeBackend.mode` (stored in the S
 
 ## Compatibility & CI
 
-This project officially supports Python 3.10 and 3.11. GitHub Actions runs both `ci-python.yml` and `python-tests.yml` on `ubuntu-22.04` using `actions/setup-python` so the workflow environment matches the supported interpreter pair.
+This project supports Python 3.10 through 3.12, with upstream ComfyUI guidance recommending Python 3.13 (3.12 as the stable fallback). GitHub Actions now runs both `ci-python.yml` and `python-tests.yml` on `ubuntu-22.04` with `actions/setup-python@v4` targeting Python 3.12 so the runner closely matches the ComfyUI best-practice environment.
 
 Run tests across multiple Python versions locally with `tox` (requires those Python versions installed):
 

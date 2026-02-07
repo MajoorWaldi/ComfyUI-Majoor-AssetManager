@@ -67,6 +67,9 @@ export function createViewer() {
 
     const state = createDefaultViewerState();
     state.mode = VIEWER_MODES.SINGLE;
+    const IMAGE_PRELOAD_EXTENSIONS = new Set([
+        "png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "avif", "heic", "hdr", "svg", "apng"
+    ]);
 
     let panzoom = null;
     let mediaFactory = null;
@@ -1398,6 +1401,7 @@ export function createViewer() {
 
         // Render current asset
         renderAsset();
+        preloadAdjacentAssets();
         // Mount/unmount the video player bar depending on current media.
         syncPlayerBar();
         try {
@@ -1464,6 +1468,77 @@ export function createViewer() {
         }
         applyTransform();
         updatePanCursor();
+    }
+
+    function getPreloadKey(asset) {
+        if (!asset) return null;
+        if (asset.id != null) return `id:${asset.id}`;
+        const fallback = asset.filepath || asset.path || asset.filename;
+        if (fallback) return `path:${fallback}`;
+        return null;
+    }
+
+    function isImageAsset(asset) {
+        if (!asset) return false;
+        const kind = String(asset.kind || "").toLowerCase();
+        if (kind === "image" || kind.startsWith("image/")) return true;
+        const filename = String(asset.filepath || asset.path || asset.filename || "");
+        const ext = filename.split(".").pop()?.toLowerCase() || "";
+        return IMAGE_PRELOAD_EXTENSIONS.has(ext);
+    }
+
+    function trackPreloadRef(img) {
+        if (!img) return;
+        try {
+            state._preloadRefs = state._preloadRefs || new Set();
+            state._preloadRefs.add(img);
+            const cleanup = () => {
+                try {
+                    state._preloadRefs?.delete?.(img);
+                } catch {}
+            };
+            img.addEventListener("load", cleanup, { once: true, passive: true });
+            img.addEventListener("error", cleanup, { once: true, passive: true });
+        } catch {}
+    }
+
+    function preloadImageForAsset(asset, url) {
+        if (!asset || !url) return;
+        if (!isImageAsset(asset)) return;
+        const key = getPreloadKey(asset) || url;
+        if (key) {
+            state._preloadedAssetKeys = state._preloadedAssetKeys || new Set();
+            if (state._preloadedAssetKeys.has(key)) return;
+            state._preloadedAssetKeys.add(key);
+            if (state._preloadedAssetKeys.size > 250) {
+                try {
+                    state._preloadedAssetKeys.clear();
+                } catch {}
+            }
+        }
+        try {
+            const img = new Image();
+            img.decoding = "async";
+            try {
+                img.loading = "lazy";
+            } catch {}
+            img.alt = "";
+            img.src = url;
+            trackPreloadRef(img);
+        } catch {}
+    }
+
+    function preloadAdjacentAssets() {
+        const assets = Array.isArray(state.assets) ? state.assets : [];
+        if (!assets.length) return;
+        const candidates = [state.currentIndex - 1, state.currentIndex + 1];
+        for (const idx of candidates) {
+            if (idx < 0 || idx >= assets.length) continue;
+            const asset = assets[idx];
+            if (!asset) continue;
+            const url = buildAssetViewURL(asset);
+            preloadImageForAsset(asset, url);
+        }
     }
 
     const destroyPlayerBar = () => {
@@ -2352,6 +2427,12 @@ export function createViewer() {
             } catch {}
             try {
                 overlay._mjrViewerUnsubs = [];
+            } catch {}
+            try {
+                state._preloadRefs?.clear?.();
+            } catch {}
+            try {
+                state._preloadedAssetKeys?.clear?.();
             } catch {}
 
             try {
