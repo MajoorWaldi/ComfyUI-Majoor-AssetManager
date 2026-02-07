@@ -22,3 +22,6 @@ pywin32>=300; sys_platform == 'win32'
 
 # Note: tkinter is required for native folder browser functionality
 # tkinter is included in standard Python distribution but may be missing in minimal installs
+
+# Testing helpers
+pytest-asyncio>=0.22.0

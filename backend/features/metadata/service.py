@@ -186,26 +186,28 @@ class MetadataService:
 
     async def _enrich_with_geninfo_async(self, combined: Dict[str, Any]) -> None:
         """Helper to parse geninfo from prompt/workflow in combined metadata (Worker Thread)."""
+        prompt_graph = combined.get("prompt")
+        workflow = combined.get("workflow")
+        loop = asyncio.get_running_loop()
+        geninfo_res = None
+
         try:
-            prompt_graph = combined.get("prompt")
-            workflow = combined.get("workflow")
-            loop = asyncio.get_running_loop()
             # Offload heavy parsing to thread pool to prevent blocking the event loop
             geninfo_res = await loop.run_in_executor(
                 None,
                 functools.partial(parse_geninfo_from_prompt, prompt_graph, workflow=workflow)
             )
-
-            if geninfo_res.ok and geninfo_res.data:
-                combined["geninfo"] = geninfo_res.data
-            elif "geninfo" not in combined:
-                gi = _build_geninfo_from_parameters(combined)
-                # Always set geninfo to a dict (empty if nothing parsed)
-                combined["geninfo"] = gi if gi is not None else {}
-                if not gi and _looks_like_media_pipeline(prompt_graph):
-                    combined["geninfo_status"] = {"kind": "media_pipeline", "reason": "no_sampler"}
         except Exception as exc:
             logger.debug(f"GenInfo parse skipped: {exc}")
+
+        if geninfo_res and geninfo_res.ok and geninfo_res.data:
+            combined["geninfo"] = geninfo_res.data
+        elif "geninfo" not in combined:
+            gi = _build_geninfo_from_parameters(combined)
+            # Always set geninfo to a dict (empty if nothing parsed)
+            combined["geninfo"] = gi if gi is not None else {}
+            if not gi and _looks_like_media_pipeline(prompt_graph):
+                combined["geninfo_status"] = {"kind": "media_pipeline", "reason": "no_sampler"}
 
     async def _resolve_probe_mode(self, override: Optional[str]) -> str:
         if isinstance(override, str):
