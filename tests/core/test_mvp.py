@@ -172,4 +172,5 @@ async def main():
     return 0
 
 if __name__ == "__main__":
-    import asyncio; sys.exit(asyncio.run(main()))
+    import asyncio
+    sys.exit(asyncio.run(main()))
