@@ -44,6 +44,7 @@ Optional attribution request (non-binding): see `NOTICE`.
 
 ### Metadata & Viewer
 - Extracts generation info from PNG/WEBP/video (ExifTool/FFprobe; degrades gracefully).
+-Recognizes modern workflows such as Qwen (Edit) exports, Flux (Advanced/GGUF), WanVideo/Kijai, HunyuanVideo/Kijai, and Marigold (Depth) so prompts/models are surfaced even when stored in custom node graphs.
 - Viewer modes: single, A/B compare, side-by-side.
 - Navigation: zoom/pan, 1:1 pixel zoom, quick next/prev navigation.
 - Tools: exposure (EV), gamma, channel view (RGB/R/G/B/Alpha/Luma), analysis (false color, zebra).
@@ -199,9 +200,9 @@ Backend persistence is currently limited to `probeBackend.mode` (stored in the S
 
 - Page size (assets per request)
 
-## Compatibility
+## Compatibility & CI
 
-This project officially supports Python 3.10 and 3.11. A CI matrix is provided in `.github/workflows/ci-python.yml` which runs the test-suite on both interpreters.
+This project officially supports Python 3.10 and 3.11. GitHub Actions runs both `ci-python.yml` and `python-tests.yml` on `ubuntu-22.04` using `actions/setup-python` so the workflow environment matches the supported interpreter pair.
 
 Run tests across multiple Python versions locally with `tox` (requires those Python versions installed):
 

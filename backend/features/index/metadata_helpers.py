@@ -5,7 +5,7 @@ import hashlib
 import asyncio
 import json
 import time
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Tuple, Optional
 
 from ...config import (
@@ -512,7 +512,7 @@ class MetadataHelpers:
 
             if ttl_seconds > 0:
                 try:
-                    cutoff = datetime.now(UTC) - timedelta(seconds=ttl_seconds)
+                    cutoff = datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
                     cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
                     await db.aexecute(
                         "DELETE FROM metadata_cache WHERE last_updated < ?",

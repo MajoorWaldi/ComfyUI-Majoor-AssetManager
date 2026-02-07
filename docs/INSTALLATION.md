@@ -7,14 +7,14 @@ This guide provides detailed instructions for installing and configuring the Maj
 
 ### System Requirements
 - ComfyUI installation
-- Python 3.8 or higher
+- Python 3.10 or 3.11 (3.11 recommended; the extension is tested on both versions)
 - At least 500MB free disk space for the extension and dependencies
 - Administrator privileges (for installation and optional tool installations)
 
 ### Supported Platforms
 - Windows 10/11
 - macOS 10.15 or higher
-- Linux (Ubuntu 20.04+, Debian 11+, or equivalent)
+- Linux (Ubuntu 22.04+, Debian 12+, or equivalent)
 
 ## Quick Installation (Recommended)
 
@@ -264,5 +264,5 @@ Simply click "Uninstall" in the ComfyUI Manager interface.
 3. The extension will be completely removed
 
 ---
-*Installation Guide Version: 1.0*  
-*Last Updated: January 2026*
+*Installation Guide Version: 1.1*  
+*Last Updated: February 7, 2026*

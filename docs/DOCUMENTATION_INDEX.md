@@ -41,6 +41,7 @@ Welcome to the comprehensive documentation for the Majoor Assets Manager for Com
 - **Organization Tools**: Ratings (0-5 stars), custom tags, and collections
 - **Drag & Drop**: To ComfyUI canvas or to your operating system
 - **Cross-Platform**: Works on Windows, macOS, and Linux
+- **Workflow Awareness**: Generation info parsers now understand modern workflows such as Qwen (Edit), Flux (Advanced/GGUF), WanVideo/Kijai, HunyuanVideo/Kijai, and Marigold (Depth) when surfacing prompts and models.
 
 ## Optional Dependencies (Highly Recommended)
 
@@ -63,5 +64,6 @@ If you encounter issues:
 These documentation files are provided as a comprehensive guide to help users make the most of the Majoor Assets Manager. If you find inaccuracies or have suggestions for improvements, please contribute to the community knowledge.
 
 ---
-*Documentation Index Version: 1.0*  
-*Last Updated: January 2026*
+---
+*Documentation Index Version: 1.1*  
+*Last Updated: February 7, 2026*

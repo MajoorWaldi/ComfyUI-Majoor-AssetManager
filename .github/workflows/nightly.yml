@@ -35,12 +35,12 @@ jobs:
           -x "*.zip"
 
       - name: Update Nightly Release
-        uses: andymckay/append-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: nightly
-          release_name: "Nightly Build (Development)"
-          asset_path: ./ComfyUI-Majoor-AssetsManager_nightly.zip
-          asset_name: ComfyUI-Majoor-AssetsManager_nightly.zip
+          name: "Nightly Build (Development)"
           prerelease: true
-          replace_assets: true
+          overwrite_files: true
+          files: |
+            ./ComfyUI-Majoor-AssetsManager_nightly.zip
