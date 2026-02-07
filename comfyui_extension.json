@@ -1,6 +1,6 @@
 {
   "name": "ComfyUI-Majoor-AssetsManager",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "author": "MajoorWaldi",
   "description": "Majoor Assets Manager is an advanced asset browser for ComfyUI that provides a comprehensive solution for managing, organizing, and viewing your generated assets. It integrates directly into ComfyUI, offering features like full-text search, metadata extraction, rating and tagging systems, and advanced viewing capabilities.",
   "license": "GPL-3.0",

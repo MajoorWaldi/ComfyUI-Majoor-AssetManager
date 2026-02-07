@@ -80,7 +80,7 @@ You can install a specific release tag or the nightly branch by using the GitHub
 
 - Release tag (example):
 
-  https://github.com/MajoorWaldi/ComfyUI-Majoor-AssetsManager/archive/refs/tags/v2.3.0.zip
+  https://github.com/MajoorWaldi/ComfyUI-Majoor-AssetsManager/archive/refs/tags/v2.3.1.zip
 
 - Nightly / latest main branch (example):
 
@@ -198,6 +198,9 @@ Hotkeys are ignored while typing inside inputs.
 Settings are stored under the `mjrSettings` key in `localStorage` (browser-side).
 
 Backend persistence is currently limited to `probeBackend.mode` (stored in the SQLite `metadata` table). It uses a version bump so changes propagate quickly even with multiple backend instances. Other settings are intentionally browser-local and won't sync across machines/browsers.
+
+Remote access & API Token (new):
+- The UI now exposes **API token** settings allowing administrators to configure a token and enable remote access to the Assets Manager. Access is disabled by default and the token is stored in the backend settings; ensure you secure your network if enabling remote access. See the user guide for configuration details.
 
 - Page size (assets per request)
 

@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [2.3.1] - 2026-02-07
+### Added / Improved
+- UI parameters for **API token** and remote access: added settings in the UI to configure an API token and enable remote access to the Assets Manager (secure-by-default). 🔐
+
+### Notes
+- This is a non-breaking, minor patch focused on remote access configuration and UI exposure of token settings.
+
+---
+
 ## [2.3.0] - 2026-02-07
 ### Added / Improved
 - Improved GenInfo display in the Viewer: side-by-side generation info panel and clearer parameter presentation. 🔧
