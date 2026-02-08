@@ -52,25 +52,25 @@ def _minimal_asset_from_item(item: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         stat = None
 
-        return {
-            "id": None,
-            "filename": filename,
-            "subfolder": subfolder,
-            "filepath": fp,
-            "kind": kind,
-            "ext": p.suffix.lower(),
-            "size": int(getattr(stat, "st_size", 0) or 0) if stat else 0,
-            "mtime": int(getattr(stat, "st_mtime", 0) or 0) if stat else 0,
-            "width": None,
-            "height": None,
-            "duration": None,
-            "rating": 0,
-            "tags": [],
-            "has_workflow": None,
-            "has_generation_data": None,
-            "type": asset_type,
-            "root_id": root_id,
-        }
+    return {
+        "id": None,
+        "filename": filename,
+        "subfolder": subfolder,
+        "filepath": fp,
+        "kind": kind,
+        "ext": p.suffix.lower(),
+        "size": int(getattr(stat, "st_size", 0) or 0) if stat else 0,
+        "mtime": int(getattr(stat, "st_mtime", 0) or 0) if stat else 0,
+        "width": None,
+        "height": None,
+        "duration": None,
+        "rating": 0,
+        "tags": [],
+        "has_workflow": None,
+        "has_generation_data": None,
+        "type": asset_type,
+        "root_id": root_id,
+    }
 
 
 def register_collections_routes(routes: web.RouteTableDef) -> None:

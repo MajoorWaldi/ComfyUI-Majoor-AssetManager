@@ -157,6 +157,9 @@ export function createCollectionsController({ state, collectionsBtn, collections
         collectionsBtn.addEventListener("click", async (e) => {
             e.stopPropagation();
             try {
+                window.dispatchEvent(new CustomEvent("mjr-close-all-menus"));
+            } catch {}
+            try {
                 await render();
             } catch {}
             popovers.toggle(collectionsPopover, collectionsBtn);

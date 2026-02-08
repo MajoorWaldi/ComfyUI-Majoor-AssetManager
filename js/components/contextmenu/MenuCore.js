@@ -195,6 +195,7 @@ export function getOrCreateMenu({
     );
     document.addEventListener("scroll", hide, { capture: true, passive: true, signal: ac.signal });
     document.addEventListener("wheel", hide, { capture: true, passive: true, signal: ac.signal });
+    window.addEventListener("mjr-close-all-menus", hide, { signal: ac.signal });
 
     document.body.appendChild(menu);
     return menu;
@@ -212,12 +213,34 @@ export function hideMenu(menu) {
     } catch {}
 }
 
+export function hideAllMenus() {
+    try {
+        const menus = Array.from(document.querySelectorAll(".mjr-context-menu"));
+        for (const menu of menus) {
+            try {
+                if (typeof menu?._mjrHide === "function") menu._mjrHide();
+                else menu.style.display = "none";
+            } catch {}
+        }
+    } catch {}
+}
+
 export function clearMenu(menu) {
+    if (!menu) return;
     try {
         menu.replaceChildren();
     } catch {}
     try {
         menu.innerHTML = "";
+    } catch {}
+    try {
+        menu.style.display = "none";
+        menu.style.pointerEvents = "";
+        menu.style.opacity = "";
+        menu.style.visibility = "";
+    } catch {}
+    try {
+        menu.classList.remove("active", "open", "is-open", "mjr-open", "mjr-active");
     } catch {}
 }
 

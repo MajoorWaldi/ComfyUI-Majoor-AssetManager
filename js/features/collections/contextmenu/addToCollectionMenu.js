@@ -8,6 +8,7 @@ import {
     showMenuAt,
     clearMenu,
     hideMenu,
+    hideAllMenus,
     MENU_Z_INDEX,
 } from "../../../components/contextmenu/MenuCore.js";
 import { pickRootId } from "../../../utils/ids.js";
@@ -66,6 +67,11 @@ function formatAddResultMessage({ collectionName, selectedCount, addRes }) {
 }
 
 export async function showAddToCollectionMenu({ x, y, assets }) {
+    try {
+        window.dispatchEvent(new CustomEvent("mjr-close-all-menus"));
+    } catch {}
+    hideAllMenus();
+
     const selected = Array.isArray(assets) ? assets.map(simplifyAsset).filter(Boolean) : [];
     if (!selected.length) {
         comfyToast("No valid assets selected.", "warning");

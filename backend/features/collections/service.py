@@ -56,10 +56,16 @@ def _normalize_fp(fp: str) -> str:
                 p = p.resolve(strict=False)
         except Exception:
             p = p.resolve(strict=False)
-        # Windows: case-insensitive path matching
-        return str(p).lower()
+        normalized = str(p)
+        # Windows filesystems are case-insensitive by default; preserve case on POSIX.
+        if os.name == "nt":
+            return os.path.normcase(normalized)
+        return normalized
     except Exception:
-        return str(fp or "").strip().lower()
+        fallback = str(fp or "").strip()
+        if os.name == "nt":
+            return os.path.normcase(fallback)
+        return fallback
 
 
 def _safe_id(value: str) -> Optional[str]:
@@ -122,21 +128,22 @@ class CollectionsService:
             return Result.Err(ErrorCode.DB_ERROR, f"Collections dir unavailable: {exc}")
 
         items: List[CollectionSummary] = []
-        try:
-            for p in base.glob("*.json"):
-                try:
-                    data = json.loads(p.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                cid = str(data.get("id") or p.stem)
-                name = str(data.get("name") or "").strip() or cid
-                count = int(len(data.get("items") or []))
-                updated_at = str(data.get("updated_at") or "")
-                if not _safe_id(cid):
-                    continue
-                items.append(CollectionSummary(cid, name, count, updated_at))
-        except Exception as exc:
-            return Result.Err(ErrorCode.DB_ERROR, f"Failed to list collections: {exc}")
+        with self._lock:
+            try:
+                for p in base.glob("*.json"):
+                    try:
+                        data = json.loads(p.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    cid = str(data.get("id") or p.stem)
+                    name = str(data.get("name") or "").strip() or cid
+                    count = int(len(data.get("items") or []))
+                    updated_at = str(data.get("updated_at") or "")
+                    if not _safe_id(cid):
+                        continue
+                    items.append(CollectionSummary(cid, name, count, updated_at))
+            except Exception as exc:
+                return Result.Err(ErrorCode.DB_ERROR, f"Failed to list collections: {exc}")
 
         # Sort newest-ish first (fallback to id)
         items.sort(key=lambda x: (x.updated_at or "", x.id), reverse=True)

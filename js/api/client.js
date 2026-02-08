@@ -603,7 +603,14 @@ export async function renameAsset(assetId, newName) {
 // -----------------------------
 
 export async function listCollections() {
-    return get("/mjr/am/collections");
+    const ac = typeof AbortController !== "undefined" ? new AbortController() : null;
+    let timer = null;
+    try {
+        if (ac) timer = setTimeout(() => ac.abort(), 10_000);
+        return await get("/mjr/am/collections", ac ? { signal: ac.signal } : {});
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
 }
 
 export async function createCollection(name) {

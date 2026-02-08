@@ -321,19 +321,6 @@ class IndexSearcher:
         logger.debug("Found %s results (total=%s)", len(assets), total if include_total else "skipped")
         payload: Dict[str, Any] = {"assets": assets, "limit": limit, "offset": offset, "query": query}
         payload["total"] = int(total or 0) if include_total else None
-        # If scoped search returned no results, try a global fallback (ignore roots)
-        try:
-            if (not assets) and cleaned_roots:
-                # Avoid fallback for browse-all queries
-                if query and str(query).strip() != "*":
-                    fallback = await self.search(query, limit=limit, offset=offset, filters=filters, include_total=include_total)
-                    if fallback and fallback.ok and isinstance(fallback.data, dict):
-                        # Mark that this result came from a global fallback so UI can indicate it
-                        fallback.data["fallback_scope"] = True
-                        return fallback
-        except Exception:
-            # On any error, ignore fallback and return scoped payload
-            pass
 
         return Result.Ok(payload)
     async def search_scoped(
