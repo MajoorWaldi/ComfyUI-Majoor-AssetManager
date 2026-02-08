@@ -8,7 +8,6 @@ This package provides a clean separation of concerns:
 
 Auto-registers all routes on import via PromptServer decorators.
 """
-from pathlib import Path
 from backend.config import OUTPUT_ROOT
 from backend.shared import get_logger
 

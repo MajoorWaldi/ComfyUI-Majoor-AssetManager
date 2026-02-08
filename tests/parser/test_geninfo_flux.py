@@ -1,5 +1,4 @@
-import pytest
-from backend.features.geninfo.parser import parse_geninfo_from_prompt, Result
+from backend.features.geninfo.parser import parse_geninfo_from_prompt
 
 def test_geninfo_flux_standard_advanced_sampler():
     """

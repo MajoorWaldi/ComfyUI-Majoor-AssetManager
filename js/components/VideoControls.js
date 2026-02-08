@@ -215,16 +215,16 @@ function _mountPreviewControls(video, hostEl) {
  *
  * Viewer variant adds Nuke-style range + frame controls (in/out, step, loop/once).
  *
- * @param {HTMLVideoElement} video
- * @param {{variant?: 'viewer'|'preview', hostEl?: HTMLElement, fullscreenEl?: HTMLElement, initialFps?: number, initialFrameCount?: number}} opts
- * @returns {{controlsEl: HTMLElement|null, destroy: () => void, setMediaInfo?: (info: {fps?: number, frameCount?: number}) => void}}
+ * @param {HTMLMediaElement} video
+ * @param {{variant?: 'viewer'|'preview'|'viewerbar', mediaKind?: 'video'|'audio', hostEl?: HTMLElement, fullscreenEl?: HTMLElement, initialFps?: number, initialFrameCount?: number, initialPlaybackRate?: number}} opts
+ * @returns {{controlsEl: HTMLElement|null, destroy: () => void, setMediaInfo?: (info: {fps?: number, frameCount?: number}) => void, setPlaybackRate?: (rate:number)=>number, getPlaybackRate?: ()=>number, adjustPlaybackRate?: (delta:number)=>number, togglePlay?: ()=>boolean, stepFrames?: (direction:number)=>boolean}}
  */
 export function mountVideoControls(video, opts = {}) {
     try {
         const variant = _resolveVideoControlsVariant(opts);
         const advanced = variant !== "preview";
-        // Removed by design (player bar should not expose volume UI).
-        const showVolumeSlider = false;
+        // Volume slider is toggled from the sound icon to keep the bar compact.
+        const showVolumeSlider = true;
         const initialFps = _resolveInitialFps(opts);
         const hostEl = opts?.hostEl || video?.parentElement;
         if (!video || !hostEl) return { controlsEl: null, destroy: noop };
@@ -391,9 +391,24 @@ export function mountVideoControls(video, opts = {}) {
             ariaLabel: "FPS",
             widthPx: 56
         });
+        const speedSelect = document.createElement("select");
+        speedSelect.className = "mjr-video-num mjr-video-num--speed";
+        speedSelect.title = "Playback speed";
+        speedSelect.setAttribute("aria-label", "Playback speed");
+        speedSelect.style.width = "74px";
+        const SPEED_OPTIONS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
+        for (const rate of SPEED_OPTIONS) {
+            const opt = document.createElement("option");
+            opt.value = String(rate);
+            opt.textContent = `${rate}x`;
+            speedSelect.appendChild(opt);
+        }
 
         const muteIcon = createIconBtn("mjr-video-btn--mute", "pi-volume-up", "Mute", "Mute");
         const muteBtn = muteIcon.btn;
+        const volumeWrap = document.createElement("div");
+        volumeWrap.className = "mjr-video-volume-wrap";
+        volumeWrap.style.cssText = "display:none; align-items:center; position:relative;";
         let volume = null;
         if (showVolumeSlider) {
             volume = document.createElement("input");
@@ -404,6 +419,11 @@ export function mountVideoControls(video, opts = {}) {
             volume.step = "0.02";
             volume.value = String(clamp01(Number(video.volume) || 0));
             volume.setAttribute("aria-label", "Volume");
+            volume.title = "Volume";
+            try {
+                volume.style.width = "120px";
+            } catch {}
+            volumeWrap.appendChild(volume);
         }
 
         const inGroup = document.createElement("div");
@@ -437,6 +457,10 @@ export function mountVideoControls(video, opts = {}) {
             rightAdjustGroup.appendChild(loopBtn);
             rightAdjustGroup.appendChild(onceBtn);
         }
+        const speedGroup = document.createElement("div");
+        speedGroup.className = "mjr-video-group mjr-video-group--speed";
+        speedGroup.appendChild(document.createTextNode("Speed"));
+        speedGroup.appendChild(speedSelect);
 
         // Top row: In (left) — seek — Out (right) — time — frame
         if (advanced) rowTop.appendChild(frameLabel);
@@ -461,9 +485,10 @@ export function mountVideoControls(video, opts = {}) {
 
         if (advanced) bottomLeft.appendChild(leftAdjustGroup);
         if (advanced) bottomRight.appendChild(rightAdjustGroup);
+        bottomRight.appendChild(speedGroup);
         bottomRight.appendChild(muteBtn);
         if (advanced) bottomRight.appendChild(setOutBtn);
-        if (volume) bottomRight.appendChild(volume);
+        if (volume) bottomRight.appendChild(volumeWrap);
 
         rowBottom.appendChild(bottomLeft);
         rowBottom.appendChild(transport);
@@ -528,6 +553,7 @@ export function mountVideoControls(video, opts = {}) {
             frameCount: null,
             loop: advanced,
             once: false,
+            playbackRate: Math.max(0.25, Math.min(2, Number(opts?.initialPlaybackRate) || 1)),
             _seeking: false
         };
 
@@ -564,13 +590,31 @@ export function mountVideoControls(video, opts = {}) {
             } catch {}
         };
 
+        const setPlaybackRate = (nextRate) => {
+            try {
+                const n = Number(nextRate);
+                if (!Number.isFinite(n) || n <= 0) return state.playbackRate;
+                const rate = Math.max(0.25, Math.min(2, Math.round(n * 100) / 100));
+                state.playbackRate = rate;
+                try {
+                    video.playbackRate = rate;
+                } catch {}
+                try {
+                    if (!speedSelect.matches?.(":focus")) speedSelect.value = String(rate);
+                } catch {}
+                return rate;
+            } catch {
+                return state.playbackRate;
+            }
+        };
+
         const applyLoopOnceUI = () => {
             try {
                 setToggleBtn(loopBtn, Boolean(state.loop));
                 setToggleBtn(onceBtn, Boolean(state.once));
                 // Keep loop as default; when switching to "single" (once), update icon for clarity.
                 try {
-                    loopIcon?.icon && (loopIcon.icon.className = `pi pi-refresh`);
+                    if (loopIcon?.icon) loopIcon.icon.className = "pi pi-refresh";
                 } catch {}
                 try {
                     if (onceIcon?.icon) onceIcon.icon.className = `pi ${state.once ? "pi-arrow-right" : "pi-stop"}`;
@@ -1052,10 +1096,30 @@ export function mountVideoControls(video, opts = {}) {
             safeAddListener(muteBtn, "click", (e) => {
                 stop(e);
                 try {
+                    if (!volumeWrap) return;
+                    const open = volumeWrap.style.display !== "none";
+                    volumeWrap.style.display = open ? "none" : "inline-flex";
+                } catch {}
+                updateVolumeUI();
+            })
+        );
+        unsubs.push(
+            safeAddListener(muteBtn, "contextmenu", (e) => {
+                preventStop(e);
+                try {
                     video.muted = !video.muted;
                 } catch {}
                 updateVolumeUI();
             })
+        );
+        unsubs.push(
+            safeAddListener(window, "pointerdown", (e) => {
+                try {
+                    if (!volumeWrap || volumeWrap.style.display === "none") return;
+                    if (muteBtn.contains?.(e?.target) || volumeWrap.contains?.(e?.target)) return;
+                    volumeWrap.style.display = "none";
+                } catch {}
+            }, { capture: true })
         );
         if (volume) {
             unsubs.push(
@@ -1070,6 +1134,21 @@ export function mountVideoControls(video, opts = {}) {
                 })
             );
         }
+        unsubs.push(
+            safeAddListener(speedSelect, "change", (e) => {
+                stop(e);
+                try {
+                    setPlaybackRate(Number(speedSelect.value) || 1);
+                } catch {}
+            })
+        );
+        unsubs.push(
+            safeAddListener(video, "ratechange", () => {
+                try {
+                    setPlaybackRate(Number(video.playbackRate) || state.playbackRate || 1);
+                } catch {}
+            })
+        );
         const enforceRange = () => {
             if (!advanced) return;
             try {
@@ -1173,6 +1252,7 @@ export function mountVideoControls(video, opts = {}) {
             state.step = Math.max(1, Math.floor(Number(stepInput.value) || 1));
             normalizeRange();
             applyLoopOnceUI();
+            setPlaybackRate(state.playbackRate);
         } catch {}
         safeCall(setPlayLabel);
         safeCall(updateTimeUI);
@@ -1319,6 +1399,29 @@ export function mountVideoControls(video, opts = {}) {
         return {
             controlsEl: controls,
             setMediaInfo,
+            setPlaybackRate: (rate) => {
+                try {
+                    return setPlaybackRate(rate);
+                } catch {
+                    return state.playbackRate || 1;
+                }
+            },
+            getPlaybackRate: () => {
+                try {
+                    return Number(state.playbackRate) || 1;
+                } catch {
+                    return 1;
+                }
+            },
+            adjustPlaybackRate: (delta) => {
+                try {
+                    const d = Number(delta);
+                    if (!Number.isFinite(d)) return state.playbackRate || 1;
+                    return setPlaybackRate((Number(state.playbackRate) || 1) + d);
+                } catch {
+                    return state.playbackRate || 1;
+                }
+            },
             togglePlay: () => {
                 try {
                     togglePlay();

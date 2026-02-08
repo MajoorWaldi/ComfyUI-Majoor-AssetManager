@@ -49,7 +49,10 @@ export const APP_DEFAULTS = Object.freeze({
     // Viewer
     VIEWER_ALLOW_PAN_AT_ZOOM_1: false,
     VIEWER_DISABLE_WEBGL_VIDEO: false,
+    VIEWER_DISABLE_WEBGL_AUDIO: false,
     VIEWER_VIDEO_GRADE_THROTTLE_FPS: 15,
+    VIEWER_AUDIO_VISUALIZER_MODE: "artistic", // simple|artistic
+    VIEWER_AUDIO_VIS_FPS: 24,
     VIEWER_SCOPES_FPS: 10,
 
     // Grid
@@ -64,6 +67,13 @@ export const APP_DEFAULTS = Object.freeze({
     GRID_SHOW_DETAILS_DIMENSIONS: true,
     GRID_SHOW_DETAILS_GENTIME: true,
     GRID_SHOW_WORKFLOW_DOT: true,
+
+    // Badge colors
+    BADGE_STAR_COLOR: "#FFD45A",
+    BADGE_IMAGE_COLOR: "#2196F3",
+    BADGE_VIDEO_COLOR: "#9C27B0",
+    BADGE_AUDIO_COLOR: "#FF9800",
+    BADGE_MODEL3D_COLOR: "#4CAF50",
 
     // Pagination
     DEFAULT_PAGE_SIZE: 100,
@@ -95,6 +105,11 @@ export const APP_DEFAULTS = Object.freeze({
 
     // Workflow Minimap
     WORKFLOW_MINIMAP_ENABLED: true,
+    WATCHER_DEBOUNCE_MS: 500,
+    WATCHER_DEDUPE_TTL_MS: 3000,
+    // UI safety knobs
+    DELETE_CONFIRMATION: true,
+    DEBUG_VERBOSE_ERRORS: false,
 });
 
 // Runtime config (some values are user-tunable via settings).

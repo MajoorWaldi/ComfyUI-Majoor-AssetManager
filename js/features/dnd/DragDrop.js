@@ -11,7 +11,7 @@ import { pickRootId } from "../../utils/ids.js";
 import { DND_GLOBAL_KEY, DND_INSTANCE_VERSION, DND_MIME } from "./utils/constants.js";
 import { dndLog } from "./utils/log.js";
 import { buildPayloadViewURL, getDraggedAsset } from "./utils/payload.js";
-import { getDownloadMimeForFilename, isVideoPayload } from "./utils/video.js";
+import { isVideoPayload } from "./utils/video.js";
 import { isCanvasDropTarget, markCanvasDirty } from "./targets/canvas.js";
 import { applyDragOutToOS } from "./out/DragOut.js";
 import {
@@ -51,14 +51,14 @@ const cleanupWorkflowCache = () => {
     }
 };
 
-export const tryLoadWorkflowToCanvas = async (payload, fallbackAbsPath = null) => {
+export const tryLoadWorkflowToCanvas = async (payload) => {
     const pl = payload && typeof payload === "object" ? payload : null;
     const rootId = pickRootId(pl);
 
     // Check cache first
     const cacheKey = pl?.filename
         ? `${pl.type || "output"}:${pl.filename}:${pl.subfolder || ""}:${rootId}`
-        : fallbackAbsPath ? `path:${fallbackAbsPath}` : null;
+        : null;
 
     if (cacheKey) {
         const cached = _workflowCache.get(cacheKey);
@@ -114,9 +114,6 @@ export const tryLoadWorkflowToCanvas = async (payload, fallbackAbsPath = null) =
                     `&subfolder=${encodeURIComponent(pl.subfolder || "")}` +
                     `&root_id=${encodeURIComponent(rootId)}`;
             }
-        } else if (fallbackAbsPath) {
-            // For absolute paths, use metadata endpoint (can't use quick lookup)
-            url = `${ENDPOINTS.METADATA}?workflow_only=1&path=${encodeURIComponent(String(fallbackAbsPath))}`;
         }
 
         // If we need the fallback metadata endpoint

@@ -451,7 +451,7 @@ class ExifTool:
                 # Get the source file from ExifTool result
                 source_file = file_data.get("SourceFile")
                 if not source_file:
-                    logger.warning(f"ExifTool result missing SourceFile field")
+                    logger.warning("ExifTool result missing SourceFile field")
                     continue
 
                 source_key = _normalize_match_path(str(source_file))
@@ -478,7 +478,7 @@ class ExifTool:
 
         except subprocess.TimeoutExpired:
             logger.error(f"ExifTool batch timeout for {len(valid_paths)} files")
-            err = Result.Err(ErrorCode.TIMEOUT, f"ExifTool batch timeout", quality="degraded")
+            err = Result.Err(ErrorCode.TIMEOUT, "ExifTool batch timeout", quality="degraded")
             for path in valid_paths:
                 if path not in results:
                     results[path] = err

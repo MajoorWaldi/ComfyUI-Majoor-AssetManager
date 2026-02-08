@@ -4,12 +4,11 @@ Simple, debug-friendly DI without framework magic.
 """
 
 import asyncio
-import os
 from pathlib import Path
 
 from .shared import Result, get_logger, log_success
 from .adapters.db.sqlite import Sqlite
-from .adapters.db.schema import init_schema, migrate_schema, table_has_column
+from .adapters.db.schema import migrate_schema, table_has_column
 from .adapters.tools import ExifTool, FFProbe
 from .features.metadata import MetadataService
 from .features.health import HealthService
@@ -17,6 +16,7 @@ from .features.index import IndexService
 from .features.index.watcher import OutputWatcher
 from .features.index.watcher_scope import load_watcher_scope, build_watch_paths
 from .features.tags import RatingTagsSyncWorker
+from .features.duplicates import DuplicatesService
 from .settings import AppSettings
 from .config import (
     INDEX_DB,
@@ -107,6 +107,7 @@ async def build_services(db_path: str = None) -> Result[dict]:
         "health": health_service,
         "index": index_service,
         "settings": settings_service,
+        "duplicates": DuplicatesService(db),
     }
     try:
         services["watcher_scope"] = await load_watcher_scope(db)

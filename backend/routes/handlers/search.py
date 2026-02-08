@@ -3,6 +3,7 @@ Search and list endpoints.
 """
 import datetime
 import asyncio
+import re
 from pathlib import Path
 from aiohttp import web
 
@@ -18,7 +19,7 @@ except Exception:
 
 from backend.config import OUTPUT_ROOT, TO_THREAD_TIMEOUT_S
 from backend.custom_roots import resolve_custom_root
-from backend.shared import Result
+from backend.shared import Result, get_logger
 from backend.features.index.metadata_helpers import MetadataHelpers
 from ..core import _json_response, _require_services, _read_json, safe_error_message
 from ..core.security import _check_rate_limit
@@ -29,6 +30,7 @@ DEFAULT_LIST_OFFSET = 0
 MAX_LIST_LIMIT = 5000
 MAX_LIST_OFFSET = 1_000_000
 MAX_RATING = 5
+VALID_KIND_FILTERS = {"image", "video", "audio", "model3d"}
 
 LIST_RATE_LIMIT_MAX_REQUESTS = 50
 LIST_RATE_LIMIT_WINDOW_SECONDS = 60
@@ -41,11 +43,13 @@ SEARCH_MAX_BATCH_IDS = 200
 AUTOCOMPLETE_RATE_LIMIT_MAX_REQUESTS = 40
 AUTOCOMPLETE_RATE_LIMIT_WINDOW_SECONDS = 60
 
+logger = get_logger(__name__)
+
 
 def _date_bounds_for_range(range_name, reference=None):
     if not range_name:
         return (None, None)
-    now = reference or datetime.datetime.now()
+    now = _reference_as_utc(reference)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     if range_name == "today":
         start = today
@@ -67,9 +71,78 @@ def _date_bounds_for_exact(value):
         parsed = datetime.datetime.strptime(value, "%Y-%m-%d")
     except Exception:
         return (None, None)
-    start = parsed.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = parsed.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=datetime.timezone.utc)
     end = start + datetime.timedelta(days=1)
     return int(start.timestamp()), int(end.timestamp())
+
+
+def _reference_as_utc(reference=None):
+    """
+    Normalize a datetime reference to an aware UTC timestamp.
+    """
+    if reference is None:
+        return datetime.datetime.now(datetime.timezone.utc)
+    if reference.tzinfo is None:
+        return reference.replace(tzinfo=datetime.timezone.utc)
+    return reference.astimezone(datetime.timezone.utc)
+
+
+def _normalize_extension(value):
+    """
+    Normalize an extension token (drop leading dots, lowercase, trim punctuation).
+    """
+    if value is None:
+        return ""
+    try:
+        text = str(value).strip()
+    except Exception:
+        return ""
+    if not text:
+        return ""
+    text = text.lstrip(".").strip(",;")
+    return text.lower()
+
+
+def _parse_inline_query_filters(raw_query):
+    """
+    Extract inline filters like `ext:png`, `rating:5`, or `kind:video` from the raw query.
+    Returns the cleaned query string (without those tokens) and a dictionary of filter hints.
+    """
+    if not raw_query:
+        return "", {}
+    tokens = str(raw_query).strip().split()
+    cleaned = []
+    filters = {}
+    for token in tokens:
+        if ":" not in token:
+            cleaned.append(token)
+            continue
+        key, _, value = token.partition(":")
+        key = (key or "").strip().lower()
+        value = (value or "").strip().strip(",;")
+        if not key or not value:
+            cleaned.append(token)
+            continue
+        if key in ("ext", "extension"):
+            ext = _normalize_extension(value)
+            if ext:
+                filters.setdefault("extensions", [])
+                if ext not in filters["extensions"]:
+                    filters["extensions"].append(ext)
+            continue
+        if key == "kind":
+            kind_value = (value or "").strip().lower()
+            if kind_value in VALID_KIND_FILTERS:
+                filters["kind"] = kind_value
+                continue
+        if key == "rating":
+            match = re.match(r"^(\d+)", value)
+            if match:
+                rating_val = max(0, min(MAX_RATING, int(match.group(1))))
+                filters["min_rating"] = rating_val
+                continue
+        cleaned.append(token)
+    return " ".join(cleaned).strip(), filters
 
 
 def register_search_routes(routes: web.RouteTableDef) -> None:
@@ -133,7 +206,8 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
         """
         scope = (request.query.get("scope") or "output").strip().lower()
         raw_query = (request.query.get("q") or "").strip()
-        query = raw_query or "*"
+        parsed_query, inline_filters = _parse_inline_query_filters(raw_query)
+        query = parsed_query or "*"
 
         allowed, retry_after = _check_rate_limit(
             request,
@@ -187,6 +261,9 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
             filters["mtime_start"] = mtime_start
         if mtime_end is not None:
             filters["mtime_end"] = mtime_end
+
+        if inline_filters:
+            filters.update(inline_filters)
 
         include_total = request.query.get("include_total", "1").strip().lower() not in ("0", "false", "no", "off")
 
@@ -435,7 +512,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
                     return 0
 
             async def _fill_out():
-                nonlocal out_buf, out_total, out_offset
+                nonlocal out_total, out_offset
                 if out_total is not None and out_offset >= out_total:
                     return
                 res = await svc["index"].search_scoped(
@@ -457,7 +534,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
                 return None
 
             async def _fill_in():
-                nonlocal in_buf, in_total, in_offset
+                nonlocal in_total, in_offset
                 if in_total is not None and in_offset >= in_total:
                     return
                 res = await _list_filesystem_assets(Path(input_root), "", "*", chunk, in_offset, asset_type="input", filters=filters or None)
@@ -597,7 +674,8 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
             return _json_response(error_result)
 
         raw_query = request.query.get("q", "").strip()
-        query = raw_query or "*"
+        parsed_query, inline_filters = _parse_inline_query_filters(raw_query)
+        query = parsed_query or "*"
 
         allowed, retry_after = _check_rate_limit(request, "search_assets", max_requests=50, window_seconds=60)
         if not allowed:
@@ -633,6 +711,9 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
                 return _json_response(result)
         if "has_workflow" in request.query:
             filters["has_workflow"] = request.query["has_workflow"].lower() in ("true", "1", "yes")
+
+        if inline_filters:
+            filters.update(inline_filters)
 
         include_total = request.query.get("include_total", "1").strip().lower() not in ("0", "false", "no", "off")
         result = await svc["index"].search(

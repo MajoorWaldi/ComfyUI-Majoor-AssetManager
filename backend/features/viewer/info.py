@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,17 @@ def _pick_ffprobe_video_stream(metadata_raw: Any) -> Dict[str, Any]:
     return vs if isinstance(vs, dict) else {}
 
 
-def build_viewer_media_info(asset: Dict[str, Any], resolved_path: Optional[Path] = None) -> Dict[str, Any]:
+def _pick_ffprobe_audio_stream(metadata_raw: Any) -> Dict[str, Any]:
+    if not isinstance(metadata_raw, dict):
+        return {}
+    ff = metadata_raw.get("raw_ffprobe")
+    if not isinstance(ff, dict):
+        return {}
+    a = ff.get("audio_stream")
+    return a if isinstance(a, dict) else {}
+
+
+def build_viewer_media_info(asset: Dict[str, Any], resolved_path: Optional[Path] = None, refresh: bool = False) -> Dict[str, Any]:
     """
     Build a compact media info payload for the viewer UI.
     Must be safe to call on partially populated assets.
@@ -122,6 +132,24 @@ def build_viewer_media_info(asset: Dict[str, Any], resolved_path: Optional[Path]
                 except Exception:
                     pass
         info["frame_count"] = frame_count
+    elif kind == "audio":
+        astream = _pick_ffprobe_audio_stream(metadata_raw)
+        try:
+            info["audio_codec"] = str(astream.get("codec_name")) if astream.get("codec_name") else None
+        except Exception:
+            info["audio_codec"] = None
+        try:
+            info["sample_rate"] = int(astream.get("sample_rate")) if astream.get("sample_rate") else None
+        except Exception:
+            info["sample_rate"] = None
+        try:
+            info["channels"] = int(astream.get("channels")) if astream.get("channels") else None
+        except Exception:
+            info["channels"] = None
+        try:
+            info["bitrate"] = int(astream.get("bit_rate")) if astream.get("bit_rate") else None
+        except Exception:
+            info["bitrate"] = None
 
     # File stats - prefer DB values initially
     info["size_bytes"] = _safe_get("size", int)

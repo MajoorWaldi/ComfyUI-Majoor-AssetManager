@@ -6,15 +6,16 @@ export function createViewerToolbar({
     state,
     lifecycle,
     onClose,
-    onZoomIn,
-    onZoomOut,
-    onZoomReset,
-    onZoomOneToOne,
+    _onZoomIn,
+    _onZoomOut,
+    _onZoomReset,
+    _onZoomOneToOne,
     onMode,
     onToolsChanged,
     onCompareModeChanged,
     onExportFrame,
     onCopyFrame,
+    onAudioVizModeChanged,
     onToggleFullscreen,
     getCanAB,
 } = {}) {
@@ -361,6 +362,7 @@ export function createViewerToolbar({
         loupe: "180, 140, 255",
         compare: "90, 220, 220",
         geninfo: "200, 170, 255",
+        audioviz: "255, 150, 80",
     });
 
     const SELECT_STYLE_DEFAULT = Object.freeze({
@@ -483,6 +485,10 @@ export function createViewerToolbar({
     const probeToggle = createToggle("Probe", "Pixel Probe (I)", { iconClass: "pi-eye", accentRgb: ACCENT.probe });
     const loupeToggle = createToggle("Loupe", "Loupe (L)", { iconClass: "pi-search-plus", accentRgb: ACCENT.loupe });
     const hudToggle = createToggle("HUD", "Viewer HUD", { iconClass: "pi-info-circle", accentRgb: ACCENT.overlay });
+    const focusToggle = createToggle("Focus", "Distraction-free mode (X)", {
+        iconClass: "pi-window-maximize",
+        accentRgb: ACCENT.overlay,
+    });
     const genInfoToggle = createToggle("Gen", "Generation info (prompt/model)", {
         iconClass: "pi-book",
         accentRgb: ACCENT.geninfo,
@@ -499,6 +505,11 @@ export function createViewerToolbar({
         { value: "screen", label: "Screen" },
     ]);
     compareModeSelect.title = "Choose how to blend/compare the two images";
+    const audioVizModeSelect = createSelect("Audio Visualizer", [
+        { value: "simple", label: "Simple" },
+        { value: "artistic", label: "Artistic" },
+    ]);
+    audioVizModeSelect.title = "Choose audio visualizer mode";
 
     const resetGradeBtn = createIconButton("Reset", "Reset Exposure/Gamma/Channel");
     resetGradeBtn.style.height = "26px";
@@ -613,12 +624,17 @@ export function createViewerToolbar({
     ovGroup.appendChild(probeToggle.b);
     ovGroup.appendChild(loupeToggle.b);
     ovGroup.appendChild(hudToggle.b);
+    ovGroup.appendChild(focusToggle.b);
     ovGroup.appendChild(genInfoToggle.b);
     toolsRow.appendChild(ovGroup);
 
     const cmpGroup = toolsGroup({ key: "compare", label: "Compare", accentRgb: ACCENT.compare });
     cmpGroup.appendChild(compareModeSelect);
     toolsRow.appendChild(cmpGroup);
+
+    const audGroup = toolsGroup({ key: "audio-viz", label: "Audio Viz", accentRgb: ACCENT.audioviz });
+    audGroup.appendChild(audioVizModeSelect);
+    toolsRow.appendChild(audGroup);
 
     toolsRow.appendChild(resetGradeBtn);
     toolsRow.appendChild(exportBtn);
@@ -696,7 +712,10 @@ export function createViewerToolbar({
         addRow("Z", "Zebra");
         addRow("I", "Probe");
         addRow("L", "Loupe");
+        addRow("X", "Focus Mode");
         addRow("C", "Copy Color");
+        addRow("[ / ]", "Speed -/+");
+        addRow("\\", "Speed 1x");
         addRow("←/→", "Prev/Next");
         addRow("0-5", "Rating");
 
@@ -731,6 +750,15 @@ export function createViewerToolbar({
                 state.abCompareMode = String(compareModeSelect.value || "wipe");
             } catch {}
             safeCall(onCompareModeChanged);
+            safeCall(onToolsChanged);
+        })
+    );
+    unsubs.push(
+        safeAddListener(audioVizModeSelect, "change", () => {
+            try {
+                state.audioVisualizerMode = String(audioVizModeSelect.value || "artistic");
+            } catch {}
+            safeCall(onAudioVizModeChanged);
             safeCall(onToolsChanged);
         })
     );
@@ -864,6 +892,12 @@ export function createViewerToolbar({
         })
     );
     unsubs.push(
+        safeAddListener(focusToggle.b, "click", () => {
+            state.distractionFree = !state.distractionFree;
+            safeCall(onToolsChanged);
+        })
+    );
+    unsubs.push(
         safeAddListener(genInfoToggle.b, "click", () => {
             try {
                 state.genInfoOpen = !state.genInfoOpen;
@@ -910,6 +944,13 @@ export function createViewerToolbar({
                 cmpGroup.dataset.active = showCompare ? "1" : "0";
                 cmpGroup.style.display = showCompare ? "" : "none";
             } catch {}
+        } catch {}
+        try {
+            const current = state?.assets?.[state?.currentIndex] || null;
+            const isAudio = String(current?.kind || "") === "audio";
+            audGroup.style.display = isAudio ? "" : "none";
+            audioVizModeSelect.disabled = !isAudio;
+            audioVizModeSelect.value = String(state.audioVisualizerMode || "artistic");
         } catch {}
         try {
             const ev = Math.round((Number(state.exposureEV) || 0) * 10) / 10;
@@ -960,6 +1001,9 @@ export function createViewerToolbar({
             hudToggle.setActive(Boolean(state.hudEnabled));
         } catch {}
         try {
+            focusToggle.setActive(Boolean(state.distractionFree));
+        } catch {}
+        try {
             genInfoToggle.setActive(Boolean(state.genInfoOpen));
         } catch {}
 
@@ -1008,6 +1052,16 @@ export function createViewerToolbar({
                 accentRgb: ACCENT.compare,
                 active: showCompare && cm !== "wipe",
                 title: showCompare && cm !== "wipe" ? "Compare Mode (modified)" : "A/B Compare Mode",
+            });
+        } catch {}
+        try {
+            const current = state?.assets?.[state?.currentIndex] || null;
+            const isAudio = String(current?.kind || "") === "audio";
+            const mode = String(state.audioVisualizerMode || "artistic");
+            setSelectHighlighted(audioVizModeSelect, {
+                accentRgb: ACCENT.audioviz,
+                active: isAudio && mode !== "simple",
+                title: "Audio visualizer mode",
             });
         } catch {}
 

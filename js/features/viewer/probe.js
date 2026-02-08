@@ -7,7 +7,7 @@ export function installViewerProbe({
     VIEWER_MODES,
     getPrimaryMedia,
     getMediaNaturalSize,
-    getViewportRect,
+    _getViewportRect,
     positionOverlayBox,
     probeTooltip,
     loupeWrap,

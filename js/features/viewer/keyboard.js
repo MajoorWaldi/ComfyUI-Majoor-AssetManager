@@ -1,9 +1,10 @@
 import { safeAddListener, safeCall } from "./lifecycle.js";
 import { comfyToast } from "../../app/toast.js";
+import { t } from "../../app/i18n.js";
 
 export function installViewerKeyboard({
     overlay,
-    content,
+    _content,
     singleView,
     state,
     VIEWER_MODES,
@@ -48,19 +49,19 @@ export function installViewerKeyboard({
             try {
                 const result = await updateAssetRating?.(pending.assetId, pending.rating);
                 if (!result?.ok) {
-                    comfyToast(result?.error || "Failed to update rating", "error");
+                    comfyToast(result?.error || t("toast.ratingUpdateFailed"), "error");
                     return;
                 }
                 
-                comfyToast(`Rating set to ${pending.rating} stars`, "success", 1500);
+                comfyToast(t("toast.ratingSetN", { n: pending.rating }), "success", 1500);
                 
                 safeDispatchCustomEvent?.(
                     ASSET_RATING_CHANGED_EVENT,
                     { assetId: String(pending.assetId), rating: pending.rating },
                     { warnPrefix: "[Viewer]" }
                 );
-            } catch (err) {
-                comfyToast("Error updating rating", "error");
+            } catch {
+                comfyToast(t("toast.ratingUpdateError"), "error");
             }
         }, 300);
     };
@@ -178,6 +179,31 @@ export function installViewerKeyboard({
             }
         };
 
+        const changePlaybackRate = (deltaOrAbsolute, { absolute = false } = {}) => {
+            try {
+                const controls = getControls();
+                if (!controls) return false;
+                if (absolute) {
+                    const rate = controls.setPlaybackRate?.(deltaOrAbsolute);
+                    if (Number.isFinite(Number(rate))) {
+                        state.playbackRate = Number(rate);
+                        comfyToast(`Playback ${Number(rate).toFixed(2)}x`, "info", 1200);
+                        return true;
+                    }
+                    return false;
+                }
+                const rate = controls.adjustPlaybackRate?.(deltaOrAbsolute);
+                if (Number.isFinite(Number(rate))) {
+                    state.playbackRate = Number(rate);
+                    comfyToast(`Playback ${Number(rate).toFixed(2)}x`, "info", 1200);
+                    return true;
+                }
+                return false;
+            } catch {
+                return false;
+            }
+        };
+
         // Rating shortcuts (viewer single only). Ignore modifier combos so we can reserve Alt+keys for viewer tools.
         if (
             isSingle &&
@@ -266,6 +292,16 @@ export function installViewerKeyboard({
                 safeCall(syncToolsUIFromState);
                 break;
             }
+            case "x":
+            case "X": {
+                consume();
+                try {
+                    state.distractionFree = !state.distractionFree;
+                } catch {}
+                safeCall(syncToolsUIFromState);
+                safeCall(renderGenInfoPanel);
+                break;
+            }
             case "c":
             case "C": {
                 const p = state?._probe;
@@ -340,6 +376,30 @@ export function installViewerKeyboard({
                 consume();
                 safeCall(() => navigateViewerAssets?.(1));
                 break;
+            case "[":
+            case "{": {
+                consume();
+                if (!changePlaybackRate(-0.25)) {
+                    comfyToast(t("toast.playbackVideoOnly"), "warning", 1400);
+                }
+                break;
+            }
+            case "]":
+            case "}": {
+                consume();
+                if (!changePlaybackRate(0.25)) {
+                    comfyToast(t("toast.playbackVideoOnly"), "warning", 1400);
+                }
+                break;
+            }
+            case "\\":
+            case "|": {
+                consume();
+                if (!changePlaybackRate(1, { absolute: true })) {
+                    comfyToast(t("toast.playbackVideoOnly"), "warning", 1400);
+                }
+                break;
+            }
             case "+":
             case "=":
                 consume();

@@ -35,7 +35,7 @@ const loadSettings = () => {
         if (!parsed || typeof parsed !== "object") return null;
         try {
             const next = loadMajoorSettings();
-            next.workflowMinimap = { ...(next.workflowMinimap || {}), ...parsed };
+            next.workflowMinimap = { ...next.workflowMinimap, ...parsed };
             saveMajoorSettings(next);
             localStorage?.removeItem?.(MINIMAP_LEGACY_SETTINGS_KEY);
         } catch {}
@@ -48,7 +48,7 @@ const loadSettings = () => {
 const saveSettings = (workflowMinimap) => {
     try {
         const next = loadMajoorSettings();
-        next.workflowMinimap = { ...(next.workflowMinimap || {}), ...(workflowMinimap || {}) };
+        next.workflowMinimap = { ...next.workflowMinimap, ...workflowMinimap };
         saveMajoorSettings(next);
     } catch {}
 };
@@ -137,7 +137,7 @@ export function createWorkflowMinimapSection(asset) {
         renderErrorState: true,
         showViewport: true,
     };
-    const settings = { ...defaultSettings, ...(loadSettings() || {}) };
+    const settings = { ...defaultSettings, ...loadSettings() };
 
     const headerRow = document.createElement("div");
     headerRow.style.cssText = `

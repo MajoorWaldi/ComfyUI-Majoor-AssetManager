@@ -276,10 +276,9 @@ class MetadataHelpers:
         # Enrich tags_text with GenInfo (Models, LoRAs, Prompts) for FTS
         if metadata_result and metadata_result.ok and metadata_result.data:
             meta = metadata_result.data
+            extras = []
             geninfo = meta.get("geninfo")
             if isinstance(geninfo, dict):
-                extras = []
-                
                 # Models
                 models = geninfo.get("models", {})
                 if isinstance(models, dict):
@@ -326,12 +325,27 @@ class MetadataHelpers:
                                 # Let's keep it simple for now and just index the filenames.
                                 pass
 
-                if extras:
-                    if extracted_tags_text:
-                        extracted_tags_text += " " + " ".join(extras)
-                    else:
-                        extracted_tags_text = " ".join(extras)
-        
+            if extras:
+                if extracted_tags_text:
+                    extracted_tags_text += " " + " ".join(extras)
+                else:
+                    extracted_tags_text = " ".join(extras)
+
+            # Concat all metadata fields for metadata_text
+            meta_fields = [extracted_tags_text] + extras
+            # Add prompts, parameters, model, workflow, etc. from metadata_raw
+            if meta.get("prompt"):
+                meta_fields.append(str(meta.get("prompt")))
+            if meta.get("parameters"):
+                meta_fields.append(str(meta.get("parameters")))
+            if meta.get("model"):
+                meta_fields.append(str(meta.get("model")))
+            if meta.get("workflow_type"):
+                meta_fields.append(str(meta.get("workflow_type")))
+            if meta.get("metadata_raw"):
+                meta_fields.append(str(meta.get("metadata_raw")))
+            " ".join([str(f) for f in meta_fields if f])
+
         # Import existing OS/file metadata when DB has defaults, without overriding user edits.
         # - rating: only set if current rating is 0
         # - tags: only set if current tags are empty ('[]' or '')

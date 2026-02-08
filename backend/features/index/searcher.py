@@ -2,7 +2,6 @@
 Index searcher - handles asset search and retrieval operations.
 """
 import json
-import logging
 import os
 import re
 from pathlib import Path
@@ -23,6 +22,18 @@ from ...config import (
 
 logger = get_logger(__name__)
 
+def _normalize_extension(value) -> str:
+    if value is None:
+        return ""
+    try:
+        text = str(value).strip()
+    except Exception:
+        return ""
+    if not text:
+        return ""
+    text = text.lstrip(".").strip(",;")
+    return text.lower()
+
 MAX_SEARCH_QUERY_LENGTH = SEARCH_MAX_QUERY_LENGTH
 MAX_SEARCH_TOKENS = SEARCH_MAX_TOKENS
 MAX_TOKEN_LENGTH = SEARCH_MAX_TOKEN_LENGTH
@@ -39,6 +50,17 @@ def _build_filter_clauses(filters: Optional[Dict[str, Any]], alias: str = "a") -
     if isinstance(kind, str) and kind:
         clauses.append(f"AND {alias}.kind = ?")
         params.append(kind)
+    extensions = filters.get("extensions")
+    if isinstance(extensions, list):
+        normalized_exts = []
+        for ext in extensions:
+            norm = _normalize_extension(ext)
+            if norm:
+                normalized_exts.append(norm)
+        if normalized_exts:
+            placeholders = ", ".join("?" for _ in normalized_exts)
+            clauses.append(f"AND LOWER({alias}.ext) IN ({placeholders})")
+            params.extend(normalized_exts)
     if "min_rating" in filters:
         clauses.append("AND COALESCE(m.rating, 0) >= ?")
         params.append(filters["min_rating"])
@@ -139,35 +161,23 @@ class IndexSearcher:
         include_total: bool = True,
     ) -> Result[Dict[str, Any]]:
         """
-        Search assets using FTS5 full-text search, or browse all if query is '*'.
-
-        Args:
-            query: Search query (FTS5 syntax supported, or '*' to browse all)
-            limit: Max results to return
-            offset: Pagination offset
-            filters: Optional filters (kind, rating, tags, etc.)
-
-        Returns:
-            Result with search results and metadata
+        Search assets using FTS5 or browse mode when query is '*'.
         """
-        if not query or not query.strip():
-            return Result.Err("EMPTY_QUERY", "Search query cannot be empty")
-
         limit = max(0, min(SEARCH_MAX_LIMIT, int(limit)))
         offset = max(0, min(SEARCH_MAX_OFFSET, int(offset)))
+
+        if not query or not query.strip():
+            return Result.Err("EMPTY_QUERY", "Search query cannot be empty")
 
         validation = self._validate_search_input(query)
         if validation and not validation.ok:
             return validation
 
-        logger.debug(f"Searching for: {query} (limit={limit}, offset={offset})")
+        logger.debug("Searching for: %s (limit=%s, offset=%s)", query, limit, offset)
         metadata_tags_text_clause = self._build_tags_text_clause()
-
-        # Check if this is a "browse all" request
         is_browse_all = query.strip() == "*"
 
         if is_browse_all:
-            # Browse all assets (no FTS, just regular query)
             sql_parts = [
                 f"""
                 SELECT
@@ -176,7 +186,7 @@ class IndexSearcher:
                     a.width, a.height, a.duration, a.size, a.mtime,
                     COALESCE(m.rating, 0) as rating,
                     COALESCE(m.tags, '[]') as tags,
- {metadata_tags_text_clause}                    m.has_workflow as has_workflow,
+{metadata_tags_text_clause}                    m.has_workflow as has_workflow,
                     m.has_generation_data as has_generation_data,
                     json_extract(m.metadata_raw, '$.generation_time_ms') as generation_time_ms,
                     json_extract(m.metadata_raw, '$.file_info.ctime') as file_creation_time,
@@ -186,44 +196,33 @@ class IndexSearcher:
                 WHERE 1=1
                 """
             ]
-            params = []
+            params: List[Any] = []
 
             filter_clauses, filter_params = _build_filter_clauses(filters)
             sql_parts.extend(filter_clauses)
             params.extend(filter_params)
 
-            # Order by most recent first
             sql_parts.append("ORDER BY a.mtime DESC")
             sql_parts.append("LIMIT ? OFFSET ?")
             params.extend([limit, offset])
 
-            sql = " ".join(sql_parts)
-            result = await self.db.aquery(sql, tuple(params))
-
+            result = await self.db.aquery(" ".join(sql_parts), tuple(params))
             if not result.ok:
                 return Result.Err("SEARCH_FAILED", result.error)
-
             rows = result.data
 
             total = None
             if include_total:
-                # Get total count
                 count_sql = "SELECT COUNT(*) as total FROM assets a LEFT JOIN asset_metadata m ON a.id = m.asset_id WHERE 1=1"
-                count_params = []
-
+                count_params: List[Any] = []
                 if filter_clauses:
                     count_sql += " " + " ".join(filter_clauses)
                     count_params.extend(filter_params)
-
                 count_result = await self.db.aquery(count_sql, tuple(count_params))
                 total = count_result.data[0]["total"] if count_result.ok and count_result.data else 0
-
         else:
-            # FTS5 search
             fts_query = self._sanitize_fts_query(query)
-
             total_field = "COUNT(*) OVER() as _total," if include_total else ""
-
             sql_parts = [
                 f"""
                 WITH matches AS (
@@ -249,7 +248,7 @@ class IndexSearcher:
                     a.width, a.height, a.duration, a.size, a.mtime,
                     COALESCE(m.rating, 0) as rating,
                     COALESCE(m.tags, '[]') as tags,
- {metadata_tags_text_clause}                    m.has_workflow as has_workflow,
+{metadata_tags_text_clause}                    m.has_workflow as has_workflow,
                     m.has_generation_data as has_generation_data,
                     json_extract(m.metadata_raw, '$.generation_time_ms') as generation_time_ms,
                     json_extract(m.metadata_raw, '$.file_info.ctime') as file_creation_time,
@@ -261,35 +260,25 @@ class IndexSearcher:
                 WHERE 1=1
                 """
             ]
-
             params = [fts_query, fts_query]
 
             filter_clauses, filter_params = _build_filter_clauses(filters)
             sql_parts.extend(filter_clauses)
             params.extend(filter_params)
 
-            # Add ordering and pagination
             sql_parts.append("ORDER BY rank")
             sql_parts.append("LIMIT ? OFFSET ?")
             params.extend([limit, offset])
 
-            sql = " ".join(sql_parts)
-
-            # Execute search
-            result = await self.db.aquery(sql, tuple(params))
-
+            result = await self.db.aquery(" ".join(sql_parts), tuple(params))
             if not result.ok:
                 return Result.Err("SEARCH_FAILED", result.error)
-
             rows = result.data
 
             total = None
-            # Optimization: Use window function result if available (FTS queries)
             if include_total and rows and "_total" in rows[0]:
                 total = rows[0]["_total"]
-
             if include_total and total is None:
-                # Get total count (without pagination)
                 count_sql = """
                     WITH matches AS (
                         SELECT rowid AS asset_id
@@ -309,19 +298,15 @@ class IndexSearcher:
                     WHERE 1=1
                 """
                 count_params = [fts_query, fts_query]
-
                 if filter_clauses:
                     count_sql += " " + " ".join(filter_clauses)
                     count_params.extend(filter_params)
-
                 count_result = await self.db.aquery(count_sql, tuple(count_params))
                 total = count_result.data[0]["total"] if count_result.ok and count_result.data else 0
 
-        # Format results
         assets = []
         for row in rows:
             asset = dict(row)
-            # Parse tags from JSON string
             if asset.get("tags"):
                 try:
                     asset["tags"] = json.loads(asset["tags"])
@@ -330,15 +315,13 @@ class IndexSearcher:
             else:
                 asset["tags"] = []
             asset.setdefault("tags_text", "")
-
+            asset["highlight"] = asset.get("highlight") or None
             assets.append(asset)
 
         logger.debug("Found %s results (total=%s)", len(assets), total if include_total else "skipped")
-
         payload: Dict[str, Any] = {"assets": assets, "limit": limit, "offset": offset, "query": query}
         payload["total"] = int(total or 0) if include_total else None
         return Result.Ok(payload)
-
     async def search_scoped(
         self,
         query: str,

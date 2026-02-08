@@ -20,6 +20,12 @@ export function destroyMediaProcessorsIn(rootEl) {
                     el.pause?.();
                 } catch {}
                 try {
+                    el?._mjrAudioViz?.destroy?.();
+                } catch {}
+                try {
+                    el._mjrAudioViz = null;
+                } catch {}
+                try {
                     el.currentTime = 0;
                 } catch {}
                 try {
@@ -33,7 +39,7 @@ export function destroyMediaProcessorsIn(rootEl) {
     } catch {}
 
     try {
-        const canvases = rootEl.querySelectorAll?.(".mjr-viewer-media");
+        const canvases = rootEl.querySelectorAll?.(".mjr-viewer-media, .mjr-viewer-audio-viz");
         if (canvases && canvases.length) {
             for (const c of canvases) {
                 try {

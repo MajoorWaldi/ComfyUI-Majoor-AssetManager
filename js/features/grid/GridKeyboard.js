@@ -10,10 +10,11 @@
  */
 
 import { comfyToast } from "../../app/toast.js";
+import { t } from "../../app/i18n.js";
 import { comfyPrompt } from "../../app/dialogs.js";
 import { openInFolder, updateAssetRating, deleteAsset, renameAsset } from "../../api/client.js";
 import { buildDownloadURL } from "../../api/endpoints.js";
-import { ASSET_RATING_CHANGED_EVENT, ASSET_TAGS_CHANGED_EVENT } from "../../app/events.js";
+import { ASSET_RATING_CHANGED_EVENT } from "../../app/events.js";
 import { safeDispatchCustomEvent } from "../../utils/events.js";
 import { getViewerInstance } from "../../components/Viewer.js";
 import { showAddToCollectionMenu } from "../collections/contextmenu/addToCollectionMenu.js";
@@ -131,10 +132,10 @@ function setRating(asset, rating, onChanged) {
             _ratingDebounceTimers.delete(id);
             const result = await updateAssetRating(assetId, rating);
             if (!result?.ok) {
-                comfyToast(result?.error || "Failed to update rating", "error");
+                comfyToast(result?.error || t("toast.ratingUpdateFailed"), "error");
                 return;
             }
-            comfyToast(`Rating set to ${rating} star${rating !== 1 ? 's' : ''}`, "success", 1500);
+            comfyToast(t("toast.ratingSetN", { n: rating }), "success", 1500);
             safeDispatchCustomEvent(
                 ASSET_RATING_CHANGED_EVENT,
                 { assetId: String(assetId), rating },
@@ -142,7 +143,7 @@ function setRating(asset, rating, onChanged) {
             );
         } catch (err) {
             console.error("[GridKeyboard] Rating update failed:", err);
-            comfyToast("Error updating rating", "error");
+            comfyToast(t("toast.ratingUpdateError"), "error");
         }
     }, 350);
 
@@ -366,9 +367,9 @@ export function installGridKeyboard({
                 consume();
                 try {
                     await navigator.clipboard.writeText(asset.filepath);
-                    comfyToast("File path copied to clipboard", "success", 2000);
-                } catch (err) {
-                    comfyToast("Failed to copy path", "error");
+                    comfyToast(t("toast.pathCopied"), "success", 2000);
+                } catch {
+                    comfyToast(t("toast.pathCopyFailed"), "error");
                 }
                 return;
             }
@@ -396,9 +397,9 @@ export function installGridKeyboard({
                 consume();
                 const res = await openInFolder(asset.id);
                 if (!res?.ok) {
-                    comfyToast(res?.error || "Failed to open folder", "error");
+                    comfyToast(res?.error || t("toast.openFolderFailed"), "error");
                 } else {
-                    comfyToast("Opened in folder", "info", 2000);
+                    comfyToast(t("toast.openedInFolder"), "info", 2000);
                 }
                 return;
             }
@@ -416,10 +417,10 @@ export function installGridKeyboard({
                         if (result?.ok) {
                             asset.filename = newName;
                             asset.filepath = asset.filepath?.replace(/[^\\/]+$/, newName);
-                            comfyToast("File renamed successfully!", "success");
+                            comfyToast(t("toast.fileRenamedSuccess"), "success");
                             onAssetChanged();
                         } else {
-                            comfyToast(result?.error || "Failed to rename file", "error");
+                            comfyToast(result?.error || t("toast.fileRenameFailed"), "error");
                         }
                     } catch (err) {
                         comfyToast(`Error renaming: ${err.message}`, "error");

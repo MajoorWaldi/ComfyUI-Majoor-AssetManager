@@ -2,11 +2,9 @@
 Test the index service with real files.
 """
 import pytest
-import os
 import sys
 from pathlib import Path
 
-import asyncio
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent))

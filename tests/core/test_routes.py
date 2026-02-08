@@ -2,7 +2,6 @@
 Test routes registration without starting full ComfyUI.
 """
 import sys
-from pathlib import Path
 import pytest
 
 # Fix Windows console encoding

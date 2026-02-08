@@ -17,8 +17,6 @@ export function createFilterPopoverView() {
         ["", t("filter.all")],
         ["image", "Image"],
         ["video", "Video"],
-        ["gif", "GIF"],
-        ["webp", "WebP"],
         ["audio", "Audio"],
         ["model3d", "3D"],
     ].forEach(([val, text]) => {

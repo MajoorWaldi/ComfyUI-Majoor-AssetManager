@@ -18,7 +18,7 @@ except Exception:
 from backend.config import OUTPUT_ROOT, get_tool_paths, MEDIA_PROBE_BACKEND
 from backend.config import TO_THREAD_TIMEOUT_S
 from backend.custom_roots import resolve_custom_root
-from backend.shared import Result, ErrorCode
+from backend.shared import Result, ErrorCode, sanitize_error_message
 from backend.tool_detect import get_tool_status
 from backend.utils import parse_bool
 from ..core import _json_response, _require_services, _csrf_error, _require_write_access, _read_json
@@ -48,7 +48,10 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
         except asyncio.TimeoutError:
             result = Result.Err(ErrorCode.TIMEOUT, "Health status timed out")
         except Exception as exc:
-            result = Result.Err(ErrorCode.DEGRADED, f"Health status failed: {exc}")
+            result = Result.Err(
+                ErrorCode.DEGRADED,
+                sanitize_error_message(exc, "Health status failed"),
+            )
         return _json_response(result)
 
     @routes.get("/mjr/am/health/counters")
@@ -84,7 +87,10 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
         except asyncio.TimeoutError:
             result = Result.Err(ErrorCode.TIMEOUT, "Health counters timed out")
         except Exception as exc:
-            result = Result.Err(ErrorCode.DEGRADED, f"Health counters failed: {exc}")
+            result = Result.Err(
+                ErrorCode.DEGRADED,
+                sanitize_error_message(exc, "Health counters failed"),
+            )
         if result.ok:
             if isinstance(result.data, dict):
                 result.data["scope"] = scope
@@ -102,6 +108,65 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
                 except Exception:
                     result.data["watcher"] = {"enabled": False, "directories": [], "scope": None, "custom_root_id": None}
         return _json_response(result)
+
+    @routes.get("/mjr/am/health/db")
+    async def health_db(request):
+        """
+        DB-focused diagnostics endpoint.
+
+        Exposes explicit lock/corruption/recovery state so operators can diagnose
+        reset/scan issues without parsing logs.
+        """
+        svc, error_result = await _require_services()
+        if error_result:
+            return _json_response(error_result)
+
+        db = svc.get("db") if isinstance(svc, dict) else None
+        if not db:
+            return _json_response(Result.Err(ErrorCode.SERVICE_UNAVAILABLE, "Database service unavailable"))
+
+        # Safe defaults if adapter doesn't expose diagnostics yet.
+        diagnostics = {
+            "locked": False,
+            "malformed": False,
+            "recovery_state": "unknown",
+        }
+
+        try:
+            getter = getattr(db, "get_diagnostics", None)
+            if callable(getter):
+                payload = getter()
+                if isinstance(payload, dict):
+                    diagnostics = payload
+        except Exception as exc:
+            diagnostics = {
+                "locked": False,
+                "malformed": False,
+                "recovery_state": "unknown",
+                "error": sanitize_error_message(exc, "Failed to read DB diagnostics"),
+            }
+
+        # Include quick liveness check for context.
+        available = False
+        error = None
+        try:
+            q = await db.aexecute("SELECT 1 as ok", fetch=True)
+            available = bool(q.ok)
+            if not q.ok:
+                error = q.error
+        except Exception as exc:
+            available = False
+            error = sanitize_error_message(exc, "DB liveness check failed")
+
+        return _json_response(
+            Result.Ok(
+                {
+                    "available": available,
+                    "error": error,
+                    "diagnostics": diagnostics,
+                }
+            )
+        )
 
     @routes.get("/mjr/am/config")
     async def get_config(request):

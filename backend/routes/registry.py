@@ -62,6 +62,7 @@ from .handlers import (
     register_releases_routes,
     register_version_routes,
     register_download_routes,
+    register_duplicates_routes,
 )
 
 logger = get_logger(__name__)
@@ -174,6 +175,7 @@ def register_all_routes() -> web.RouteTableDef:
     # FIX: Enregistrement de la route de téléchargement
     try:
         register_download_routes(routes)
+        register_duplicates_routes(routes)
         logger.info("  GET /mjr/am/download (Added)")
     except Exception as e:
         logger.error(f"Failed to register download routes: {e}")
@@ -182,9 +184,10 @@ def register_all_routes() -> web.RouteTableDef:
     logger.info("Routes registered:")
     logger.info("  GET /mjr/am/health")
     logger.info("  GET /mjr/am/health/counters")
+    logger.info("  GET /mjr/am/health/db")
     logger.info("  GET /mjr/am/config")
     logger.info("  GET /mjr/am/tools/status")
-    logger.info("  GET /mjr/am/metadata?path=<file>")
+    logger.info("  GET /mjr/am/metadata?type=<scope>&filename=<name>&subfolder=<sub>&root_id=<id>")
     logger.info("  POST /mjr/am/scan")
     logger.info("  POST /mjr/am/index-files")
     logger.info("  POST /mjr/am/stage-to-input")
@@ -199,8 +202,10 @@ def register_all_routes() -> web.RouteTableDef:
     logger.info("  GET /mjr/am/batch-zip/{token}")
     logger.info("  GET /mjr/am/viewer/info?asset_id=<id>")
     logger.info("  POST /mjr/am/db/optimize")
+    logger.info("  POST /mjr/am/db/force-delete")
     logger.info("  GET /mjr/am/download")
     logger.info("  GET /mjr/am/releases")
+    logger.info("  GET /mjr/am/duplicates/alerts")
     logger.info("=" * 60)
 
     return routes

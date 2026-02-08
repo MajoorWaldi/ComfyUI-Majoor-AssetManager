@@ -2,17 +2,23 @@
  * Grid Context Menu - Right-click menu for asset cards
  */
 
-import { buildAssetViewURL, buildDownloadURL } from "../../api/endpoints.js";
-import { comfyConfirm, comfyPrompt } from "../../app/dialogs.js";
+import { buildDownloadURL } from "../../api/endpoints.js";
+import { comfyPrompt } from "../../app/dialogs.js";
 import { comfyToast } from "../../app/toast.js";
-import { openInFolder, updateAssetRating, deleteAsset, renameAsset, removeFilepathsFromCollection } from "../../api/client.js";
+import { t } from "../../app/i18n.js";
+import { openInFolder, deleteAsset, renameAsset, removeFilepathsFromCollection } from "../../api/client.js";
 import { ASSET_RATING_CHANGED_EVENT, ASSET_TAGS_CHANGED_EVENT } from "../../app/events.js";
 import { createTagsEditor } from "../../components/TagsEditor.js";
 import { getViewerInstance } from "../../components/Viewer.js";
+import { APP_CONFIG } from "../../app/config.js";
 import { safeDispatchCustomEvent } from "../../utils/events.js";
+import { sanitizeFilename, validateFilename } from "../../utils/filenames.js";
+import { reportError } from "../../utils/logging.js";
 import { safeClosest } from "../../utils/dom.js";
 import { showAddToCollectionMenu } from "../collections/contextmenu/addToCollectionMenu.js";
 import { removeAssetsFromGrid } from "../grid/GridView.js";
+import { confirmDeletion } from "../../utils/deleteGuard.js";
+import { scheduleRatingUpdate, cancelAllRatingUpdates } from "./ratingUpdater.js";
 import {
     getOrCreateMenu,
     createMenuItem,
@@ -286,17 +292,9 @@ function showTagsPopover(x, y, asset, onChanged) {
     pop.style.top = `${Math.max(8, fy)}px`;
 }
 
-const _ratingDebounceTimers = new Map();
 function setRating(asset, rating, onChanged) {
     const assetId = asset?.id;
     if (!assetId) return;
-    const id = String(assetId);
-    try {
-        const prev = _ratingDebounceTimers.get(id);
-        if (prev) clearTimeout(prev);
-    } catch {}
-
-    // Optimistic UI
     try {
         asset.rating = rating;
     } catch {}
@@ -304,30 +302,21 @@ function setRating(asset, rating, onChanged) {
         onChanged?.();
     } catch {}
 
-    const t = setTimeout(async () => {
-        try {
-            _ratingDebounceTimers.delete(id);
-        } catch {}
-        try {
-            const result = await updateAssetRating(assetId, rating);
-            if (!result?.ok) {
-                comfyToast(result?.error || "Failed to update rating", "error");
-                return;
-            }
-            comfyToast(`Rating set to ${rating} stars`, "success", 1500);
+    scheduleRatingUpdate(String(assetId), rating, {
+        successMessage: rating > 0 ? `Rating set to ${rating} stars` : "Rating cleared",
+        errorMessage: "Failed to update rating",
+        warnPrefix: "[GridContextMenu]",
+        onSuccess: () => {
             safeDispatchCustomEvent(
                 ASSET_RATING_CHANGED_EVENT,
                 { assetId: String(assetId), rating },
                 { warnPrefix: "[GridContextMenu]" }
             );
-        } catch (err) {
-            console.error("[GridContextMenu] Rating update failed:", err);
-            comfyToast("Error updating rating", "error");
-        }
-    }, 350);
-    try {
-        _ratingDebounceTimers.set(id, t);
-    } catch {}
+        },
+        onFailure: (error) => {
+            reportError(error, "[GridContextMenu] Rating update", { showToast: APP_CONFIG.DEBUG_VERBOSE_ERRORS });
+        },
+    });
 }
 
 export function bindGridContextMenu({
@@ -400,7 +389,6 @@ export function bindGridContextMenu({
              } catch {}
         }
 
-        const isSingleSelected = selectedIds.size === 1 && selectedIds.has(String(asset.id));
         const isMultiSelected = selectedIds.size > 1;
         const hasSelection = selectedIds.size > 0;
 
@@ -479,9 +467,9 @@ export function bindGridContextMenu({
                 if (!asset?.id) return;
                 const res = await openInFolder(asset.id);
                 if (!res?.ok) {
-                    comfyToast(res?.error || "Failed to open folder.", "error");
+                    comfyToast(res?.error || t("toast.openFolderFailed"), "error");
                 } else {
-                    comfyToast("Opened in folder", "info", 2000);
+                    comfyToast(t("toast.openedInFolder"), "info", 2000);
                 }
             }, { disabled: !asset?.id })
         );
@@ -491,15 +479,15 @@ export function bindGridContextMenu({
             createItem("Copy file path", "pi pi-copy", getShortcutDisplay("COPY_PATH"), async () => {
                 const p = asset?.filepath ? String(asset.filepath) : "";
                 if (!p) {
-                    comfyToast("No file path available for this asset.", "error");
+                    comfyToast(t("toast.noFilePath"), "error");
                     return;
                 }
                 try {
                     await navigator.clipboard.writeText(p);
-                    comfyToast("File path copied to clipboard", "success", 2000);
+                    comfyToast(t("toast.pathCopied"), "success", 2000);
                 } catch (err) {
                     console.warn("Clipboard copy failed", err);
-                    comfyToast("Failed to copy path", "error");
+                    comfyToast(t("toast.pathCopyFailed"), "error");
                 }
             })
         );
@@ -551,14 +539,14 @@ export function bindGridContextMenu({
                         hideMenu(menu);
                     } catch {}
                     if (!filepaths.length) {
-                        comfyToast("No file path available for this asset.", "error");
+                        comfyToast(t("toast.noFilePath"), "error");
                         return;
                     }
                     
                     // Confirmation removed as per user request
                     const res = await removeFilepathsFromCollection(collectionId, filepaths);
                     if (!res?.ok) {
-                        comfyToast(res?.error || "Failed to remove from collection.", "error");
+                        comfyToast(res?.error || t("toast.removeFromCollectionFailed"), "error");
                         return;
                     }
 
@@ -704,8 +692,14 @@ export function bindGridContextMenu({
                 if (!asset?.id) return;
                 
                 const currentName = asset.filename || "";
-                const newName = await comfyPrompt("Rename file", currentName);
+                const rawInput = await comfyPrompt("Rename file", currentName);
+                const newName = sanitizeFilename(rawInput);
                 if (!newName || newName === currentName) return;
+                const validation = validateFilename(newName);
+                if (!validation.valid) {
+                    comfyToast(validation.reason, "error");
+                    return;
+                }
                 
                 try {
                     const result = await renameAsset(asset.id, newName);
@@ -724,9 +718,9 @@ export function bindGridContextMenu({
                             }
                         }
                         
-                        comfyToast("File renamed successfully!", "success");
+                        comfyToast(t("toast.fileRenamedSuccess"), "success");
                     } else {
-                        comfyToast(result?.error || "Failed to rename file.", "error");
+                        comfyToast(result?.error || t("toast.fileRenameFailed"), "error");
                     }
                 } catch (error) {
                     comfyToast(`Error renaming file: ${error.message}`, "error");
@@ -738,7 +732,8 @@ export function bindGridContextMenu({
         if (isMultiSelected) {
             menu.appendChild(
                 createItem(`Delete ${selectedIds.size} files...`, "pi pi-trash", getShortcutDisplay("DELETE"), async () => {
-                   // Confirmation removed as per user request
+                    const ok = await confirmDeletion(Number(selectedIds.size) || 0);
+                    if (!ok) return;
                     try {
                         // Delete each asset individually
                         let successCount = 0;
@@ -778,7 +773,8 @@ export function bindGridContextMenu({
         } else {
             menu.appendChild(
                 createItem("Delete...", "pi pi-trash", getShortcutDisplay("DELETE"), async () => {
-                   // Confirmation removed as per user request
+                    const ok = await confirmDeletion(1, asset?.filename);
+                    if (!ok) return;
                     try {
                         const result = await deleteAsset(asset.id);
                         if (result?.ok) {
@@ -789,9 +785,9 @@ export function bindGridContextMenu({
                                     panelState.activeAssetId = removal.selectedAssetIds[0] || "";
                                 }
                             } catch {}
-                            comfyToast("File deleted successfully!", "success");
+                            comfyToast(t("toast.fileDeletedSuccess"), "success");
                         } else {
-                            comfyToast(result?.error || "Failed to delete file.", "error");
+                            comfyToast(result?.error || t("toast.fileDeleteFailed"), "error");
                         }
                     } catch (error) {
                         comfyToast(`Error deleting file: ${error.message}`, "error");
@@ -818,6 +814,9 @@ export function bindGridContextMenu({
         } catch {}
         try {
             gridContainer._mjrGridContextMenuBound = false;
+        } catch {}
+        try {
+            cancelAllRatingUpdates();
         } catch {}
         try {
             gridContainer._mjrGridContextMenuUnbind = null;

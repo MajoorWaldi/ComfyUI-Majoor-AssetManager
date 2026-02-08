@@ -5,12 +5,13 @@ from aiohttp import web
 import asyncio
 import json
 import os
-import re
+import shutil
 import subprocess
+import sys
 import mimetypes
 from pathlib import Path
 
-from backend.shared import Result, get_logger
+from backend.shared import Result, get_logger, sanitize_error_message
 from backend.config import OUTPUT_ROOT, TO_THREAD_TIMEOUT_S
 from backend.custom_roots import list_custom_roots, resolve_custom_root
 
@@ -46,7 +47,6 @@ logger = get_logger(__name__)
 MAX_TAGS_PER_ASSET = 50
 MAX_TAG_LENGTH = 100
 MAX_RENAME_LENGTH = 255
-_DEBUG_MODE = os.environ.get("MJR_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
 
 _WINDOWS_RESERVED = {
     'CON', 'PRN', 'AUX', 'NUL',
@@ -89,19 +89,6 @@ def _validate_filename(name: str) -> tuple[bool, str]:
 
 
 
-def _safe_error_message(exc: Exception, generic_message: str) -> str:
-    if _DEBUG_MODE:
-        # Log full details server-side
-        logger.debug("Debug error details: %s", exc, exc_info=True)
-        # Still sanitize - remove file paths and internal details
-        msg = str(exc)
-        # Remove potential path information (basic heuristic)
-        msg = re.sub(r'[A-Za-z]:\\[^\s]+', '[path]', msg)
-        msg = re.sub(r'/[^\s]+', '[path]', msg)
-        return f"{generic_message}: {msg[:200]}"
-    return generic_message
-
-
 def _delete_file_best_effort(path: Path) -> Result[bool]:
     """
     Prefer moving to recycle bin (send2trash) when available, fallback to permanent delete.
@@ -112,7 +99,9 @@ def _delete_file_best_effort(path: Path) -> Result[bool]:
         if not path.exists() or not path.is_file():
             return Result.Ok(True, method="noop")
     except Exception as exc:
-        return Result.Err("DELETE_FAILED", f"Failed to stat file: {exc}")
+        return Result.Err(
+            "DELETE_FAILED", sanitize_error_message(exc, "Failed to stat file")
+        )
 
     # Prefer recycle bin when possible.
     try:
@@ -125,16 +114,24 @@ def _delete_file_best_effort(path: Path) -> Result[bool]:
             # Fall back to unlink (still acceptable; better than aborting UX).
             try:
                 path.unlink(missing_ok=True)
-                return Result.Ok(True, method="unlink_fallback", warning=str(exc))
+                return Result.Ok(
+                    True,
+                    method="unlink_fallback",
+                    warning=sanitize_error_message(exc, "send2trash failed"),
+                )
             except Exception as exc2:
-                return Result.Err("DELETE_FAILED", f"{exc2}")
+                return Result.Err(
+                    "DELETE_FAILED", sanitize_error_message(exc2, "Failed to delete file")
+                )
     except Exception:
         # send2trash not available or failed to import.
         try:
             path.unlink(missing_ok=True)
             return Result.Ok(True, method="unlink")
         except Exception as exc:
-            return Result.Err("DELETE_FAILED", f"{exc}")
+            return Result.Err(
+                "DELETE_FAILED", sanitize_error_message(exc, "Failed to delete file")
+            )
 
 
 def register_asset_routes(routes: web.RouteTableDef) -> None:
@@ -251,7 +248,10 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         except asyncio.TimeoutError:
             return Result.Err("TIMEOUT", "Asset lookup timed out")
         except Exception as exc:
-            return Result.Err("DB_ERROR", f"Failed to resolve asset id: {exc}")
+            return Result.Err(
+                "DB_ERROR",
+                sanitize_error_message(exc, "Failed to resolve asset id"),
+            )
 
     def _get_rating_tags_sync_mode(request: web.Request) -> str:
         try:
@@ -392,7 +392,9 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         try:
             result = await svc["index"].update_asset_rating(asset_id, rating)
         except Exception as exc:
-            result = Result.Err("UPDATE_FAILED", _safe_error_message(exc, "Failed to update rating"))
+            result = Result.Err(
+                "UPDATE_FAILED", sanitize_error_message(exc, "Failed to update rating")
+            )
         if result.ok:
             await _enqueue_rating_tags_sync(request, svc, asset_id)
         return _json_response(result)
@@ -473,7 +475,9 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         try:
             result = await svc["index"].update_asset_tags(asset_id, sanitized_tags)
         except Exception as exc:
-            result = Result.Err("UPDATE_FAILED", _safe_error_message(exc, "Failed to update tags"))
+            result = Result.Err(
+                "UPDATE_FAILED", sanitize_error_message(exc, "Failed to update tags")
+            )
         if result.ok:
             await _enqueue_rating_tags_sync(request, svc, asset_id)
         return _json_response(result)
@@ -530,7 +534,9 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
                 return _json_response(Result.Err("NOT_FOUND", "Asset not found"))
             raw_path = (res.data[0] or {}).get("filepath")
         except Exception as exc:
-            return _json_response(Result.Err("DB_ERROR", _safe_error_message(exc, "Failed to load asset")))
+            return _json_response(
+                Result.Err("DB_ERROR", sanitize_error_message(exc, "Failed to load asset"))
+            )
 
         if not raw_path or not isinstance(raw_path, str):
             return _json_response(Result.Err("NOT_FOUND", "Asset path not available"))
@@ -549,40 +555,73 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         except Exception:
             return _json_response(Result.Err("NOT_FOUND", "File does not exist"))
 
-        if os.name != "nt":
-            # Non-Windows: best-effort open directory only.
-            try:
-                subprocess.Popen(["xdg-open", str(Path(resolved).parent)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return _json_response(Result.Ok({"opened": True, "selected": False}))
-            except Exception as exc:
-                return _json_response(Result.Err("DEGRADED", f"Open-in-folder not supported: {exc}"))
-
-        # Windows: Use subprocess with validated path components (secure against injection)
-        try:
-            # Using list-based subprocess arguments prevents command injection
-            # Path components are validated above via strict=True resolution
+        def _execute_command(command: list[str]) -> None:
+            if not shutil.which(command[0]):
+                raise FileNotFoundError(command[0])
             subprocess.Popen(
-                ["explorer.exe", f"/select,{str(resolved)}"],
+                command,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                # Don't use shell=True - that would enable injection
-                shell=False
+                shell=False,
             )
-            return _json_response(Result.Ok({"opened": True, "selected": True}))
-        except FileNotFoundError:
-            # explorer.exe not found - try os.startfile as fallback
+
+        commands: list[list[str]] = []
+        fallback_command: list[str] | None = None
+
+        if sys.platform == "darwin":
+            commands.append(["open", "-R", str(resolved)])
+            fallback_command = ["open", str(resolved.parent)]
+            selected = True
+        elif os.name == "nt":
+            commands.append(["explorer.exe", f"/select,{str(resolved)}"])
+            selected = True
+        else:
+            commands.append(["xdg-open", str(resolved.parent)])
+            selected = False
+
+        last_exception: Exception | None = None
+
+        for cmd in commands:
             try:
-                os.startfile(str(resolved.parent))
-                return _json_response(Result.Ok({"opened": True, "selected": False, "fallback": "startfile"}))
+                _execute_command(cmd)
+                payload = {"opened": True, "selected": selected}
+                if cmd[0] == "xdg-open":
+                    payload["fallback"] = "xdg-open"
+                return _json_response(Result.Ok(payload))
             except Exception as exc:
-                return _json_response(Result.Err("DEGRADED", f"Failed to open folder: {exc}"))
-        except Exception as exc:
-            # Any other error - try os.startfile as fallback
+                last_exception = exc
+
+        if fallback_command:
+            try:
+                _execute_command(fallback_command)
+                return _json_response(
+                    Result.Ok(
+                        {"opened": True, "selected": False, "fallback": "open"}
+                    )
+                )
+            except Exception as exc:
+                last_exception = exc
+
+        if os.name == "nt":
             try:
                 os.startfile(str(resolved.parent))
-                return _json_response(Result.Ok({"opened": True, "selected": False, "fallback": "startfile"}))
-            except Exception:
-                return _json_response(Result.Err("DEGRADED", f"Failed to open folder: {exc}"))
+                return _json_response(
+                    Result.Ok(
+                        {"opened": True, "selected": False, "fallback": "startfile"}
+                    )
+                )
+            except Exception as exc:
+                last_exception = exc
+
+        return _json_response(
+            Result.Err(
+                "DEGRADED",
+                sanitize_error_message(
+                    last_exception or ValueError("Failed to open folder"),
+                    "Failed to open folder",
+                ),
+            )
+        )
 
     @routes.get("/mjr/am/tags")
     async def get_all_tags(request):
@@ -598,7 +637,9 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         try:
             result = await svc["index"].get_all_tags()
         except Exception as exc:
-            result = Result.Err("DB_ERROR", f"Failed to load tags: {exc}")
+            result = Result.Err(
+                "DB_ERROR", sanitize_error_message(exc, "Failed to load tags")
+            )
         return _json_response(result)
 
     @routes.get("/mjr/am/routes")
@@ -607,6 +648,7 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         routes_info = [
             {"method": "GET", "path": "/mjr/am/health", "description": "Get health status"},
             {"method": "GET", "path": "/mjr/am/health/counters", "description": "Get database counters"},
+            {"method": "GET", "path": "/mjr/am/health/db", "description": "Get DB lock/corruption/recovery diagnostics"},
             {"method": "GET", "path": "/mjr/am/config", "description": "Get configuration"},
             {"method": "GET", "path": "/mjr/am/roots", "description": "Get core and custom roots"},
             {"method": "GET", "path": "/mjr/am/custom-roots", "description": "List custom roots"},
@@ -679,7 +721,9 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
                 return _json_response(Result.Err("NOT_FOUND", "Asset not found"))
             raw_path = (res.data[0] or {}).get("filepath")
         except Exception as exc:
-            return _json_response(Result.Err("DB_ERROR", _safe_error_message(exc, "Failed to load asset")))
+            return _json_response(
+                Result.Err("DB_ERROR", sanitize_error_message(exc, "Failed to load asset"))
+            )
 
         if not raw_path or not isinstance(raw_path, str):
             return _json_response(Result.Err("NOT_FOUND", "Asset path not available"))
@@ -703,9 +747,11 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
             try:
                 del_res = _delete_file_best_effort(resolved)
                 if not del_res.ok:
-                    file_deletion_error = str(del_res.error or "delete failed")
+                    file_deletion_error = sanitize_error_message(
+                        del_res.error or "delete failed", "File deletion failed"
+                    )
             except Exception as exc:
-                file_deletion_error = str(exc)
+                file_deletion_error = sanitize_error_message(exc, "File deletion failed")
 
         if file_deletion_error:
             return _json_response(Result.Err(
@@ -730,7 +776,12 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
             return _json_response(db_res)
         except Exception as exc:
             logger.error("Database deletion failed: %s", exc)
-            return _json_response(Result.Err("DB_ERROR", _safe_error_message(exc, "Failed to delete asset record")))
+            return _json_response(
+                Result.Err(
+                    "DB_ERROR",
+                    sanitize_error_message(exc, "Failed to delete asset record"),
+                )
+            )
 
     @routes.post("/mjr/am/asset/rename")
     async def rename_asset(request):
@@ -792,7 +843,9 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
             current_filepath = row.get("filepath")
             current_filename = row.get("filename")
         except Exception as exc:
-            return _json_response(Result.Err("DB_ERROR", _safe_error_message(exc, "Failed to load asset")))
+            return _json_response(
+                Result.Err("DB_ERROR", sanitize_error_message(exc, "Failed to load asset"))
+            )
 
         if not current_filepath or not isinstance(current_filepath, str):
             return _json_response(Result.Err("NOT_FOUND", "Asset path not available"))
@@ -825,7 +878,12 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
         try:
             current_resolved.rename(new_path)
         except Exception as exc:
-            return _json_response(Result.Err("RENAME_FAILED", _safe_error_message(exc, "Failed to rename file")))
+            return _json_response(
+                Result.Err(
+                    "RENAME_FAILED",
+                    sanitize_error_message(exc, "Failed to rename file"),
+                )
+            )
 
         # Update database record
         try:
@@ -835,7 +893,12 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
             except FileNotFoundError:
                 return _json_response(Result.Err("NOT_FOUND", "Renamed file does not exist"))
             except Exception as exc:
-                return _json_response(Result.Err("FS_ERROR", _safe_error_message(exc, "Failed to stat renamed file")))
+                return _json_response(
+                    Result.Err(
+                        "FS_ERROR",
+                        sanitize_error_message(exc, "Failed to stat renamed file"),
+                    )
+                )
             update_res = await svc["db"].aexecute(
                 "UPDATE assets SET filename = ?, filepath = ?, mtime = ? WHERE id = ?",
                 (new_name, str(new_path), mtime, asset_id)
@@ -847,7 +910,12 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
             await svc["db"].aexecute("DELETE FROM scan_journal WHERE filepath = ?", (str(current_path),))
             await svc["db"].aexecute("DELETE FROM metadata_cache WHERE filepath = ?", (str(current_path),))
         except Exception as exc:
-            return _json_response(Result.Err("DB_ERROR", _safe_error_message(exc, "Failed to update asset record")))
+            return _json_response(
+                Result.Err(
+                    "DB_ERROR",
+                    sanitize_error_message(exc, "Failed to update asset record"),
+                )
+            )
 
         return _json_response(Result.Ok({
             "renamed": 1,
@@ -921,7 +989,12 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
             if missing_ids:
                 return _json_response(Result.Err("NOT_FOUND", f"Assets not found: {sorted(missing_ids)}"))
         except Exception as exc:
-            return _json_response(Result.Err("DB_ERROR", _safe_error_message(exc, "Failed to validate assets")))
+            return _json_response(
+                Result.Err(
+                    "DB_ERROR",
+                    sanitize_error_message(exc, "Failed to validate assets"),
+                )
+            )
 
         # PHASE 2: Validate and resolve file paths
         validated_assets = []
@@ -962,7 +1035,12 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
                         file_deletion_errors.append({"asset_id": asset_info["id"], "error": str(del_res.error or "delete failed")})
                         break
                 except Exception as exc:
-                    file_deletion_errors.append({"asset_id": asset_info["id"], "error": f"{exc}"})
+                    file_deletion_errors.append(
+                        {
+                            "asset_id": asset_info["id"],
+                            "error": sanitize_error_message(exc, "File deletion failed"),
+                        }
+                    )
                     break
 
         if file_deletion_errors:
@@ -990,7 +1068,12 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
             return _json_response(db_res)
         except Exception as exc:
             logger.error("Database deletion failed: %s", exc)
-            return _json_response(Result.Err("DB_ERROR", f"Failed to delete asset records: {exc}"))
+            return _json_response(
+                Result.Err(
+                    "DB_ERROR",
+                    sanitize_error_message(exc, "Failed to delete asset records"),
+                )
+            )
 
     @routes.post("/mjr/am/assets/rename")
     async def rename_asset_endpoint(request):

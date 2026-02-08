@@ -1,4 +1,3 @@
-import pytest
 from backend.features.geninfo.parser import parse_geninfo_from_prompt
 
 def test_qwen_integration_payload():

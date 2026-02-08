@@ -1,5 +1,4 @@
 import pytest
-import os
 
 
 from backend.routes.core.security import _check_write_access

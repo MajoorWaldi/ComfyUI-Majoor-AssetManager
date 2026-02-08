@@ -1,6 +1,7 @@
 import { updateAssetRating } from "../../../api/client.js";
 import { ASSET_RATING_CHANGED_EVENT } from "../../../app/events.js";
 import { comfyToast } from "../../../app/toast.js";
+import { t } from "../../../app/i18n.js";
 
 const EVENT_NAME = ASSET_RATING_CHANGED_EVENT;
 
@@ -53,12 +54,12 @@ export function createRatingHotkeysController({ gridContainer, createRatingBadge
         try {
             const result = await updateAssetRating(assetId, rating);
             if (!result?.ok) {
-                comfyToast(result?.error || "Failed to update rating", "error");
+                comfyToast(result?.error || t("toast.ratingUpdateFailed"), "error");
                 return;
             }
-            comfyToast(`Rating set to ${rating} stars`, "success", 1500);
-        } catch (err) {
-            comfyToast("Error updating rating", "error");
+            comfyToast(t("toast.ratingSetN", { n: rating }), "success", 1500);
+        } catch {
+            comfyToast(t("toast.ratingUpdateError"), "error");
             return;
         }
 

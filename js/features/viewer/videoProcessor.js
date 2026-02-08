@@ -9,7 +9,7 @@ export function createVideoProcessor({
     disableWebGL,
     getGradeParams,
     isDefaultGrade,
-    tonemap,
+    _tonemap,
     maxProcPixelsVideo,
     throttleFps,
     safeAddListener,

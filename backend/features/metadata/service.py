@@ -6,7 +6,6 @@ import logging
 import os
 import time
 import functools
-from pathlib import Path
 from typing import Dict, Any, Optional
 
 from ...shared import Result, ErrorCode, get_logger, classify_file, log_structured
@@ -20,6 +19,7 @@ from .extractors import (
     extract_video_metadata,
     extract_rating_tags_from_exif,
 )
+from ..audio import extract_audio_metadata
 from ..geninfo.parser import parse_geninfo_from_prompt
 from .parsing_utils import parse_auto1111_params
 
@@ -279,7 +279,12 @@ class MetadataService:
                     allow_ffprobe=allow_ffprobe,
                 )
             elif kind == "audio":
-                return await self._extract_audio_metadata(file_path, scan_id=scan_id, allow_exif=allow_exif)
+                return await self._extract_audio_metadata(
+                    file_path,
+                    scan_id=scan_id,
+                    allow_exif=allow_exif,
+                    allow_ffprobe=allow_ffprobe,
+                )
             else:
                 return Result.Ok({
                     "file_info": self._get_file_info(file_path),
@@ -517,40 +522,82 @@ class MetadataService:
         file_path: str,
         scan_id: Optional[str] = None,
         allow_exif: bool = True,
+        allow_ffprobe: bool = True,
     ) -> Result[Dict[str, Any]]:
         """Extract metadata from audio file."""
-        if not allow_exif:
-            return Result.Ok({
-                "file_info": self._get_file_info(file_path),
-                "exif": None,
-                "quality": "none"
-            }, quality="none")
+        if not allow_exif and not allow_ffprobe:
+            return Result.Ok(
+                {
+                    "file_info": self._get_file_info(file_path),
+                    "exif": None,
+                    "ffprobe": None,
+                    "quality": "none",
+                },
+                quality="none",
+            )
 
-        exif_start = time.perf_counter()
-        exif_result = await asyncio.to_thread(self.exiftool.read, file_path)
-        exif_duration = time.perf_counter() - exif_start
-        exif_data = exif_result.data if exif_result.ok else None
-        if not exif_result.ok:
+        exif_data = None
+        ffprobe_data = None
+        exif_duration = 0.0
+        ffprobe_duration = 0.0
+
+        if allow_exif:
+            exif_start = time.perf_counter()
+            exif_result = await asyncio.to_thread(self.exiftool.read, file_path)
+            exif_duration = time.perf_counter() - exif_start
+            exif_data = exif_result.data if exif_result.ok else None
+            if not exif_result.ok:
+                self._log_metadata_issue(
+                    logging.WARNING,
+                    "ExifTool failed while reading audio metadata",
+                    file_path,
+                    scan_id=scan_id,
+                    tool="exiftool",
+                    error=exif_result.error,
+                    duration_seconds=exif_duration,
+                )
+
+        if allow_ffprobe:
+            ffprobe_start = time.perf_counter()
+            ffprobe_result = await asyncio.to_thread(self.ffprobe.read, file_path)
+            ffprobe_duration = time.perf_counter() - ffprobe_start
+            ffprobe_data = ffprobe_result.data if ffprobe_result.ok else None
+            if not ffprobe_result.ok:
+                self._log_metadata_issue(
+                    logging.WARNING,
+                    "FFprobe failed while reading audio metadata",
+                    file_path,
+                    scan_id=scan_id,
+                    tool="ffprobe",
+                    error=ffprobe_result.error,
+                    duration_seconds=ffprobe_duration,
+                )
+
+        metadata_result = extract_audio_metadata(file_path, exif_data=exif_data, ffprobe_data=ffprobe_data)
+        if not metadata_result.ok:
             self._log_metadata_issue(
                 logging.WARNING,
-                "ExifTool failed while reading audio metadata",
+                "Audio extractor failed",
                 file_path,
                 scan_id=scan_id,
-                tool="exiftool",
-                error=exif_result.error,
-                duration_seconds=exif_duration
+                tool="extractor",
+                error=metadata_result.error,
+                duration_seconds=(exif_duration + ffprobe_duration),
             )
-            return Result.Ok({
-                "file_info": self._get_file_info(file_path),
-                "exif": None,
-                "quality": "none"
-            }, quality="none")
+            return metadata_result
 
-        return Result.Ok({
+        combined = {
             "file_info": self._get_file_info(file_path),
             "exif": exif_data,
-            "quality": "partial" if exif_data else "none"
-        }, quality="partial" if exif_data else "none")
+            "ffprobe": ffprobe_data,
+            **(metadata_result.data or {}),
+        }
+        try:
+            await self._enrich_with_geninfo_async(combined)
+        except Exception:
+            pass
+        quality = metadata_result.meta.get("quality", "none")
+        return Result.Ok(combined, quality=quality)
 
     async def get_metadata_batch(
         self,
@@ -694,16 +741,23 @@ class MetadataService:
             else:
                 results[path] = metadata_result
 
-        # Audio (ExifTool only)
+        # Audio
         for path in audios:
             if path in results:
                 continue
             exif_data = _exif_for(path)
-            quality = "partial" if exif_data else "none"
-            results[path] = Result.Ok(
-                {"file_info": self._get_file_info(path), "exif": exif_data, "quality": quality},
-                quality=quality,
-            )
+            ffprobe_data = _ffprobe_for(path)
+            metadata_result = extract_audio_metadata(path, exif_data=exif_data, ffprobe_data=ffprobe_data)
+            if metadata_result.ok:
+                combined = {
+                    "file_info": self._get_file_info(path),
+                    "exif": exif_data,
+                    "ffprobe": ffprobe_data,
+                    **(metadata_result.data or {}),
+                }
+                await _finalize_ok(path, combined, metadata_result)
+            else:
+                results[path] = metadata_result
 
         # Other
         for path in others:

@@ -4,7 +4,6 @@ Calendar / date histogram endpoints.
 Used by the UI to mark days that have assets (per month).
 """
 import datetime
-import asyncio
 from pathlib import Path
 from aiohttp import web
 
@@ -20,7 +19,7 @@ except Exception:
 
 from backend.config import OUTPUT_ROOT
 from backend.custom_roots import resolve_custom_root
-from backend.shared import Result
+from backend.shared import Result, sanitize_error_message
 from ..core import _json_response, _require_services
 
 
@@ -113,7 +112,9 @@ def register_calendar_routes(routes: web.RouteTableDef) -> None:
                 filters=filters or None,
             )
         except Exception as exc:
-            return _json_response(Result.Err("DB_ERROR", f"Histogram failed: {exc}"))
+            return _json_response(
+                Result.Err("DB_ERROR", sanitize_error_message(exc, "Histogram failed"))
+            )
 
         if not res.ok:
             return _json_response(res)

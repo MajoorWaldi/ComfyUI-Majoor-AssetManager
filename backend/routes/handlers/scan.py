@@ -5,6 +5,7 @@ import asyncio
 import os
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -25,13 +26,13 @@ from backend.config import (
     OUTPUT_ROOT, 
     TO_THREAD_TIMEOUT_S, 
     INDEX_DIR_PATH, 
-    INDEX_DB_PATH, 
     COLLECTIONS_DIR_PATH
 )
 from backend.custom_roots import resolve_custom_root
-from backend.shared import Result, ErrorCode, get_logger
-from backend.utils import parse_bool
+from backend.shared import Result, get_logger, sanitize_error_message
+from backend.utils import env_float, parse_bool
 from backend.features.index.metadata_helpers import MetadataHelpers
+from backend.features.watcher_settings import get_watcher_settings, update_watcher_settings
 from backend.features.index.watcher_scope import (
     build_watch_paths,
     normalize_scope,
@@ -58,6 +59,10 @@ from ..core import (
 logger = get_logger(__name__)
 
 _DEFAULT_MAX_UPLOAD_SIZE_BYTES = 500 * 1024 * 1024
+_DB_CONSISTENCY_SAMPLE = int(os.environ.get("MJR_DB_CONSISTENCY_SAMPLE", "32"))
+_DB_CONSISTENCY_COOLDOWN_SECONDS = env_float("MJR_DB_CONSISTENCY_COOLDOWN_SECONDS", 3600.0)
+_LAST_CONSISTENCY_CHECK = 0.0
+_CONSISTENCY_LOCK = asyncio.Lock()
 _DEFAULT_MAX_RENAME_ATTEMPTS = 1000
 _DEFAULT_MAX_CONCURRENT_INDEX = 10
 _UPLOAD_READ_CHUNK_BYTES = 256 * 1024
@@ -68,6 +73,20 @@ _MAX_UPLOAD_SIZE = int(os.environ.get("MJR_MAX_UPLOAD_SIZE", str(_DEFAULT_MAX_UP
 _MAX_RENAME_ATTEMPTS = int(os.environ.get("MJR_MAX_RENAME_ATTEMPTS", str(_DEFAULT_MAX_RENAME_ATTEMPTS)))
 _MAX_CONCURRENT_INDEX = int(os.environ.get("MJR_MAX_CONCURRENT_INDEX", str(_DEFAULT_MAX_CONCURRENT_INDEX)))
 _INDEX_SEMAPHORE = asyncio.Semaphore(max(1, _MAX_CONCURRENT_INDEX))
+
+
+def _is_db_malformed_result(res: Any) -> bool:
+    try:
+        if not res or getattr(res, "ok", True):
+            return False
+        msg = str(getattr(res, "error", "") or "").lower()
+        return (
+            "database disk image is malformed" in msg
+            or "malformed database schema" in msg
+            or "file is not a database" in msg
+        )
+    except Exception:
+        return False
 
 
 def _allowed_upload_exts() -> set[str]:
@@ -127,7 +146,10 @@ async def _write_multipart_file_atomic(dest_dir: Path, filename: str, field) -> 
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
-        return Result.Err("UPLOAD_FAILED", f"Cannot create destination directory: {exc}")
+        return Result.Err(
+            "UPLOAD_FAILED",
+            sanitize_error_message(exc, "Cannot create destination directory"),
+        )
 
     safe_name = Path(str(filename)).name
     if not safe_name or "\x00" in safe_name or safe_name.startswith(".") or ".." in safe_name:
@@ -271,10 +293,74 @@ def _resolve_scan_root(directory: str) -> Result[Path]:
     try:
         resolved = Path(str(directory)).expanduser().resolve(strict=True)
     except (OSError, RuntimeError, ValueError) as exc:
-        return Result.Err("DIR_NOT_FOUND", f"Directory not found: {exc}")
+        return Result.Err(
+            "DIR_NOT_FOUND",
+            sanitize_error_message(exc, "Directory not found"),
+        )
     if not resolved.exists() or not resolved.is_dir():
         return Result.Err("DIR_NOT_FOUND", "Directory not found")
     return Result.Ok(resolved)
+
+
+async def _run_consistency_check(db: Any) -> None:
+    if not db:
+        return
+    try:
+        res = await db.aquery(
+            "SELECT id, filepath FROM assets WHERE filepath IS NOT NULL ORDER BY RANDOM() LIMIT ?",
+            (_DB_CONSISTENCY_SAMPLE,),
+        )
+    except Exception as exc:
+        logger.debug("Consistency check query failed: %s", exc)
+        return
+
+    if not res.ok or not isinstance(res.data, list):
+        return
+
+    missing = []
+    for row in res.data:
+        if not isinstance(row, dict):
+            continue
+        asset_id = row.get("id")
+        filepath = row.get("filepath")
+        if asset_id is None or not filepath:
+            continue
+        candidate = _normalize_path(str(filepath))
+        if not candidate or candidate.exists():
+            continue
+        missing.append((asset_id, str(filepath)))
+
+    if not missing:
+        return
+
+    logger.warning(
+        "Consistency check removed %d stale asset records",
+        len(missing),
+    )
+
+    try:
+        async with db.atransaction(mode="immediate"):
+            for asset_id, filepath in missing:
+                await db.aexecute("DELETE FROM assets WHERE id = ?", (asset_id,))
+                await db.aexecute("DELETE FROM scan_journal WHERE filepath = ?", (filepath,))
+                await db.aexecute("DELETE FROM metadata_cache WHERE filepath = ?", (filepath,))
+    except Exception as exc:
+        logger.warning("Failed to cleanup stale assets: %s", exc)
+
+
+async def _maybe_schedule_consistency_check(db: Any) -> None:
+    global _LAST_CONSISTENCY_CHECK
+    if not db:
+        return
+    now = time.time()
+    async with _CONSISTENCY_LOCK:
+        if (now - _LAST_CONSISTENCY_CHECK) < _DB_CONSISTENCY_COOLDOWN_SECONDS:
+            return
+        _LAST_CONSISTENCY_CHECK = now
+    try:
+        asyncio.create_task(_run_consistency_check(db))
+    except Exception as exc:
+        logger.debug("Failed to schedule consistency check: %s", exc)
 
 
 def register_scan_routes(routes: web.RouteTableDef) -> None:
@@ -490,10 +576,12 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
             error_result = Result.Err(
                 "SCAN_FAILED",
                 "Internal error while scanning assets",
-                detail=str(exc)
+                detail=sanitize_error_message(exc, "Internal error while scanning assets"),
             )
             return _json_response(error_result)
 
+        db = svc.get("db") if isinstance(svc, dict) else None
+        asyncio.create_task(_maybe_schedule_consistency_check(db))
         return _json_response(result)
 
     @routes.post("/mjr/am/index-files")
@@ -527,8 +615,6 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
         incremental = body.get("incremental", True)
         grouped_paths: Dict[Tuple[str, str, str], list] = {}
         recent_generated_paths: list[str] = []
-
-        pending_ops: list[dict[str, Any]] = []
 
         for item in files:
             if not isinstance(item, dict):
@@ -699,7 +785,9 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                 except asyncio.TimeoutError:
                     result = Result.Err("TIMEOUT", "Indexing timed out")
             except Exception as exc:
-                result = Result.Err("INDEX_FAILED", f"Indexing failed: {exc}")
+                result = Result.Err(
+                    "INDEX_FAILED", sanitize_error_message(exc, "Indexing failed")
+                )
             if not result.ok:
                 return _json_response(result)
 
@@ -734,102 +822,95 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                     insert_params.append((str(fname), str(s_name), s_src, int(gen_time)))
 
         if insert_params:
-             try:
-                 db_adapter = svc['db']
-                 
-                 async with db_adapter.atransaction() as tx:
-                     if not tx.ok:
-                         raise RuntimeError(tx.error or "Failed to begin transaction")
-                     # A. Create Temp Table for Batch Processing
-                     await db_adapter.aexecute("CREATE TEMPORARY TABLE IF NOT EXISTS temp_gen_updates (filename TEXT, subfolder TEXT, source TEXT, gen_time INTEGER)")
-                     await db_adapter.aexecute("DELETE FROM temp_gen_updates")
+            try:
+                db_adapter = svc['db']
 
-                     # B. Bulk Insert
-                     await db_adapter.aexecutemany("INSERT INTO temp_gen_updates (filename, subfolder, source, gen_time) VALUES (?, ?, ?, ?)", insert_params)
+                async with db_adapter.atransaction() as tx:
+                    if not tx.ok:
+                        raise RuntimeError(tx.error or "Failed to begin transaction")
+                    # A. Create Temp Table for Batch Processing
+                    await db_adapter.aexecute("CREATE TEMPORARY TABLE IF NOT EXISTS temp_gen_updates (filename TEXT, subfolder TEXT, source TEXT, gen_time INTEGER)")
+                    await db_adapter.aexecute("DELETE FROM temp_gen_updates")
 
-                     # C. Fetch joined data in ONE query
-                     # We need existing metadata to merge safely (read-modify-write pattern required for JSON in SQLite < 3.38 json_patch, or generally for safety)
-                     q_res = await db_adapter.aquery("""
-                        SELECT a.id, am.metadata_raw, t.gen_time 
+                    # B. Bulk Insert
+                    await db_adapter.aexecutemany("INSERT INTO temp_gen_updates (filename, subfolder, source, gen_time) VALUES (?, ?, ?, ?)", insert_params)
+
+                    # C. Fetch joined data in ONE query
+                    q_res = await db_adapter.aquery("""
+                        SELECT a.id, am.metadata_raw, t.gen_time
                         FROM temp_gen_updates t
                         JOIN assets a ON a.filename = t.filename AND a.subfolder = t.subfolder AND a.source = t.source
                         LEFT JOIN asset_metadata am ON a.id = am.asset_id
-                     """)
-                     
-                     if q_res.ok and q_res.data:
-                         import json
-                         upsert_params = []
-                         
-                         for row in q_res.data:
-                             asset_id = row["id"]
-                             raw = row["metadata_raw"]
-                             new_time = row["gen_time"]
-                             
-                             current_meta = {}
-                             if raw:
-                                 try:
-                                     current_meta = json.loads(raw)
-                                 except (json.JSONDecodeError, TypeError, ValueError):
-                                     pass
-                            
-                             # Merge updates
-                             current_meta["generation_time_ms"] = new_time
-                             new_json = json.dumps(current_meta, ensure_ascii=False)
-                             
-                             upsert_params.append((asset_id, new_json))
-                         
-                         # D. Bulk Upsert (INSERT or UPDATE)
-                         # Prefer per-asset locked writes using MetadataHelpers to avoid races
-                         # with other concurrent metadata writers (background enrichers, manual edits).
-                         if upsert_params:
-                             try:
-                                 from backend.features.index.metadata_helpers import MetadataHelpers
-                                 for asset_id, new_json in upsert_params:
-                                     try:
-                                         async with db_adapter.lock_for_asset(int(asset_id)):
-                                             # Load current metadata_raw for this asset (if any)
-                                             cur = await db_adapter.aquery("SELECT metadata_raw FROM asset_metadata WHERE asset_id = ? LIMIT 1", (int(asset_id),))
-                                             cur_meta = {}
-                                             if cur.ok and cur.data and cur.data[0].get("metadata_raw"):
-                                                 try:
-                                                     cur_meta = json.loads(cur.data[0].get("metadata_raw") or "{}")
-                                                 except Exception:
-                                                     cur_meta = {}
+                    """)
 
-                                             # Parse incoming partial metadata (e.g., {'generation_time_ms': 123})
-                                             incoming_meta = {}
-                                             try:
-                                                 incoming_meta = json.loads(new_json) if new_json else {}
-                                             except Exception:
-                                                 incoming_meta = {}
+                    if q_res.ok and q_res.data:
+                        import json
+                        upsert_params = []
 
-                                             # Merge conservatively: preserve existing keys and update with incoming values
-                                             merged = dict(cur_meta)
-                                             merged.update(incoming_meta)
+                        for row in q_res.data:
+                            asset_id = row["id"]
+                            raw = row["metadata_raw"]
+                            new_time = row["gen_time"]
 
-                                             # Use MetadataHelpers to write merged metadata safely (it handles quality/tags/flags)
-                                             await MetadataHelpers.write_asset_metadata_row(db_adapter, int(asset_id), Result.Ok(merged))
-                                     except Exception:
-                                         logger.debug("Failed to upsert generation time for asset %s", asset_id)
-                             except Exception:
-                                 # Fallback: if per-asset path fails for any reason, try the original bulk upsert SQL
-                                 try:
-                                     await db_adapter.aexecutemany("""
-                                         INSERT INTO asset_metadata (asset_id, metadata_raw)
-                                         VALUES (?, ?)
-                                         ON CONFLICT(asset_id) DO UPDATE SET
-                                             metadata_raw = excluded.metadata_raw
-                                     """, upsert_params)
-                                 except Exception:
-                                     logger.debug("Fallback SQL bulk upsert failed")
-                     
-                     # Cleanup
-                     await db_adapter.aexecute("DROP TABLE IF EXISTS temp_gen_updates")
-                 if not tx.ok:
-                     raise RuntimeError(tx.error or "Commit failed")
+                            current_meta = {}
+                            if raw:
+                                try:
+                                    current_meta = json.loads(raw)
+                                except (json.JSONDecodeError, TypeError, ValueError):
+                                    pass
 
-             except Exception as ex:
-                 logger.debug("Failed during batch metadata enhancement: %s", ex)
+                            # Merge updates
+                            current_meta["generation_time_ms"] = new_time
+                            new_json = json.dumps(current_meta, ensure_ascii=False)
+
+                            upsert_params.append((asset_id, new_json))
+
+                        # D. Bulk Upsert (INSERT or UPDATE)
+                        # Prefer per-asset locked writes using MetadataHelpers to avoid races
+                        # with other concurrent metadata writers (background enrichers, manual edits).
+                        if upsert_params:
+                            try:
+                                for asset_id, new_json in upsert_params:
+                                    try:
+                                        async with db_adapter.lock_for_asset(int(asset_id)):
+                                            cur = await db_adapter.aquery("SELECT metadata_raw FROM asset_metadata WHERE asset_id = ? LIMIT 1", (int(asset_id),))
+                                            cur_meta = {}
+                                            if cur.ok and cur.data and cur.data[0].get("metadata_raw"):
+                                                try:
+                                                    cur_meta = json.loads(cur.data[0].get("metadata_raw") or "{}")
+                                                except Exception:
+                                                    cur_meta = {}
+
+                                            incoming_meta = {}
+                                            try:
+                                                incoming_meta = json.loads(new_json) if new_json else {}
+                                            except Exception:
+                                                incoming_meta = {}
+
+                                            merged = dict(cur_meta)
+                                            merged.update(incoming_meta)
+
+                                            await MetadataHelpers.write_asset_metadata_row(db_adapter, int(asset_id), Result.Ok(merged))
+                                    except Exception:
+                                        logger.debug("Failed to upsert generation time for asset %s", asset_id)
+                            except Exception:
+                                try:
+                                    await db_adapter.aexecutemany("""
+                                        INSERT INTO asset_metadata (asset_id, metadata_raw)
+                                        VALUES (?, ?)
+                                        ON CONFLICT(asset_id) DO UPDATE SET
+                                            metadata_raw = excluded.metadata_raw
+                                    """, upsert_params)
+                                except Exception:
+                                    logger.debug("Fallback SQL bulk upsert failed")
+
+                    # Cleanup
+                    await db_adapter.aexecute("DROP TABLE IF EXISTS temp_gen_updates")
+                if not tx.ok:
+                    raise RuntimeError(tx.error or "Commit failed")
+
+            except Exception as ex:
+                logger.debug("Failed during batch metadata enhancement: %s", ex)
 
 
         try:
@@ -987,7 +1068,9 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                     reset_res = await db.areset()
             except Exception as exc:
                 logger.exception("Hard reset DB failed")
-                return _json_response(Result.Err("RESET_FAILED", f"Hard reset failed: {exc}"))
+                return _json_response(
+                    Result.Err("RESET_FAILED", sanitize_error_message(exc, "Hard reset failed"))
+                )
 
             if not reset_res.ok:
                 return _json_response(reset_res)
@@ -1025,7 +1108,12 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                         return _json_response(Result.Err("TIMEOUT", "Index reset scan timed out"))
                     except Exception as exc:
                         logger.exception("Index reset scan failed")
-                        return _json_response(Result.Err("RESET_FAILED", f"Index reset scan failed: {exc}"))
+                        return _json_response(
+                            Result.Err(
+                                "RESET_FAILED",
+                                sanitize_error_message(exc, "Index reset scan failed"),
+                            )
+                        )
 
                     if not result.ok:
                         return _json_response(result)
@@ -1149,10 +1237,44 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                 res = await _do_clears()
         except Exception as exc:
             logger.exception("Index reset clear phase failed")
-            return _json_response(Result.Err("RESET_FAILED", f"Index reset failed during clear phase: {exc}"))
+            return _json_response(
+                Result.Err(
+                    "RESET_FAILED",
+                    sanitize_error_message(exc, "Index reset failed during clear phase"),
+                )
+            )
 
         if not res.ok:
-            return _json_response(res)
+            # Fallback: if scoped clear hits a malformed DB, escalate to hard adapter reset.
+            if _is_db_malformed_result(res):
+                try:
+                    if scan_lock is not None and hasattr(scan_lock, "__aenter__"):
+                        async with scan_lock:
+                            reset_res = await db.areset()
+                    else:
+                        reset_res = await db.areset()
+                except Exception as exc:
+                    logger.exception("Fallback hard reset after malformed DB failed")
+                    return _json_response(
+                        Result.Err(
+                            "RESET_FAILED",
+                            sanitize_error_message(exc, "Malformed DB and fallback hard reset failed"),
+                        )
+                    )
+                if not reset_res.ok:
+                    return _json_response(reset_res)
+                cleared = {
+                    "scan_journal": None,
+                    "metadata_cache": None,
+                    "asset_metadata": None,
+                    "assets": None,
+                    "hard_reset_db": True,
+                    "fallback_reason": "malformed_db",
+                    "file_ops": (reset_res.meta or {}),
+                }
+                # Continue with optional reindex path below.
+            else:
+                return _json_response(res)
 
         # FULL RESET CLEANUP: VACUUM and Physical Files
         if scope == "all" and (clear_scan_journal or clear_metadata_cache):
@@ -1211,7 +1333,12 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                     return _json_response(Result.Err("TIMEOUT", "Index reset scan timed out"))
                 except Exception as exc:
                     logger.exception("Index reset scan failed")
-                    return _json_response(Result.Err("RESET_FAILED", f"Index reset scan failed: {exc}"))
+                    return _json_response(
+                        Result.Err(
+                            "RESET_FAILED",
+                            sanitize_error_message(exc, "Index reset scan failed"),
+                        )
+                    )
 
                 if not result.ok:
                     return _json_response(result)
@@ -1246,7 +1373,9 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                     return _json_response(Result.Err("DB_ERROR", tx.error or "Commit failed"))
             except Exception as exc:
                 logger.exception("FTS rebuild failed during index reset")
-                return _json_response(Result.Err("DB_ERROR", f"FTS rebuild failed: {exc}"))
+                return _json_response(
+                    Result.Err("DB_ERROR", sanitize_error_message(exc, "FTS rebuild failed"))
+                )
             if not rebuild_result.ok:
                 return _json_response(rebuild_result)
             rebuild_status = True
@@ -1451,7 +1580,9 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
 
                         results.append({"ok": True})
                     except Exception as exc:
-                        results.append({"ok": False, "error": str(exc)})
+                        results.append(
+                            {"ok": False, "error": sanitize_error_message(exc, "Failed to stage file")}
+                        )
                 return results
 
             try:
@@ -1465,7 +1596,15 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
 
             for op, r in zip(pending_ops, results):
                 if not isinstance(r, dict) or not r.get("ok"):
-                    errors.append({"file": op.get("raw_filename"), "error": str((r or {}).get("error") or "Failed to stage file")})
+                    errors.append(
+                        {
+                            "file": op.get("raw_filename"),
+                            "error": sanitize_error_message(
+                                (r or {}).get("error") or "Failed to stage file",
+                                "Failed to stage file",
+                            ),
+                        }
+                    )
                     continue
                 try:
                     dest_path = Path(str(op.get("dst") or ""))
@@ -1657,6 +1796,83 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                 await watcher.stop()
                 svc["watcher"] = None
             return _json_response(Result.Ok({"enabled": False, "directories": []}))
+
+    @routes.get("/mjr/am/watcher/settings")
+    async def watcher_settings_get(request):
+        svc, error_result = await _require_services()
+        if error_result:
+            return _json_response(error_result)
+        try:
+            settings = get_watcher_settings()
+        except Exception as exc:
+            logger.debug("Failed to read watcher settings: %s", exc)
+            return _json_response(Result.Err("DEGRADED", "Watcher settings unavailable"))
+        return _json_response(
+            Result.Ok(
+                {
+                    "debounce_ms": settings.debounce_ms,
+                    "dedupe_ttl_ms": settings.dedupe_ttl_ms,
+                }
+            )
+        )
+
+    @routes.post("/mjr/am/watcher/settings")
+    async def watcher_settings_update(request):
+        svc, error_result = await _require_services()
+        if error_result:
+            return _json_response(error_result)
+
+        csrf = _csrf_error(request)
+        if csrf:
+            return _json_response(Result.Err("CSRF", csrf))
+
+        body_res = await _read_json(request)
+        if not body_res.ok:
+            return _json_response(body_res)
+        body = body_res.data or {}
+
+        def _parse_int(name: str) -> Optional[int]:
+            if name not in body:
+                return None
+            value = body.get(name)
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"Invalid value for {name}")
+
+        try:
+            debounce_ms = _parse_int("debounce_ms")
+            dedupe_ttl_ms = _parse_int("dedupe_ttl_ms")
+        except ValueError as exc:
+            return _json_response(Result.Err("INVALID_INPUT", str(exc)))
+
+        if debounce_ms is None and dedupe_ttl_ms is None:
+            return _json_response(Result.Err("INVALID_INPUT", "No watcher settings provided"))
+
+        try:
+            settings = update_watcher_settings(
+                debounce_ms=debounce_ms,
+                dedupe_ttl_ms=dedupe_ttl_ms,
+            )
+        except Exception as exc:
+            return _json_response(Result.Err("DEGRADED", safe_error_message(exc, "Failed to update watcher settings")))
+
+        watcher = svc.get("watcher")
+        refresh_fn = getattr(watcher, "refresh_runtime_settings", None)
+        if callable(refresh_fn):
+            try:
+                refresh_fn()
+            except Exception as exc:
+                logger.debug("Failed to refresh watcher settings: %s", exc)
+
+        return _json_response(
+            Result.Ok(
+                {
+                    "debounce_ms": settings.debounce_ms,
+                    "dedupe_ttl_ms": settings.dedupe_ttl_ms,
+                }
+            )
+        )
 
     @routes.post("/mjr/am/watcher/scope")
     async def watcher_scope(request):

@@ -182,8 +182,6 @@ function computeWaveformFromImageData(
 
         const step = Math.max(1, Math.floor(sampleStep));
         for (let y = 0; y < h; y += step) {
-            const ny = y / (h - 1 || 1);
-            const row = Math.max(0, Math.min(gridH - 1, Math.floor(ny * (gridH - 1))));
             const base = y * w * 4;
             for (let x = 0; x < w; x += step) {
                 const nx = x / (w - 1 || 1);

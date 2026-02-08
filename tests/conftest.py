@@ -1,7 +1,4 @@
 import sys
-from pathlib import Path
-import asyncio
-import pytest
 import pytest_asyncio
 
 from .repo_root import REPO_ROOT

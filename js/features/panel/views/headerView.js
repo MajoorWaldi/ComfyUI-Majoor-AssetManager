@@ -7,7 +7,6 @@ import {
     getStoredVersionUpdateState,
 } from "../../../app/versionCheck.js";
 
-const DEFAULT_REPO_URL = "https://github.com/MajoorWaldi/ComfyUI-Majoor-AssetsManager";
 const METADATA_URL = new URL("../../../comfyui_extension.json", import.meta.url);
 let _extensionMetadataPromise = null;
 
@@ -88,7 +87,6 @@ if (window?.MajoorAssetsManagerBranch) {
 }
 const IS_NIGHTLY = branch === "nightly";
 const VERSION = IS_NIGHTLY ? "nightly" : "?";
-const REPO_URL = DEFAULT_REPO_URL;
 
 export function createHeaderView() {
     const header = document.createElement("div");

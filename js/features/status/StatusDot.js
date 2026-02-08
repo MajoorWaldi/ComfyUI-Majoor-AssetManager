@@ -2,7 +2,7 @@
  * Status Dot Feature - Health indicator
  */
 
-import { get, getToolsStatus, post, resetIndex, getWatcherStatus } from "../../api/client.js";
+import { get, getToolsStatus, post, resetIndex, getWatcherStatus, forceDeleteDb } from "../../api/client.js";
 import { ENDPOINTS } from "../../api/endpoints.js";
 import { APP_CONFIG } from "../../app/config.js";
 import { comfyToast } from "../../app/toast.js";
@@ -20,6 +20,20 @@ const TOOL_CAPABILITIES = [
         hintKey: "tool.ffprobe.hint"
     }
 ];
+
+function formatBytes(bytes) {
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n <= 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let value = n;
+    let idx = 0;
+    while (value >= 1024 && idx < units.length - 1) {
+        value /= 1024;
+        idx += 1;
+    }
+    const precision = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+    return `${value.toFixed(precision)} ${units[idx]}`;
+}
 
 function setStatusLines(statusText, lines, footerText = null) {
     if (!statusText) return;
@@ -178,7 +192,6 @@ export function createStatusIndicator(options = {}) {
         resetBtn.textContent = t("btn.resetting");
         
         // Status indicator feedback
-        const prevColor = statusDot.style.background;
         statusDot.style.background = "var(--mjr-status-warning, #FFA726)"; // Orange (working)
 
         try {
@@ -199,15 +212,27 @@ export function createStatusIndicator(options = {}) {
                 rebuild_fts: true,
             });
             if (res?.ok) {
-                statusDot.style.background = "var(--mjr-status-success, #4CAF50)"; // Green (success)
+                statusDot.style.background = "var(--mjr-status-success, #4CAF50)";
                 comfyToast(t("toast.resetStarted"), "success");
             } else {
-                statusDot.style.background = "var(--mjr-status-error, #f44336)"; // Red (error)
-                comfyToast(res?.error || t("toast.resetFailed"), "error");
+                statusDot.style.background = "var(--mjr-status-error, #f44336)";
+                const err = String(res?.error || "").toLowerCase();
+                const isCorrupt = err.includes("malform") || err.includes("corrupt") || err.includes("disk image") || res?.code === "SERVICE_UNAVAILABLE" || res?.code === "QUERY_FAILED";
+                if (isCorrupt) {
+                    comfyToast(t("toast.resetFailedCorrupt"), "error", 8000);
+                } else {
+                    comfyToast(res?.error || t("toast.resetFailed"), "error");
+                }
             }
         } catch (error) {
-            statusDot.style.background = "var(--mjr-status-error, #f44336)"; // Red (error)
-            comfyToast(error?.message || t("toast.resetFailed"), "error");
+            statusDot.style.background = "var(--mjr-status-error, #f44336)";
+            const msg = String(error?.message || "").toLowerCase();
+            const isCorrupt = msg.includes("malform") || msg.includes("corrupt") || msg.includes("disk image");
+            if (isCorrupt) {
+                comfyToast(t("toast.resetFailedCorrupt"), "error", 8000);
+            } else {
+                comfyToast(error?.message || t("toast.resetFailed"), "error");
+            }
         } finally {
             resetBtn.disabled = false;
             resetBtn.textContent = originalText;
@@ -215,6 +240,65 @@ export function createStatusIndicator(options = {}) {
     };
 
     actionsRow.appendChild(resetBtn);
+
+    const deleteDbBtn = document.createElement("button");
+    deleteDbBtn.type = "button";
+    deleteDbBtn.textContent = t("btn.deleteDb");
+    deleteDbBtn.title = "Force-delete the database, unlock files, and rebuild from scratch.";
+    deleteDbBtn.style.cssText = `
+        padding: 5px 12px;
+        font-size: 11px;
+        border-radius: 6px;
+        border: 1px solid rgba(255,80,80,0.4);
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        transition: border 0.2s, background 0.2s;
+    `;
+    deleteDbBtn.onmouseenter = () => {
+        deleteDbBtn.style.borderColor = "rgba(255,80,80,0.8)";
+        deleteDbBtn.style.background = "rgba(255,80,80,0.12)";
+    };
+    deleteDbBtn.onmouseleave = () => {
+        deleteDbBtn.style.borderColor = "rgba(255,80,80,0.4)";
+        deleteDbBtn.style.background = "transparent";
+    };
+    deleteDbBtn.onclick = async (event) => {
+        event.stopPropagation();
+
+        const confirmed = confirm(t("dialog.dbDelete.confirm"));
+        if (!confirmed) return;
+
+        comfyToast(t("toast.dbDeleteTriggered"), "warning", 3000);
+
+        const originalText = deleteDbBtn.textContent;
+        deleteDbBtn.disabled = true;
+        deleteDbBtn.textContent = t("btn.deletingDb");
+        resetBtn.disabled = true;
+
+        statusDot.style.background = "var(--mjr-status-warning, #FFA726)";
+
+        try {
+            const res = await forceDeleteDb();
+            if (res?.ok) {
+                globalThis._mjrCorruptToastShown = false;
+                statusDot.style.background = "var(--mjr-status-success, #4CAF50)";
+                comfyToast(t("toast.dbDeleteSuccess"), "success");
+            } else {
+                statusDot.style.background = "var(--mjr-status-error, #f44336)";
+                comfyToast(res?.error || t("toast.dbDeleteFailed"), "error");
+            }
+        } catch (error) {
+            statusDot.style.background = "var(--mjr-status-error, #f44336)";
+            comfyToast(error?.message || t("toast.dbDeleteFailed"), "error");
+        } finally {
+            deleteDbBtn.disabled = false;
+            deleteDbBtn.textContent = originalText;
+            resetBtn.disabled = false;
+        }
+    };
+
+    actionsRow.appendChild(deleteDbBtn);
     body.appendChild(actionsRow);
 
     section.appendChild(header);
@@ -517,6 +601,9 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
         const lastScanText = lastScanRaw ? new Date(lastScanRaw).toLocaleString() : "N/A";
         const toolAvailability = counters.tool_availability || {};
         const toolPaths = counters.tool_paths || {};
+        const dbSizeLine = t("status.dbSize", "Database size: {size}", {
+            size: formatBytes(counters.db_size_bytes || 0),
+        });
         let watcherInfo = counters.watcher;
         try {
             if (!watcherInfo || typeof watcherInfo.enabled !== "boolean") {
@@ -550,7 +637,7 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
             setStatusWithHint(
                 statusText,
                 t("status.noAssets", `No assets indexed yet (${scopeLabel})`, { scope: scopeLabel }),
-                [t("status.clickToScan", "Click the dot to start a scan"), watcherLine].filter(Boolean).join("  •  ")
+                [t("status.clickToScan", "Click the dot to start a scan"), dbSizeLine, watcherLine].filter(Boolean).join("  |  ")
             );
         } else {
             // Assets indexed - green
@@ -561,6 +648,7 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
                     t("status.assetsIndexed", `${totalAssets.toLocaleString()} assets indexed (${scopeLabel})`, { count: totalAssets.toLocaleString(), scope: scopeLabel }),
                     t("status.imagesVideos", `Images: ${counters.images || 0}  -  Videos: ${counters.videos || 0}`, { images: counters.images || 0, videos: counters.videos || 0 }),
                     t("status.withWorkflows", `With workflows: ${withWorkflows}  -  Generation data: ${withGenerationData}`, { workflows: withWorkflows, gendata: withGenerationData }),
+                    dbSizeLine,
                     watcherLine,
                 ],
                 t("status.lastScan", `Last scan: ${lastScanText}`, { date: lastScanText })
@@ -579,10 +667,24 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
                 t("status.apiNotFoundHint", "Backend routes are not loaded. Restart ComfyUI and check the terminal for Majoor import errors.")
             );
         } else {
-            setStatusLines(statusText, [result.error || t("status.errorChecking", "Error checking status")]);
+            const errMsg = String(result?.error || "").toLowerCase();
+            const isCorrupt = errMsg.includes("malform") || errMsg.includes("corrupt") || errMsg.includes("disk image");
+            if (isCorrupt) {
+                setStatusWithHint(
+                    statusText,
+                    t("status.dbCorrupted"),
+                    t("status.dbCorruptedHint")
+                );
+                if (!globalThis._mjrCorruptToastShown) {
+                    globalThis._mjrCorruptToastShown = true;
+                    comfyToast(t("toast.resetFailedCorrupt"), "error", 8000);
+                }
+            } else {
+                setStatusLines(statusText, [result.error || t("status.errorChecking", "Error checking status")]);
+            }
         }
         if (result.code === "SERVICE_UNAVAILABLE") {
-            const retryBtn = createRetryButton(statusDot, statusText, capabilitiesSection);
+            const retryBtn = createRetryButton(statusDot, statusText, capabilitiesSection, scanTarget);
             statusText.appendChild(document.createElement("br"));
             statusText.appendChild(retryBtn);
         }
@@ -590,7 +692,7 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
     return null;
 }
 
-function createRetryButton(statusDot, statusText, capabilitiesSection = null) {
+function createRetryButton(statusDot, statusText, capabilitiesSection = null, scanTarget = null) {
     const button = document.createElement("button");
     button.textContent = t("btn.retryServices");
     button.style.cssText = `
@@ -611,8 +713,7 @@ function createRetryButton(statusDot, statusText, capabilitiesSection = null) {
         button.disabled = false;
         button.textContent = t("btn.retryServices");
         if (retryResult.ok) {
-            const target = typeof getScanTarget === "function" ? getScanTarget() : null;
-            updateStatus(statusDot, statusText, capabilitiesSection, target);
+            updateStatus(statusDot, statusText, capabilitiesSection, scanTarget);
         } else {
             setStatusLines(statusText, [retryResult.error || t("status.retryFailed", "Retry failed")]);
             statusText.appendChild(document.createElement("br"));

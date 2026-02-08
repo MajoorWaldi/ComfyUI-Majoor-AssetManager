@@ -34,6 +34,7 @@ export function createGenerationSection(asset) {
             if (obj.models || obj.model || obj.checkpoint || obj.loras) return true;
             if (obj.sampler || obj.sampler_name || obj.steps || obj.cfg || obj.cfg_scale || obj.scheduler) return true;
             if (obj.seed || obj.width || obj.height || obj.denoise || obj.denoising || obj.clip_skip) return true;
+            if (typeof obj.lyrics === "string" && obj.lyrics.trim()) return true;
             return false;
         } catch {
             return false;
@@ -125,6 +126,9 @@ export function createGenerationSection(asset) {
 
     if (typeof cleaned.negative === "string" && cleaned.negative.trim()) {
         container.appendChild(createInfoBox("Negative Prompt", cleaned.negative, "#F44336"));
+    }
+    if (typeof metadata.lyrics === "string" && metadata.lyrics.trim()) {
+        container.appendChild(createInfoBox("Lyrics", metadata.lyrics, "#00BCD4"));
     }
 
     // Multi-output workflows: Show all distinct prompts
@@ -244,6 +248,9 @@ export function createGenerationSection(asset) {
     if (metadata.scheduler) samplingData.push({ label: "Scheduler", value: metadata.scheduler });
     if (samplingData.length > 0) {
         container.appendChild(createParametersBox("Sampling", samplingData, "#FF9800"));
+    }
+    if (metadata.lyrics_strength !== undefined && metadata.lyrics_strength !== null) {
+        container.appendChild(createParametersBox("Audio", [{ label: "Lyrics Strength", value: metadata.lyrics_strength }], "#00BCD4"));
     }
 
     // SEED - Highlighted prominently for easy comparison in A/B and side-by-side modes

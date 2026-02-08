@@ -8,26 +8,59 @@ handles ComfyUI executed events.
 import asyncio
 import os
 import time
+from collections import deque
 from pathlib import Path
 from threading import Lock
-from typing import Dict, Set, Optional, Callable, Awaitable
+from typing import Deque, Dict, Set, Tuple, Optional, Callable, Awaitable
 
 from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler, FileCreatedEvent, FileModifiedEvent, DirCreatedEvent
+from watchdog.events import FileSystemEventHandler, FileCreatedEvent, DirCreatedEvent
 
 from ...shared import get_logger, EXTENSIONS
-from ...config import WATCHER_DEBOUNCE_MS, WATCHER_DEDUPE_TTL_MS
+from ...config import (
+    WATCHER_DEBOUNCE_MS,
+    WATCHER_DEDUPE_TTL_MS,
+    WATCHER_FLUSH_MAX_FILES,
+    WATCHER_MAX_FILE_SIZE_BYTES,
+    WATCHER_MAX_FLUSH_CONCURRENCY,
+    WATCHER_STREAM_ALERT_COOLDOWN_SECONDS,
+    WATCHER_STREAM_ALERT_THRESHOLD,
+    WATCHER_STREAM_ALERT_WINDOW_SECONDS,
+    WATCHER_PENDING_MAX,
+)
+from ..watcher_settings import get_watcher_settings
 
 logger = get_logger(__name__)
+
+# Extensions explicitly excluded even if they ever appear in EXTENSIONS
+EXCLUDED_EXTENSIONS: Set[str] = {".psd", ".json", ".txt", ".csv", ".db", ".sqlite", ".log"}
 
 # Supported extensions (flattened)
 SUPPORTED_EXTENSIONS: Set[str] = set()
 try:
-    for exts in (EXTENSIONS or {}).values():
-        for ext in (exts or []):
-            SUPPORTED_EXTENSIONS.add(str(ext).lower())
+    for kind in ("image", "video", "audio"):
+        for ext in (EXTENSIONS or {}).get(kind, []):
+            ext_lower = str(ext).lower()
+            if ext_lower not in EXCLUDED_EXTENSIONS:
+                SUPPORTED_EXTENSIONS.add(ext_lower)
 except Exception:
-    SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm"}
+    SUPPORTED_EXTENSIONS = {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".gif",
+        ".mp4",
+        ".mov",
+        ".webm",
+        ".mkv",
+        ".wav",
+        ".mp3",
+        ".flac",
+        ".ogg",
+        ".m4a",
+        ".aac",
+    }
 
 # Directories to always ignore (case-insensitive on Windows)
 IGNORED_DIRS = {
@@ -45,7 +78,12 @@ MIN_FILE_SIZE = 100
 _RECENT_GENERATED_TTL_S = 30.0
 _RECENT_GENERATED_LOCK = Lock()
 _RECENT_GENERATED: Dict[str, float] = {}
-_MAX_PENDING_FILES = int(os.environ.get("MJR_WATCHER_PENDING_MAX", "5000") or 5000)
+_MAX_PENDING_FILES = max(0, WATCHER_PENDING_MAX)
+_STREAM_EVENTS: Deque[Tuple[float, int]] = deque()
+_STREAM_TOTAL_FILES = 0
+_STREAM_LOCK = Lock()
+_LAST_STREAM_ALERT_TIME = 0.0
+_PENDING_LIMIT_WARN_INTERVAL = 30.0
 
 
 class DebouncedWatchHandler(FileSystemEventHandler):
@@ -64,6 +102,7 @@ class DebouncedWatchHandler(FileSystemEventHandler):
         loop: asyncio.AbstractEventLoop,
         debounce_ms: int = 500,
         dedupe_ttl_ms: int = 3000,
+        flush_concurrency: int = 1,
     ):
         super().__init__()
         self._on_files_ready = on_files_ready
@@ -75,6 +114,10 @@ class DebouncedWatchHandler(FileSystemEventHandler):
         self._pending: Dict[str, float] = {}  # filepath -> timestamp
         self._recent: Dict[str, float] = {}   # filepath -> last processed timestamp
         self._flush_timer: Optional[asyncio.TimerHandle] = None
+        concurrency = max(1, flush_concurrency or 1)
+        self._flush_semaphore = asyncio.Semaphore(concurrency)
+        self._last_pending_warning = 0.0
+        self._refresh_runtime_settings()
 
     def _is_ignored_path(self, path: str) -> bool:
         """Check if path is inside an ignored directory."""
@@ -102,6 +145,34 @@ class DebouncedWatchHandler(FileSystemEventHandler):
         except Exception:
             return path
 
+    def _refresh_runtime_settings(self) -> None:
+        try:
+            settings = get_watcher_settings()
+            self._debounce_s = max(0.05, settings.debounce_ms / 1000.0)
+            self._dedupe_ttl_s = max(0.1, settings.dedupe_ttl_ms / 1000.0)
+        except Exception:
+            pass
+
+    def refresh_runtime_settings(self) -> None:
+        """Expose runtime tuning for external callers."""
+        self._refresh_runtime_settings()
+
+    def _maybe_log_pending_limit(self, path: str) -> None:
+        now = time.time()
+        if _MAX_PENDING_FILES <= 0:
+            return
+        if (now - self._last_pending_warning) < _PENDING_LIMIT_WARN_INTERVAL:
+            return
+        try:
+            logger.warning(
+                "Watcher pending queue capped at %d entries; skipping %s",
+                _MAX_PENDING_FILES,
+                path,
+            )
+        except Exception:
+            pass
+        self._last_pending_warning = now
+
     def on_created(self, event):
         if isinstance(event, DirCreatedEvent):
             return
@@ -118,6 +189,8 @@ class DebouncedWatchHandler(FileSystemEventHandler):
         """Queue a file for indexing with deduplication."""
         if not path:
             return
+
+        self._refresh_runtime_settings()
 
         # Fast rejections
         if self._is_ignored_path(path):
@@ -139,6 +212,7 @@ class DebouncedWatchHandler(FileSystemEventHandler):
 
             # Prevent unbounded memory growth under bursts.
             if _MAX_PENDING_FILES > 0 and len(self._pending) >= _MAX_PENDING_FILES:
+                self._maybe_log_pending_limit(path)
                 return
 
             # Add to pending batch
@@ -150,6 +224,7 @@ class DebouncedWatchHandler(FileSystemEventHandler):
     def _schedule_flush(self):
         """Schedule a debounced flush of pending files."""
         try:
+            self._refresh_runtime_settings()
             if self._flush_timer:
                 self._flush_timer.cancel()
             self._flush_timer = self._loop.call_later(
@@ -161,6 +236,7 @@ class DebouncedWatchHandler(FileSystemEventHandler):
 
     async def _flush(self):
         """Flush pending files to the indexer."""
+        self._refresh_runtime_settings()
         with self._lock:
             if not self._pending:
                 return
@@ -170,37 +246,56 @@ class DebouncedWatchHandler(FileSystemEventHandler):
             self._pending.clear()
             self._flush_timer = None
 
-        # Filter out files that are too small (still being written), vanished,
-        # or recently indexed via the frontend executed-event path.
-        files = []
-        for f in candidates:
-            if _is_recent_generated(f):
-                continue
+        async with self._flush_semaphore:
+            _record_flush_volume(len(candidates))
+
+            # Filter out files that are too small (still being written), vanished,
+            # or recently indexed via the frontend executed-event path.
+            # TOCTOU: re-validate extension at flush time in case file was renamed.
+            files = []
+            for f in candidates:
+                if _is_recent_generated(f):
+                    continue
+                try:
+                    ext = Path(f).suffix.lower()
+                    if ext in EXCLUDED_EXTENSIONS or ext not in SUPPORTED_EXTENSIONS:
+                        continue
+                except Exception:
+                    continue
+                try:
+                    size = os.path.getsize(f)
+                except OSError:
+                    continue
+                if size < MIN_FILE_SIZE:
+                    continue
+                max_size = WATCHER_MAX_FILE_SIZE_BYTES
+                if max_size > 0 and size > max_size:
+                    logger.debug("Watcher skipping oversized file %s (%d bytes > %d)", f, size, max_size)
+                    continue
+                files.append(f)
+
+            if not files:
+                return
+
+            files = _apply_flush_limit(files)
+            if not files:
+                return
+
+            # Mark as recently processed
+            with self._lock:
+                now = time.time()
+                for f in files:
+                    self._recent[f] = now
+
+                # Prune old entries from recent
+                to_remove = [k for k, v in self._recent.items() if (now - v) > self._dedupe_ttl_s * 2]
+                for k in to_remove:
+                    self._recent.pop(k, None)
+
             try:
-                size = os.path.getsize(f)
-                if size >= MIN_FILE_SIZE:
-                    files.append(f)
-            except OSError:
-                pass  # File vanished or inaccessible
-
-        if not files:
-            return
-
-        # Mark as recently processed
-        with self._lock:
-            now = time.time()
-            for f in files:
-                self._recent[f] = now
-
-            # Prune old entries from recent
-            to_remove = [k for k, v in self._recent.items() if (now - v) > self._dedupe_ttl_s * 2]
-            for k in to_remove:
-                self._recent.pop(k, None)
-
-        try:
-            await self._on_files_ready(files)
-        except Exception as e:
-            logger.debug("Watcher flush error: %s", e)
+                await self._on_files_ready(files)
+            except Exception as e:
+                logger.debug("Watcher flush error: %s", e)
 
 
 def _normalize_recent_key(path: str) -> str:
@@ -249,6 +344,52 @@ def mark_recent_generated(paths: list[str]) -> None:
                     _RECENT_GENERATED.pop(k, None)
     except Exception:
         return
+
+
+def _apply_flush_limit(files: list[str]) -> list[str]:
+    if WATCHER_FLUSH_MAX_FILES <= 0:
+        return files
+    if len(files) <= WATCHER_FLUSH_MAX_FILES:
+        return files
+    try:
+        logger.warning(
+            "Watcher flush capped to %d files (requested %d); check for bulk imports or attacks.",
+            WATCHER_FLUSH_MAX_FILES,
+            len(files),
+        )
+    except Exception:
+        pass
+    return files[:WATCHER_FLUSH_MAX_FILES]
+
+
+def _record_flush_volume(count: int) -> None:
+    global _STREAM_TOTAL_FILES, _LAST_STREAM_ALERT_TIME
+    if count <= 0 or WATCHER_STREAM_ALERT_THRESHOLD <= 0 or WATCHER_STREAM_ALERT_WINDOW_SECONDS <= 0:
+        return
+    now = time.time()
+    window = WATCHER_STREAM_ALERT_WINDOW_SECONDS
+    cutoff_time = now - window
+    with _STREAM_LOCK:
+        _STREAM_EVENTS.append((now, count))
+        _STREAM_TOTAL_FILES += count
+        while _STREAM_EVENTS and _STREAM_EVENTS[0][0] < cutoff_time:
+            _, stale = _STREAM_EVENTS.popleft()
+            _STREAM_TOTAL_FILES -= stale
+        if _STREAM_TOTAL_FILES < 0:
+            _STREAM_TOTAL_FILES = 0
+        cooldown = max(WATCHER_STREAM_ALERT_COOLDOWN_SECONDS, 0.0)
+        if _STREAM_TOTAL_FILES >= WATCHER_STREAM_ALERT_THRESHOLD:
+            if cooldown <= 0 or (now - _LAST_STREAM_ALERT_TIME) >= cooldown:
+                _LAST_STREAM_ALERT_TIME = now
+                try:
+                    logger.warning(
+                        "Watcher ingest rate high: %d files in the last %.1f seconds (threshold=%d).",
+                        _STREAM_TOTAL_FILES,
+                        window,
+                        WATCHER_STREAM_ALERT_THRESHOLD,
+                    )
+                except Exception:
+                    pass
 
 
 class OutputWatcher:
@@ -336,6 +477,7 @@ class OutputWatcher:
             loop,
             debounce_ms=WATCHER_DEBOUNCE_MS,
             dedupe_ttl_ms=WATCHER_DEDUPE_TTL_MS,
+            flush_concurrency=WATCHER_MAX_FLUSH_CONCURRENCY,
         )
         self._observer = Observer()
 
@@ -460,6 +602,15 @@ class OutputWatcher:
         if not source:
             return False
         return str(source).strip().lower() in self._allowed_sources
+
+    def refresh_runtime_settings(self) -> None:
+        """Refresh handler timing parameters without restarting."""
+        if not self._handler:
+            return
+        try:
+            self._handler.refresh_runtime_settings()
+        except Exception:
+            pass
 
 
 def _is_under_path(candidate: str, root: str) -> bool:

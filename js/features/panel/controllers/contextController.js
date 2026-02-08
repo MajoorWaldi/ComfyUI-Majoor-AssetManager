@@ -29,7 +29,9 @@ export function createContextController({
     scopeController,
     sortController,
     updateSummaryBar,
-    reloadGrid
+    reloadGrid,
+    extraActions = null,
+    getExtraContext = null
 } = {}) {
     const actions = {
         clearQuery: async () => {
@@ -192,6 +194,11 @@ export function createContextController({
             } catch {}
         }
     };
+    if (extraActions && typeof extraActions === "object") {
+        try {
+            Object.assign(actions, extraActions);
+        } catch {}
+    }
 
     const update = () => {
         const rawQuery = String(searchInputEl?.value || "").trim();
@@ -214,10 +221,11 @@ export function createContextController({
         } catch {}
 
         try {
+            const extraContext = (typeof getExtraContext === "function" ? (getExtraContext() || {}) : {}) || {};
             updateSummaryBar?.({
                 state,
                 gridContainer,
-                context: { rawQuery: rawQuery || normalizedQuery },
+                context: { rawQuery: rawQuery || normalizedQuery, ...extraContext },
                 actions
             });
         } catch {}

@@ -113,30 +113,6 @@ const setGenInfoStatus = (asset, status) => {
     } catch {}
 };
 
-const hasMeaningfulMetadataRaw = (value) => {
-    if (value == null) return false;
-    if (typeof value === "string") {
-        const trimmed = value.trim();
-        if (!trimmed) return false;
-        if (trimmed === "{}" || trimmed === "null" || trimmed === "[]" || trimmed === "\"\"") return false;
-        // Some backends may send placeholder JSON-ish strings; treat as empty.
-        if (trimmed === "{{}}") return false;
-        // If it's JSON, consider empty objects as not meaningful.
-        if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
-            const parsed = safeCall(() => JSON.parse(trimmed), null);
-            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-                const keys = safeCall(() => Object.keys(parsed), []);
-                if (Array.isArray(keys) && keys.length === 0) return false;
-            }
-        }
-        return true;
-    }
-    if (typeof value === "object") {
-        return safeCall(() => Object.keys(value).length > 0, false);
-    }
-    return true;
-};
-
 const _hasUsefulGenOrWorkflowPayload = (asset) => {
     try {
         if (!asset || typeof asset !== "object") return false;
@@ -283,7 +259,7 @@ const mergeFileMetadata = (asset, fileMeta) => {
 
 export async function ensureViewerMetadataAsset(
     asset,
-    { getAssetMetadata, getFileMetadata, getFileMetadataScoped, metadataCache, signal } = {}
+    { getAssetMetadata, getFileMetadataScoped, metadataCache, signal } = {}
 ) {
     if (!asset || typeof asset !== "object") return asset;
     const id = asset?.id ?? null;
@@ -365,23 +341,6 @@ export async function ensureViewerMetadataAsset(
                 }
             }
         } catch {}
-    }
-
-    if (!_hasUsefulGenOrWorkflowPayload(full)) {
-        const path = getFilePath(full);
-        if (path) {
-            const res = await safeCall(() => getFileMetadata?.(path, signal ? { signal } : {}), null);
-            if (res?.ok && res.data) {
-                full = mergeFileMetadata({ ...full }, res.data);
-            } else if (res && res?.code !== "ABORTED") {
-                lastError = {
-                    kind: "fetch_error",
-                    stage: "file_path",
-                    code: res?.code || "FETCH_ERROR",
-                    message: res?.error || "Failed to extract file metadata",
-                };
-            }
-        }
     }
 
     ensureMediaPipelineStatus(full);

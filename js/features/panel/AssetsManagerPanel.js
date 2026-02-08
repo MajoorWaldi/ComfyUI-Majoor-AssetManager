@@ -11,7 +11,17 @@ import {
     bindGridScanListeners,
     disposeGridScanListeners,
 } from "../grid/GridView.js";
-import { get, post, getCollectionAssets, toggleWatcher, setWatcherScope } from "../../api/client.js";
+import {
+    get,
+    post,
+    getCollectionAssets,
+    toggleWatcher,
+    setWatcherScope,
+    getDuplicateAlerts,
+    startDuplicatesAnalysis,
+    mergeDuplicateTags,
+    deleteAssets
+} from "../../api/client.js";
 import { ENDPOINTS } from "../../api/endpoints.js";
 import { createSidebar, showAssetInSidebar, closeSidebar } from "../../components/SidebarView.js";
 import { createRatingBadge, createTagsBadge } from "../../components/Badges.js";
@@ -173,6 +183,19 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     gridWrapper.appendChild(gridContainer);
     _activeGridContainer = gridContainer;
     try {
+        const handler = () => {
+            try {
+                updateSummaryBar?.({ state, gridContainer });
+            } catch {}
+        };
+        gridContainer.addEventListener("mjr:grid-stats", handler);
+        gridContainer._mjrSummaryBarDispose = () => {
+            try {
+                gridContainer.removeEventListener("mjr:grid-stats", handler);
+            } catch {}
+        };
+    } catch {}
+    try {
         bindGridScanListeners();
     } catch {}
 
@@ -236,15 +259,20 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         const scope = String(nextScope || state.scope || "output").toLowerCase();
         const settings = loadMajoorSettings();
         const wantsEnabled = !!settings?.watcher?.enabled;
-        const shouldEnable = wantsEnabled && scope === "output";
+        const customRootId = String(state.customRootId || "").trim();
+        const shouldEnable = wantsEnabled && (scope !== "custom" || !!customRootId);
+
         try {
             await toggleWatcher(shouldEnable);
         } catch {}
-        if (shouldEnable) {
-            try {
-                await setWatcherScope({ scope: "output" });
-            } catch {}
-        }
+        if (!shouldEnable) return;
+
+        try {
+            await setWatcherScope({
+                scope,
+                customRootId: scope === "custom" ? customRootId : ""
+            });
+        } catch {}
     };
 
     // Initial position (no reload needed).
@@ -254,7 +282,7 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     } catch {}
 
     // Live updates when ComfyUI settings change.
-    const onSettingsChanged = (e) => {
+    const onSettingsChanged = (_e) => {
         try {
             const s = loadMajoorSettings();
             
@@ -262,8 +290,9 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
             applySidebarPosition(s.sidebar?.position || "right");
             
             // 2. Grid visuals (badges, details, sizes)
-            // Use key from event to optimize? For now, refresh is cheap (VirtualGrid).
-            refreshGrid(gridWrapper);
+            // Refresh must target the actual grid container (GridView state key),
+            // not the scroll wrapper, otherwise VirtualGrid settings won't apply.
+            refreshGrid(gridContainer);
         } catch {}
         try {
             applyWatcherForScope(state.scope);
@@ -298,9 +327,39 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     let scopeController = null;
     let sortController = null;
     let contextController = null;
+    let _duplicatesAlert = null;
+    let _dupPollTimer = null;
     const notifyContextChanged = () => {
         try {
             contextController?.update?.();
+        } catch {}
+    };
+
+    const refreshDuplicateAlerts = async () => {
+        const scope = String(state.scope || "output").toLowerCase();
+        const customRootId = String(state.customRootId || "").trim();
+        if (scope === "custom" && !customRootId) {
+            _duplicatesAlert = null;
+            notifyContextChanged();
+            return;
+        }
+
+        try {
+            const result = await getDuplicateAlerts({
+                scope,
+                customRootId,
+                maxGroups: 4,
+                maxPairs: 4
+            });
+            if (!result?.ok) return;
+            const data = result.data || {};
+            _duplicatesAlert = {
+                exactCount: Array.isArray(data.exact_groups) ? data.exact_groups.length : 0,
+                similarCount: Array.isArray(data.similar_pairs) ? data.similar_pairs.length : 0,
+                firstGroup: Array.isArray(data.exact_groups) ? data.exact_groups[0] : null,
+                firstPair: Array.isArray(data.similar_pairs) ? data.similar_pairs[0] : null
+            };
+            notifyContextChanged();
         } catch {}
     };
 
@@ -323,7 +382,15 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         get,
         post,
         ENDPOINTS,
-        reloadGrid: gridController.reloadGrid
+        reloadGrid: gridController.reloadGrid,
+        onRootChanged: async () => {
+            try {
+                await applyWatcherForScope(state.scope);
+            } catch {}
+            try {
+                await refreshDuplicateAlerts();
+            } catch {}
+        }
     });
     customRootsController.bind({ customAddBtn, customRemoveBtn });
 
@@ -341,6 +408,9 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         onScopeChanged: async () => {
             try {
                 await applyWatcherForScope(state.scope);
+            } catch {}
+            try {
+                await refreshDuplicateAlerts();
             } catch {}
         }
     });
@@ -452,7 +522,44 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
             scopeController,
             sortController,
             updateSummaryBar,
-            reloadGrid: () => gridController.reloadGrid()
+            reloadGrid: () => gridController.reloadGrid(),
+            getExtraContext: () => ({ duplicatesAlert: _duplicatesAlert }),
+            extraActions: {
+                onDuplicateAlertClick: async (alert) => {
+                    const current = alert || _duplicatesAlert || {};
+                    const grp = current.firstGroup;
+                    if (grp && Array.isArray(grp.assets) && grp.assets.length >= 2) {
+                        const keep = grp.assets[0] || {};
+                        const dupIds = grp.assets.slice(1).map((x) => Number(x?.id || 0)).filter((x) => x > 0);
+                        if (dupIds.length) {
+                            const mergeOk = await comfyConfirm(`Exact duplicates detected (${grp.assets.length}). Merge tags into "${keep?.filename || keep?.id}"?`);
+                            if (mergeOk) {
+                                const mergeRes = await mergeDuplicateTags(Number(keep?.id || 0), dupIds);
+                                if (mergeRes?.ok) comfyToast("Tags merged", "success", 2200);
+                                else comfyToast(`Tag merge failed: ${mergeRes?.error || "error"}`, "warning", 3500);
+                            }
+                            const delOk = await comfyConfirm(`Delete ${dupIds.length} exact duplicate(s)?`);
+                            if (delOk) {
+                                const delRes = await deleteAssets(dupIds);
+                                if (delRes?.ok) {
+                                    comfyToast("Duplicates deleted", "success", 2200);
+                                    await gridController.reloadGrid();
+                                } else {
+                                    comfyToast(`Delete failed: ${delRes?.error || "error"}`, "warning", 3500);
+                                }
+                            }
+                            await refreshDuplicateAlerts();
+                            return;
+                        }
+                    }
+                    const startOk = await comfyConfirm("Start duplicate analysis in background?");
+                    if (!startOk) return;
+                    const runRes = await startDuplicatesAnalysis(500);
+                    if (runRes?.ok) comfyToast("Duplicate analysis started", "info", 2200);
+                    else comfyToast(`Analysis not started: ${runRes?.error || "error"}`, "warning", 3500);
+                    await refreshDuplicateAlerts();
+                }
+            }
         });
     } catch {}
 
@@ -591,6 +698,10 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
             window.removeEventListener?.("mjr-settings-changed", onSettingsChanged);
         } catch {}
         try {
+            if (_dupPollTimer) clearInterval(_dupPollTimer);
+            _dupPollTimer = null;
+        } catch {}
+        try {
             disposeGridScanListeners();
         } catch {}
         try {
@@ -705,6 +816,14 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     });
 
     const initialLoadPromise = gridController.reloadGrid();
+    try {
+        await refreshDuplicateAlerts();
+    } catch {}
+    try {
+        _dupPollTimer = setInterval(() => {
+            refreshDuplicateAlerts().catch(() => {});
+        }, 15000);
+    } catch {}
     
     // Restore scroll, selection visuals, and sidebar AFTER grid loads.
     const restoreUIState = async () => {

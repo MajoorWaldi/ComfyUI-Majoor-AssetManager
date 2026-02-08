@@ -11,7 +11,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from backend.shared import Result, classify_file, get_logger
+from backend.shared import Result, classify_file, get_logger, sanitize_error_message
 from backend.config import (
     FS_LIST_CACHE_MAX,
     FS_LIST_CACHE_TTL_SECONDS,
@@ -51,6 +51,30 @@ def _is_truthy_boolish(value: Any) -> bool:
     if value in (0, "0"):
         return False
     return False
+
+
+def _normalize_extension(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        text = str(value).strip()
+    except Exception:
+        return ""
+    if not text:
+        return ""
+    text = text.lstrip(".").strip(",;")
+    return text.lower()
+
+
+def _normalize_extensions(raw_list: Optional[Any]) -> list[str]:
+    if not isinstance(raw_list, list):
+        return []
+    normalized: list[str] = []
+    for item in raw_list:
+        ext = _normalize_extension(item)
+        if ext and ext not in normalized:
+            normalized.append(ext)
+    return normalized
 
 
 async def _kickoff_background_scan(
@@ -278,7 +302,6 @@ def _collect_filesystem_entries(
             sub = "" if str(rel_to_root) == "." else str(rel_to_root).replace("\\", "/")
         except ValueError:
             sub = ""
-
         entries.append(
             {
                 "id": None,
@@ -313,7 +336,7 @@ async def _fs_cache_get_or_build(
     try:
         dir_mtime_ns = target_dir_resolved.stat().st_mtime_ns
     except OSError as exc:
-        return Result.Err("DIR_NOT_FOUND", f"Directory not found: {exc}")
+        return Result.Err("DIR_NOT_FOUND", sanitize_error_message(exc, "Directory not found"))
 
     cache_key = f"{str(base)}|{str(target_dir_resolved)}|{asset_type}|{str(root_id or '')}"
     
@@ -343,7 +366,9 @@ async def _fs_cache_get_or_build(
             root_id,
         )
     except OSError as exc:
-        return Result.Err("LIST_FAILED", f"Failed to list directory: {exc}")
+        return Result.Err(
+            "LIST_FAILED", sanitize_error_message(exc, "Failed to list directory")
+        )
 
     async with _FS_LIST_CACHE_LOCK:
         # `watch_token` may be implemented later (fs watch integration); keep None for now.
@@ -374,7 +399,9 @@ async def _list_filesystem_assets(
     try:
         base = root_dir.resolve()
     except OSError as exc:
-        return Result.Err("INVALID_INPUT", f"Invalid root directory: {exc}")
+        return Result.Err(
+            "INVALID_INPUT", sanitize_error_message(exc, "Invalid root directory")
+        )
 
     rel = _safe_rel_path(subfolder or "")
     if rel is None:
@@ -396,6 +423,7 @@ async def _list_filesystem_assets(
     filter_kind = str(filters.get("kind") or "").strip().lower() if filters is not None else ""
     filter_min_rating = int(filters.get("min_rating") or 0) if filters is not None else 0
     filter_workflow_only = bool(filters.get("has_workflow")) if filters is not None else False
+    filter_extensions = _normalize_extensions(filters.get("extensions") if filters is not None else None)
 
     mtime_start_raw = filters.get("mtime_start") if filters is not None else None
     mtime_end_raw = filters.get("mtime_end") if filters is not None else None
@@ -462,6 +490,9 @@ async def _list_filesystem_assets(
     end = start + limit_int if limit_int > 0 else None
 
     for item in entries:
+        entry_ext = _normalize_extension(item.get("ext"))
+        if filter_extensions and entry_ext and entry_ext not in filter_extensions:
+            continue
         if filter_kind and item.get("kind") != filter_kind:
             continue
         if filter_min_rating > 0 and int(item.get("rating", 0)) < filter_min_rating:

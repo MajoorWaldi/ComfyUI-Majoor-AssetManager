@@ -220,19 +220,6 @@ function setCardSelected(card, selected) {
     }
 }
 
-function clearAllSelected(gridContainer) {
-    if (!gridContainer) return;
-    try {
-        if (typeof gridContainer?._mjrSetSelection === "function") {
-            gridContainer._mjrSetSelection([], "");
-            return;
-        }
-        for (const el of gridContainer.querySelectorAll(".mjr-asset-card.is-selected")) {
-            setCardSelected(el, false);
-        }
-    } catch {}
-}
-
 function getAllCards(gridContainer) {
     try {
         return Array.from(gridContainer.querySelectorAll(".mjr-asset-card"));

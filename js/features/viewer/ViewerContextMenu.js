@@ -1,8 +1,9 @@
 import { buildAssetViewURL, buildDownloadURL } from "../../api/endpoints.js";
-import { comfyConfirm, comfyPrompt } from "../../app/dialogs.js";
+import { comfyPrompt } from "../../app/dialogs.js";
 import { comfyToast } from "../../app/toast.js";
-import { openInFolder, updateAssetRating, deleteAsset, renameAsset } from "../../api/client.js";
-import { ASSET_RATING_CHANGED_EVENT, ASSET_TAGS_CHANGED_EVENT } from "../../app/events.js";
+import { t } from "../../app/i18n.js";
+import { openInFolder, deleteAsset, renameAsset, getViewerInfo } from "../../api/client.js";
+import { ASSET_RATING_CHANGED_EVENT, ASSET_TAGS_CHANGED_EVENT, VIEWER_INFO_REFRESHED_EVENT } from "../../app/events.js";
 import { createTagsEditor } from "../../components/TagsEditor.js";
 import { safeDispatchCustomEvent } from "../../utils/events.js";
 import {
@@ -16,6 +17,10 @@ import {
 } from "../../components/contextmenu/MenuCore.js";
 import { hideMenu, clearMenu } from "../../components/contextmenu/MenuCore.js";
 import { showAddToCollectionMenu } from "../collections/contextmenu/addToCollectionMenu.js";
+import { confirmDeletion } from "../../utils/deleteGuard.js";
+import { sanitizeFilename, validateFilename } from "../../utils/filenames.js";
+import { reportError } from "../../utils/logging.js";
+import { scheduleRatingUpdate, cancelAllRatingUpdates } from "../contextmenu/ratingUpdater.js";
 
 /**
  * Viewer-specific shortcut displays
@@ -142,17 +147,9 @@ function showTagsPopover(x, y, asset, onChanged) {
     pop.style.top = `${Math.max(8, fy)}px`;
 }
 
-const _ratingDebounceTimers = new Map();
 function setRating(asset, rating, onChanged) {
     const assetId = asset?.id;
     if (!assetId) return;
-    const id = String(assetId);
-    try {
-        const prev = _ratingDebounceTimers.get(id);
-        if (prev) clearTimeout(prev);
-    } catch {}
-
-    // Optimistic UI: update local state immediately, then debounce the API call.
     try {
         asset.rating = rating;
     } catch {}
@@ -160,30 +157,34 @@ function setRating(asset, rating, onChanged) {
         onChanged?.();
     } catch {}
 
-    const t = setTimeout(async () => {
-        try {
-            _ratingDebounceTimers.delete(id);
-        } catch {}
-        try {
-            const result = await updateAssetRating(assetId, rating);
-            if (!result?.ok) {
-                comfyToast(result?.error || "Failed to update rating", "error");
-                return;
-            }
-            comfyToast(`Rating set to ${rating} stars`, "success", 1500);
+    scheduleRatingUpdate(String(assetId), rating, {
+        successMessage: rating > 0 ? `Rating set to ${rating} stars` : "Rating cleared",
+        errorMessage: "Failed to update rating",
+        warnPrefix: "[ViewerContextMenu]",
+        onSuccess: () => {
             safeDispatchCustomEvent(
                 ASSET_RATING_CHANGED_EVENT,
                 { assetId: String(assetId), rating },
                 { warnPrefix: "[ViewerContextMenu]" }
             );
-        } catch (err) {
-            console.error("[ViewerContextMenu] Rating update failed:", err);
-            comfyToast("Error updating rating", "error");
-        }
-    }, 300);
-    try {
-        _ratingDebounceTimers.set(id, t);
-    } catch {}
+        },
+        onFailure: (error) => {
+            reportError(error, "[ViewerContextMenu] Rating update", { showToast: true });
+        },
+    });
+}
+
+const SIZE_UNITS = ["B", "KB", "MB", "GB", "TB"];
+function formatReadableSize(value) {
+    let bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) return "";
+    let unitIndex = 0;
+    while (bytes >= 1024 && unitIndex < SIZE_UNITS.length - 1) {
+        bytes /= 1024;
+        unitIndex += 1;
+    }
+    const formatted = unitIndex === 0 ? `${Math.round(bytes)}` : bytes.toFixed(2);
+    return `${formatted} ${SIZE_UNITS[unitIndex]}`;
 }
 
 export function bindViewerContextMenu({
@@ -230,15 +231,15 @@ export function bindViewerContextMenu({
             createItem("Copy file path", "pi pi-copy", VIEWER_SHORTCUTS.COPY_PATH, withClose(async () => {
                 const p = asset?.filepath ? String(asset.filepath) : "";
                 if (!p) {
-                    comfyToast("No file path available for this asset.", "error");
+                    comfyToast(t("toast.noFilePath"), "error");
                     return;
                 }
                 try {
                     await navigator.clipboard.writeText(p);
-                    comfyToast("File path copied to clipboard", "success", 2000);
+                    comfyToast(t("toast.pathCopied"), "success", 2000);
                 } catch (err) {
                     console.error("[ViewerContextMenu] Copy failed:", err);
-                    comfyToast("Failed to copy path", "error");
+                    comfyToast(t("toast.pathCopyFailed"), "error");
                 }
             }))
         );
@@ -264,9 +265,9 @@ export function bindViewerContextMenu({
                 if (!asset?.id) return;
                 const res = await openInFolder(asset.id);
                 if (!res?.ok) {
-                    comfyToast(res?.error || "Failed to open folder.", "error");
+                    comfyToast(res?.error || t("toast.openFolderFailed"), "error");
                 } else {
-                    comfyToast("Opened in folder", "info", 2000);
+                    comfyToast(t("toast.openedInFolder"), "info", 2000);
                 }
             }), { disabled: !asset?.id })
         );
@@ -389,6 +390,34 @@ export function bindViewerContextMenu({
         ratingSubmenu.addEventListener("mouseenter", () => cancelClose(), { signal: ratingAC.signal });
         ratingSubmenu.addEventListener("mouseleave", () => scheduleClose(), { signal: ratingAC.signal });
 
+        menu.appendChild(
+            createItem("Refresh metadata", "pi pi-sync", "R", withClose(async () => {
+                if (!asset?.id) return;
+                try {
+                    const res = await getViewerInfo(asset.id, { refresh: true });
+                    if (!res?.ok || !res?.data) {
+                        comfyToast(res?.error || "Failed to refresh metadata.", "error");
+                        return;
+                    }
+                    const info = res.data;
+                    try {
+                        safeDispatchCustomEvent(
+                            VIEWER_INFO_REFRESHED_EVENT,
+                            { assetId: String(asset.id), info },
+                            { warnPrefix: "[ViewerContextMenu]" }
+                        );
+                    } catch {}
+                    const parts = [];
+                    const sizeLabel = formatReadableSize(info?.size_bytes);
+                    if (sizeLabel) parts.push(sizeLabel);
+                    if (info?.mime) parts.push(info.mime);
+                    const suffix = parts.length ? ` (${parts.join(", ")})` : "";
+                    comfyToast(`Metadata refreshed${suffix}`, "success", 3000);
+                } catch (error) {
+                    reportError(error, "[ViewerContextMenu] Metadata refresh", { showToast: true });
+                }
+            }), { disabled: !asset?.id })
+        );
         menu.appendChild(separator());
 
         // Rename option
@@ -397,8 +426,14 @@ export function bindViewerContextMenu({
                 if (!asset?.id) return;
 
                 const currentName = asset.filename || "";
-                const newName = await comfyPrompt("Rename file", currentName);
+                const rawInput = await comfyPrompt("Rename file", currentName);
+                const newName = sanitizeFilename(rawInput);
                 if (!newName || newName === currentName) return;
+                const validation = validateFilename(newName);
+                if (!validation.valid) {
+                    comfyToast(validation.reason, "error");
+                    return;
+                }
 
                 try {
                     const renameResult = await renameAsset(asset.id, newName);
@@ -407,10 +442,10 @@ export function bindViewerContextMenu({
                         asset.filename = newName;
                         asset.filepath = asset.filepath.replace(/[^\\/]+$/, newName);
 
-                        comfyToast("File renamed successfully!", "success");
+                        comfyToast(t("toast.fileRenamedSuccess"), "success");
                         onAssetChanged?.();
                     } else {
-                        comfyToast(renameResult?.error || "Failed to rename file.", "error");
+                        comfyToast(renameResult?.error || t("toast.fileRenameFailed"), "error");
                     }
                 } catch (error) {
                     comfyToast(`Error renaming file: ${error.message}`, "error");
@@ -423,15 +458,17 @@ export function bindViewerContextMenu({
             createItem("Delete...", "pi pi-trash", VIEWER_SHORTCUTS.DELETE, withClose(async () => {
                 if (!asset?.id) return;
 
-                // Confirmation removed as per user request
+                const ok = await confirmDeletion(1, asset?.filename);
+                if (!ok) return;
+
                 try {
                     const deleteResult = await deleteAsset(asset.id);
                     if (deleteResult?.ok) {
-                        comfyToast("File deleted successfully!", "success");
+                        comfyToast(t("toast.fileDeletedSuccess"), "success");
                         // Close viewer or navigate to next asset
                         onAssetChanged?.();
                     } else {
-                        comfyToast(deleteResult?.error || "Failed to delete file.", "error");
+                        comfyToast(deleteResult?.error || t("toast.fileDeleteFailed"), "error");
                     }
                 } catch (error) {
                     comfyToast(`Error deleting file: ${error.message}`, "error");
@@ -454,14 +491,7 @@ export function bindViewerContextMenu({
             overlayEl.removeEventListener("contextmenu", handler);
         } catch {}
         try {
-            for (const t of _ratingDebounceTimers.values()) {
-                try {
-                    clearTimeout(t);
-                } catch {}
-            }
-        } catch {}
-        try {
-            _ratingDebounceTimers.clear();
+            cancelAllRatingUpdates();
         } catch {}
         try {
             cleanupMenu(menu);

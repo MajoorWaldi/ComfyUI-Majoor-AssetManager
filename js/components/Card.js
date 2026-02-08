@@ -5,8 +5,15 @@
 
 import { buildAssetViewURL } from "../api/endpoints.js";
 import { createFileBadge, createRatingBadge, createTagsBadge, createWorkflowDot } from "./Badges.js";
-import { formatTimestamp, formatDuration, formatDate, formatTime, formatDateTime } from "../utils/format.js";
-import { APP_CONFIG } from "../app/config.js";
+import { formatDuration, formatDate, formatTime } from "../utils/format.js";
+
+const AUDIO_THUMB_URL = (() => {
+    try {
+        return new URL("../assets/audio-thumbnails.png", import.meta.url).href;
+    } catch {
+        return "";
+    }
+})();
 
 /**
  * @typedef {Object} Asset
@@ -688,6 +695,47 @@ function createThumbnail(asset, viewUrl) {
         mgr.observe(video);
         // Hover binding removed in favor of autoplay-in-grid
         // mgr.bindHover(thumb, video);
+    } else if (asset.kind === "audio") {
+        // Audio thumbnail: background image + transparent waveform overlay
+        if (AUDIO_THUMB_URL) {
+            const img = document.createElement("img");
+            img.src = AUDIO_THUMB_URL;
+            img.alt = asset.filename || "Audio";
+            img.classList.add("mjr-thumb-media");
+            try {
+                img.loading = "lazy";
+                img.decoding = "async";
+            } catch {}
+            img.onerror = () => { img.style.display = "none"; };
+            thumb.appendChild(img);
+        }
+
+        // Waveform SVG overlay
+        const overlay = document.createElement("div");
+        overlay.className = "mjr-audio-waveform-overlay";
+        overlay.innerHTML = `<svg viewBox="0 0 64 32" preserveAspectRatio="xMidYMid meet" fill="currentColor" opacity="0.35">
+            <rect x="2"  y="10" width="3" height="12" rx="1.5"/>
+            <rect x="8"  y="4"  width="3" height="24" rx="1.5"/>
+            <rect x="14" y="8"  width="3" height="16" rx="1.5"/>
+            <rect x="20" y="2"  width="3" height="28" rx="1.5"/>
+            <rect x="26" y="6"  width="3" height="20" rx="1.5"/>
+            <rect x="32" y="1"  width="3" height="30" rx="1.5"/>
+            <rect x="38" y="5"  width="3" height="22" rx="1.5"/>
+            <rect x="44" y="3"  width="3" height="26" rx="1.5"/>
+            <rect x="50" y="9"  width="3" height="14" rx="1.5"/>
+            <rect x="56" y="6"  width="3" height="20" rx="1.5"/>
+        </svg>`;
+        overlay.style.cssText = `
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            pointer-events: none;
+            color: white;
+        `;
+        try { overlay.querySelector("svg").style.cssText = "width: 60%; max-width: 120px; height: auto; filter: drop-shadow(0 2px 6px rgba(0,0,0,0.5));"; } catch {}
+        thumb.appendChild(overlay);
     }
 
     return thumb;

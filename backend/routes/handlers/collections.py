@@ -4,14 +4,12 @@ Collections endpoints.
 Collections are small JSON files that store a user-curated list of assets (by filepath + basic fields).
 """
 
-import asyncio
-import json
 from pathlib import Path
 from typing import Any, Dict, List
 
 from aiohttp import web
 
-from backend.shared import Result, classify_file, get_logger
+from backend.shared import Result, classify_file, get_logger, sanitize_error_message
 from backend.features.collections import CollectionsService
 
 from ..core import _json_response, _require_services, _read_json
@@ -82,7 +80,10 @@ def register_collections_routes(routes: web.RouteTableDef) -> None:
         try:
             result = _collections.list()
         except Exception as exc:
-            result = Result.Err("COLLECTIONS_FAILED", f"Failed to list collections: {exc}")
+            result = Result.Err(
+                "COLLECTIONS_FAILED",
+                sanitize_error_message(exc, "Failed to list collections"),
+            )
         return _json_response(result)
 
     @routes.post("/mjr/am/collections")

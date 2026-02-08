@@ -20,6 +20,7 @@ Welcome to the comprehensive documentation for the Majoor Assets Manager for Com
 - [SETTINGS_CONFIGURATION.md](SETTINGS_CONFIGURATION.md) - Settings and configuration options
 - [SECURITY_ENV_VARS.md](SECURITY_ENV_VARS.md) - Security model and environment variables
 - [TESTING.md](TESTING.md) - Running tests and reading reports
+- [DB_MAINTENANCE.md](DB_MAINTENANCE.md) - Database maintenance, corruption recovery, and Delete DB
 
 ### Complete Guides
 - [COMPLETE_USER_GUIDE.md](COMPLETE_USER_GUIDE.md) - Step-by-step user guide with workflows

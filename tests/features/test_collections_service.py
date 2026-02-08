@@ -1,5 +1,4 @@
 import pytest
-from pathlib import Path
 
 from backend.features.collections.service import CollectionsService
 

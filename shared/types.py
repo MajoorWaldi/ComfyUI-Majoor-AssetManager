@@ -59,7 +59,7 @@ class ErrorCode(str, Enum):
 EXTENSIONS: Final[dict[FileKind, set[str]]] = {
     "image": {".png", ".jpg", ".jpeg", ".webp", ".gif"},
     "video": {".mp4", ".mov", ".webm", ".mkv"},
-    "audio": {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"},
+    "audio": {".wav", ".mp3", ".flac", ".ogg", ".aiff", ".aif", ".m4a", ".aac"},
     "model3d": {".obj", ".fbx", ".glb", ".gltf", ".stl"},
     "unknown": set(),
 }

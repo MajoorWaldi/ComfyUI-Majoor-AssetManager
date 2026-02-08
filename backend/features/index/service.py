@@ -8,18 +8,14 @@ This service coordinates multiple specialized components:
 - MetadataEnricher: Background metadata enrichment
 - MetadataHelpers: Shared metadata utilities
 """
-import threading
 import asyncio
-import os
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from ...shared import get_logger, Result
 from shared.scan_throttle import mark_directory_indexed
 from ...adapters.db.sqlite import Sqlite
-from ...adapters.db.schema import table_has_column
 from ..metadata import MetadataService
-from ..geninfo.parser import parse_geninfo_from_prompt
 from .scanner import IndexScanner
 from .searcher import IndexSearcher
 from .updater import AssetUpdater

@@ -30,6 +30,9 @@ SINK_CLASS_TYPES: Set[str] = {
     "saveanimatedwebp",
     "savegif",
     "savevideo",
+    "saveaudio",
+    "save_audio",
+    "vhs_saveaudio",
 }
 
 
@@ -45,15 +48,18 @@ def _sink_priority(node: Dict[str, Any], node_id: Optional[str] = None) -> Tuple
     # Group 0: Video Sinks (Explicit & Heuristic)
     if ct in ("savevideo", "vhs_savevideo", "vhs_videocombine") or (("save" in ct) and ("video" in ct)):
         group = 0
-    # Group 1: Image/Gif Sinks (Explicit & Heuristic)
-    elif ct in ("saveimage", "saveimagewebsocket", "saveanimatedwebp", "savegif") or (("save" in ct) and ("image" in ct)):
+    # Group 1: Audio Sinks
+    elif ct in ("saveaudio", "save_audio", "vhs_saveaudio") or (("save" in ct) and ("audio" in ct)):
         group = 1
-    # Group 2: Preview
-    elif ct == "previewimage" or "preview" in ct:
+    # Group 2: Image/Gif Sinks (Explicit & Heuristic)
+    elif ct in ("saveimage", "saveimagewebsocket", "saveanimatedwebp", "savegif") or (("save" in ct) and ("image" in ct)):
         group = 2
-    # Group 3: Fallback
-    else:
+    # Group 3: Preview
+    elif ct == "previewimage" or "preview" in ct:
         group = 3
+    # Group 4: Fallback
+    else:
+        group = 4
 
     # Within group: prefer sinks that consume `images` (common for image outputs)
     try:
@@ -247,7 +253,7 @@ def _field_size(width: Any, height: Any, confidence: str, source: str) -> Option
 
 def _pick_sink_inputs(node: Dict[str, Any]) -> Optional[Any]:
     ins = _inputs(node)
-    preferred = ["images", "image", "frames", "video", "samples", "latent", "latent_image"]
+    preferred = ["audio", "audios", "waveform", "images", "image", "frames", "video", "samples", "latent", "latent_image"]
     for k in preferred:
         v = ins.get(k)
         if _is_link(v):
@@ -267,8 +273,8 @@ def _find_candidate_sinks(nodes_by_id: Dict[str, Dict[str, Any]]) -> List[str]:
             continue
             
         # Heuristic for custom save nodes (e.g. WAS, Impact, CR, etc)
-        # Must contain "save" or "preview" AND "image" or "video"
-        if ("save" in ct or "preview" in ct) and ("image" in ct or "video" in ct):
+        # Must contain "save" or "preview" AND media hint
+        if ("save" in ct or "preview" in ct) and ("image" in ct or "video" in ct or "audio" in ct):
             sinks.append(node_id)
             continue
             
@@ -625,6 +631,79 @@ def _scalar(value: Any) -> Optional[Any]:
     return None
 
 
+def _extract_ksampler_widget_params(node: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Fallback extraction for KSampler values stored in LiteGraph `widgets_values`.
+    Common order:
+      [seed, control_after_generate, steps, cfg, sampler_name, scheduler, denoise]
+    """
+    out: Dict[str, Any] = {}
+    if not isinstance(node, dict):
+        return out
+    ct = _lower(_node_type(node))
+    if "ksampler" not in ct:
+        return out
+    widgets = node.get("widgets_values")
+    if not isinstance(widgets, list):
+        return out
+    try:
+        if len(widgets) > 0:
+            out["seed"] = widgets[0]
+        if len(widgets) > 2:
+            out["steps"] = widgets[2]
+        if len(widgets) > 3:
+            out["cfg"] = widgets[3]
+        if len(widgets) > 4:
+            out["sampler_name"] = widgets[4]
+        if len(widgets) > 5:
+            out["scheduler"] = widgets[5]
+        if len(widgets) > 6:
+            out["denoise"] = widgets[6]
+    except Exception:
+        return {}
+    return out
+
+
+def _extract_lyrics_from_prompt_nodes(nodes_by_id: Dict[str, Dict[str, Any]]) -> Tuple[Optional[str], Optional[Any], Optional[str]]:
+    """
+    Best-effort lyrics extraction for audio text-encode nodes (AceStep-like nodes).
+    Returns: (lyrics, lyrics_strength, source)
+    """
+    for nid, node in nodes_by_id.items():
+        if not isinstance(node, dict):
+            continue
+        ct = _lower(_node_type(node))
+        if "textencode" not in ct and "lyrics" not in ct:
+            continue
+        ins = _inputs(node)
+
+        lyrics = None
+        for key in ("lyrics", "lyric", "lyric_text", "text_lyrics"):
+            v = ins.get(key)
+            if isinstance(v, str) and v.strip():
+                lyrics = v.strip()
+                break
+
+        strength = None
+        for key in ("lyrics_strength", "lyric_strength"):
+            v = _scalar(ins.get(key))
+            if v is not None:
+                strength = v
+                break
+
+        widgets = node.get("widgets_values")
+        if isinstance(widgets, list):
+            # AceStep: widgets_values[0]=tags, [1]=lyrics, [2]=lyrics_strength
+            if not lyrics and len(widgets) > 1 and isinstance(widgets[1], str) and widgets[1].strip():
+                lyrics = widgets[1].strip()
+            if strength is None and len(widgets) > 2:
+                strength = _scalar(widgets[2])
+
+        if isinstance(lyrics, str) and lyrics.strip():
+            return lyrics, strength, f"{_node_type(node)}:{nid}"
+    return None, None, None
+
+
 def _resolve_scalar_from_link(nodes_by_id: Dict[str, Dict[str, Any]], value: Any) -> Optional[Any]:
     src_id = _walk_passthrough(nodes_by_id, value)
     if not src_id:
@@ -901,7 +980,6 @@ def _trace_model_chain(
         if ("lora" in ct) or (ins.get("lora_name") is not None and _is_link(ins.get("model"))):
             # rgthree "Power Lora Loader" stores multiple LoRAs under lora_1/lora_2/...
             # objects instead of a flat `lora_name`.
-            added_any = False
             for k, v in ins.items():
                 if not str(k).lower().startswith("lora_"):
                     continue
@@ -923,7 +1001,6 @@ def _trace_model_chain(
                         "source": f"{_node_type(node)}:{node_id}:{k}",
                     }
                 )
-                added_any = True
 
             name = _clean_model_id(ins.get("lora_name") or ins.get("lora") or ins.get("name"))
             if name:
@@ -938,7 +1015,6 @@ def _trace_model_chain(
                         "source": f"{_node_type(node)}:{node_id}",
                     }
                 )
-                added_any = True
 
             # If this node is LoRA-ish but didn't yield any LoRA entries, still follow the chain.
             current_link = ins.get("model") if _is_link(ins.get("model")) else None
@@ -1385,7 +1461,7 @@ def _detect_input_role(nodes_by_id: Dict[str, Any], subject_node_id: str) -> str
 
 def _extract_input_files(nodes_by_id: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Extract input file references (LoadImage, LoadVideo, etc) with usage context.
+    Extract input file references (LoadImage/LoadVideo/LoadAudio, etc) with usage context.
     """
     inputs = []
     seen = set()
@@ -1400,19 +1476,20 @@ def _extract_input_files(nodes_by_id: Dict[str, Any]) -> List[Dict[str, Any]]:
         # Standard input nodes (robust to spacing/naming variations)
         is_image_load = "loadimage" in ntype_clean or "imageloader" in ntype_clean or "inputimage" in ntype_clean
         is_video_load = "loadvideo" in ntype_clean or "videoloader" in ntype_clean or "inputvideo" in ntype_clean
+        is_audio_load = "loadaudio" in ntype_clean or "audioloader" in ntype_clean or "inputaudio" in ntype_clean
         
         # Also check for known specific nodes like LTX or IPAdapter that might not match above
         if "ipadapter" in ntype_clean and "image" in ntype_clean:
             is_image_load = True
 
-        if is_image_load or is_video_load:
+        if is_image_load or is_video_load or is_audio_load:
             ins = _inputs(node)
             
             # 1. API Format inputs (broadened search for file/path keys)
             filename = (
                 ins.get("image") or ins.get("video") or ins.get("filename") or 
-                ins.get("file") or ins.get("media_source") or ins.get("path") or
-                ins.get("image_path") or ins.get("video_path")
+                ins.get("audio") or ins.get("file") or ins.get("media_source") or ins.get("path") or
+                ins.get("image_path") or ins.get("video_path") or ins.get("audio_path")
             )
             
             # 2. Workflow Format widgets_values (Heuristic)
@@ -1443,7 +1520,7 @@ def _extract_input_files(nodes_by_id: Dict[str, Any]) -> List[Dict[str, Any]]:
                     inputs.append({
                         "filename": filename,
                         "subfolder": subfolder,
-                        "type": "video" if is_video_load else "image",
+                        "type": "audio" if is_audio_load else ("video" if is_video_load else "image"),
                         "node_id": nid,
                         "folder_type": ins.get("type", "input"),
                         "role": usage
@@ -1512,7 +1589,7 @@ def _collect_all_prompts_from_sinks(
 
 def _determine_workflow_type(nodes_by_id: Dict[str, Any], sink_node_id: str, sampler_id: Optional[str]) -> str:
     """
-    Classify: T2I, I2I, T2V, I2V, V2V
+    Classify: T2I/I2I/T2V/I2V/V2V and audio variants (T2A/A2A)
     
     Improved detection:
     - Checks latent path (EmptyLatent vs VAEEncode)
@@ -1522,9 +1599,10 @@ def _determine_workflow_type(nodes_by_id: Dict[str, Any], sink_node_id: str, sam
     # 1. Output Type
     sink = nodes_by_id.get(sink_node_id)
     sink_type = _lower(_node_type(sink))
-    # Heuristic: VHS_VideoCombine, SaveAnimatedWEBP, SaveVideo -> V, SaveImage -> I
-    is_video_out = "video" in sink_type or "animate" in sink_type or "gif" in sink_type
-    suffix = "V" if is_video_out else "I"
+    # Heuristic: SaveVideo -> V, SaveAudio -> A, SaveImage -> I
+    is_audio_out = ("audio" in sink_type) and ("image" not in sink_type) and ("video" not in sink_type)
+    is_video_out = (not is_audio_out) and ("video" in sink_type or "animate" in sink_type or "gif" in sink_type)
+    suffix = "A" if is_audio_out else ("V" if is_video_out else "I")
     
     # 2. Input Type (Trace Latent Origin)
     prefix = "T" # Default to Text
@@ -1533,6 +1611,7 @@ def _determine_workflow_type(nodes_by_id: Dict[str, Any], sink_node_id: str, sam
     # This catches reference-based workflows (Flux2 Redux, IP-Adapter, ControlNet, etc.)
     has_image_input = False
     has_video_input = False
+    has_audio_input = False
     
     for nid, node in nodes_by_id.items():
         if not isinstance(node, dict):
@@ -1561,10 +1640,10 @@ def _determine_workflow_type(nodes_by_id: Dict[str, Any], sink_node_id: str, sam
             has_image_input = True
         if "loadvideo" in ct or "videoloader" in ct:
             has_video_input = True
+        if "loadaudio" in ct or "audioloader" in ct or ("load" in ct and "audio" in ct):
+            has_audio_input = True
     
     # 2b. Now check the main latent path for EmptyLatent (which would indicate pure T2X)
-    latent_is_empty = False
-    
     if sampler_id:
         sampler = nodes_by_id.get(sampler_id)
         if isinstance(sampler, dict):
@@ -1583,7 +1662,6 @@ def _determine_workflow_type(nodes_by_id: Dict[str, Any], sink_node_id: str, sam
                      ct = _lower(_node_type(node))
                      
                      if "emptylatent" in ct:
-                         latent_is_empty = True
                          break
                      if "vaeencode" in ct:
                          # Found encoder -> I2 or V2 (main latent path)
@@ -1622,8 +1700,10 @@ def _determine_workflow_type(nodes_by_id: Dict[str, Any], sink_node_id: str, sam
                          break
     
     # 3. Determine prefix based on findings
-    # Priority: V (video) > I (image) > T (text-only)
-    if has_video_input:
+    # Priority: A (audio) > V (video) > I (image) > T (text-only)
+    if has_audio_input:
+        prefix = "A"
+    elif has_video_input:
         prefix = "V"
     elif has_image_input:
         prefix = "I"
@@ -2007,6 +2087,22 @@ def _extract_geninfo(nodes_by_id: Dict[str, Any], sinks: List[str], workflow_met
     if seed_val is None and _is_link(ins.get("seed")):
         seed_val = _resolve_scalar_from_link(nodes_by_id, ins.get("seed"))
 
+    # LiteGraph workflows often keep KSampler scalar params in widgets_values.
+    if any(v is None for v in (sampler_name, scheduler, steps, cfg, denoise, seed_val)):
+        ks_w = _extract_ksampler_widget_params(sampler_node)
+        if sampler_name is None:
+            sampler_name = _scalar(ks_w.get("sampler_name"))
+        if scheduler is None:
+            scheduler = _scalar(ks_w.get("scheduler"))
+        if steps is None:
+            steps = _scalar(ks_w.get("steps"))
+        if cfg is None:
+            cfg = _scalar(ks_w.get("cfg"))
+        if denoise is None:
+            denoise = _scalar(ks_w.get("denoise"))
+        if seed_val is None:
+            seed_val = _scalar(ks_w.get("seed"))
+
     # Advanced sampler: sampler_name/steps/scheduler/denoise/seed may be stored on linked nodes.
     model_link_for_chain = ins.get("model") if _is_link(ins.get("model")) else None
     if model_link_for_chain is None and _is_link(guider_model_link):
@@ -2117,6 +2213,14 @@ def _extract_geninfo(nodes_by_id: Dict[str, Any], sinks: List[str], workflow_met
         out["positive"] = {"value": pos_val[0], "confidence": confidence, "source": pos_val[1]}
     if neg_val:
         out["negative"] = {"value": neg_val[0], "confidence": confidence, "source": neg_val[1]}
+
+    lyrics_text, lyrics_strength, lyrics_source = _extract_lyrics_from_prompt_nodes(nodes_by_id)
+    if lyrics_text:
+        out["lyrics"] = {"value": lyrics_text, "confidence": "high", "source": lyrics_source or sampler_source}
+    if lyrics_strength is not None:
+        lyr_field = _field(lyrics_strength, "high", lyrics_source or sampler_source)
+        if lyr_field:
+            out["lyrics_strength"] = lyr_field
 
     # Backward compatible: keep top-level `checkpoint` (best-effort)
     if models:

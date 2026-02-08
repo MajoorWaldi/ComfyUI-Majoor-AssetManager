@@ -1,7 +1,6 @@
 """
 Test scanning ComfyUI's actual output directory.
 """
-import asyncio
 import os
 import sys
 from pathlib import Path
@@ -143,7 +142,7 @@ async def test_comfy_output(tmp_path):
             kind = asset['kind']
             by_kind[kind] = by_kind.get(kind, 0) + 1
 
-        logger.info(f"  Breakdown by type:")
+        logger.info("  Breakdown by type:")
         for kind, count in by_kind.items():
             logger.info(f"    {kind}: {count}")
     else:

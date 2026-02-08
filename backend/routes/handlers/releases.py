@@ -18,7 +18,7 @@ from typing import Any
 
 from aiohttp import web, ClientSession
 
-from backend.shared import Result, get_logger
+from backend.shared import Result, get_logger, sanitize_error_message
 from ..core import _json_response
 
 logger = get_logger(__name__)
@@ -71,4 +71,14 @@ def register_releases_routes(routes: web.RouteTableDef) -> None:
             return _json_response(Result.Err("DEGRADED", "Timeout while contacting GitHub"))
         except Exception as exc:
             logger.debug("Failed to fetch GitHub refs for %s/%s: %s", owner, repo, exc)
-            return _json_response(Result.Err("DEGRADED", "Failed to fetch repository refs", meta={"details": str(exc)}))
+            return _json_response(
+                Result.Err(
+                    "DEGRADED",
+                    "Failed to fetch repository refs",
+                    meta={
+                        "details": sanitize_error_message(
+                            exc, "Failed to fetch repository refs"
+                        )
+                    },
+                )
+            )

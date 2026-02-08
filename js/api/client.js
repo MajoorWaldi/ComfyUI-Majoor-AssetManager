@@ -193,7 +193,7 @@ const _readRatingTagsSyncEnabled = () => {
 /** @returns {Promise<ApiResult<any>>} */
 export async function fetchAPI(url, options = {}, retryCount = 0) {
     try {
-        const headers = typeof Headers !== "undefined" ? new Headers(options.headers || {}) : { ...(options.headers || {}) };
+        const headers = typeof Headers !== "undefined" ? new Headers(options.headers || {}) : { ...options.headers };
 
         // Add anti-CSRF header for state-changing requests
         const method = (options.method || "GET").toUpperCase();
@@ -291,7 +291,7 @@ export async function fetchAPI(url, options = {}, retryCount = 0) {
  * GET request helper
  */
 export async function get(url, options = {}) {
-    return fetchAPI(url, { ...(options || {}), method: "GET" });
+    return fetchAPI(url, { ...options, method: "GET" });
 }
 
 /**
@@ -299,9 +299,9 @@ export async function get(url, options = {}) {
  */
 export async function post(url, body, options = {}) {
     return fetchAPI(url, {
-        ...(options || {}),
+        ...options,
         method: "POST",
-        headers: { "Content-Type": "application/json", ...((options && options.headers) || {}) },
+        headers: { "Content-Type": "application/json", ...options.headers },
         body: JSON.stringify(body)
     });
 }
@@ -326,7 +326,7 @@ export async function updateAssetRating(assetId, rating, options = {}) {
         payload.asset_id = normalizeAssetId(resolvedId);
     }
     return fetchAPI("/mjr/am/asset/rating", {
-        ...(options || {}),
+        ...options,
         method: "POST",
         headers: {
             "Content-Type": "application/json",
@@ -356,7 +356,7 @@ export async function updateAssetTags(assetId, tags, options = {}) {
         payload.asset_id = normalizeAssetId(resolvedId);
     }
     const result = await fetchAPI("/mjr/am/asset/tags", {
-        ...(options || {}),
+        ...options,
         method: "POST",
         headers: {
             "Content-Type": "application/json",
@@ -410,7 +410,10 @@ export async function getAssetMetadata(assetId, options = {}) {
 export async function getViewerInfo(assetId, options = {}) {
     const id = normalizeAssetId(assetId);
     if (!id) return { ok: false, data: null, error: "Missing assetId", code: "INVALID_INPUT" };
-    return get(`/mjr/am/viewer/info?asset_id=${encodeURIComponent(id)}`, options);
+    let url = `/mjr/am/viewer/info?asset_id=${encodeURIComponent(id)}`;
+    if (options.refresh) url += "&refresh=1";
+    const { refresh: _ignored, ...fetchOpts } = options;
+    return get(url, fetchOpts);
 }
 
 /**
@@ -433,16 +436,6 @@ export async function hydrateAssetRatingTags(assetId) {
     const id = normalizeAssetId(assetId);
     if (!id) return { ok: false, error: "Missing assetId" };
     return get(`/mjr/am/asset/${encodeURIComponent(id)}?hydrate=rating_tags`);
-}
-
-/**
- * Get metadata for a file path (works even when file is not indexed in DB).
- */
-export async function getFileMetadata(filePath, options = {}) {
-    if (!filePath || typeof filePath !== "string") {
-        return { ok: false, data: null, error: "Missing file path", code: "INVALID_INPUT" };
-    }
-    return get(`/mjr/am/metadata?path=${encodeURIComponent(filePath)}`, options);
 }
 
 /**
@@ -539,6 +532,14 @@ export async function toggleWatcher(enabled = true) {
     return post(ENDPOINTS.WATCHER_TOGGLE, { enabled: !!enabled });
 }
 
+export async function getWatcherSettings() {
+    return get(ENDPOINTS.WATCHER_SETTINGS);
+}
+
+export async function updateWatcherSettings(payload = {}) {
+    return post(ENDPOINTS.WATCHER_SETTINGS, payload);
+}
+
 export async function getToolsStatus(options = {}) {
     return get(ENDPOINTS.TOOLS_STATUS, options);
 }
@@ -550,6 +551,36 @@ export async function getToolsStatus(options = {}) {
 /** @returns {Promise<ApiResult<{steps?: string[], degraded?: boolean}>>} */
 export async function optimizeDb() {
     return post("/mjr/am/db/optimize", {});
+}
+
+/**
+ * Emergency force-delete the SQLite database and recreate it.
+ * Bypasses DB-dependent security checks (works even when DB is corrupted).
+ * Closes connections, force-removes DB files from disk, reinitializes, and triggers a rescan.
+ */
+export async function forceDeleteDb() {
+    return post("/mjr/am/db/force-delete", {});
+}
+
+export async function startDuplicatesAnalysis(limit = 250) {
+    return post("/mjr/am/duplicates/analyze", { limit: Math.max(10, Math.min(5000, Number(limit) || 250)) });
+}
+
+export async function getDuplicateAlerts({ scope = "output", customRootId = "", maxGroups = 6, maxPairs = 10 } = {}) {
+    let url = `/mjr/am/duplicates/alerts?scope=${encodeURIComponent(String(scope || "output"))}`;
+    if (customRootId) {
+        url += `&custom_root_id=${encodeURIComponent(String(customRootId))}`;
+    }
+    url += `&max_groups=${encodeURIComponent(String(Math.max(1, Number(maxGroups) || 6)))}`;
+    url += `&max_pairs=${encodeURIComponent(String(Math.max(1, Number(maxPairs) || 10)))}`;
+    return get(url);
+}
+
+export async function mergeDuplicateTags(keepAssetId, mergeAssetIds = []) {
+    return post("/mjr/am/duplicates/merge-tags", {
+        keep_asset_id: Number(keepAssetId) || 0,
+        merge_asset_ids: Array.isArray(mergeAssetIds) ? mergeAssetIds.map((x) => Number(x) || 0).filter((x) => x > 0) : []
+    });
 }
 
 export async function deleteAsset(assetId) {

@@ -49,6 +49,10 @@ export function normalizeGenerationMetadata(raw) {
             if (Array.isArray(inputs)) {
                 mapped.inputs = inputs;
             }
+            const lyrics = geninfo.lyrics?.value ?? geninfo.lyrics ?? null;
+            if (typeof lyrics === "string" && lyrics.trim()) mapped.lyrics = lyrics;
+            const lyricsStrength = geninfo.lyrics_strength?.value ?? geninfo.lyrics_strength ?? null;
+            if (lyricsStrength !== null && lyricsStrength !== undefined) mapped.lyrics_strength = lyricsStrength;
 
             // Multi-output workflow prompts
             if (Array.isArray(geninfo.all_positive_prompts) && geninfo.all_positive_prompts.length > 1) {

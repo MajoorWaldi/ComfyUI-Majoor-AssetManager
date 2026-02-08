@@ -3,30 +3,28 @@ Database schema and migrations.
 """
 import hashlib
 import re
-from pathlib import Path
 from typing import List
 
 from ...shared import Result, get_logger, log_success
 
 logger = get_logger(__name__)
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 # Schema version history (high-level):
 # 1: initial assets + metadata tables
 # 2-4: incremental columns and FTS/search support
 # 5: workflow/generation flags, scan journal, and robustness fixes
 # 6: asset sources (output/input/custom) + custom root id
 # 7: metadata FTS (tags/metadata_raw) to improve search UX
+# 8: duplicate analysis hashes (content_hash/phash/hash_state)
 
 # Schema definition
 SCHEMA_V1 = """
--- Metadata table for schema versioning
 CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
--- Assets table
 CREATE TABLE IF NOT EXISTS assets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     filename TEXT NOT NULL,
@@ -46,12 +44,12 @@ CREATE TABLE IF NOT EXISTS assets (
     indexed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Asset metadata (ratings, tags, workflow)
 CREATE TABLE IF NOT EXISTS asset_metadata (
     asset_id INTEGER PRIMARY KEY,
     rating INTEGER DEFAULT 0,
     tags TEXT DEFAULT '',  -- JSON array stored as string
-    tags_text TEXT DEFAULT '',  -- Legacy text column
+     tags_text TEXT DEFAULT '',  -- Legacy text column
+     metadata_text TEXT DEFAULT '',  -- Full metadata text for FTS
     workflow_hash TEXT,
     has_workflow BOOLEAN DEFAULT 0,
     has_generation_data BOOLEAN DEFAULT 0,
@@ -94,6 +92,9 @@ COLUMN_DEFINITIONS = {
         ("created_at", "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
         ("updated_at", "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
         ("indexed_at", "indexed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+        ("content_hash", "content_hash TEXT"),
+        ("phash", "phash TEXT"),
+        ("hash_state", "hash_state TEXT"),
     ],
     "asset_metadata": [
         ("rating", "rating INTEGER DEFAULT 0"),
@@ -121,7 +122,6 @@ COLUMN_DEFINITIONS = {
 }
 
 INDEXES_AND_TRIGGERS = """
--- Full-text search (FTS5) for filenames
 CREATE VIRTUAL TABLE IF NOT EXISTS assets_fts USING fts5(
     filename,
     subfolder,
@@ -129,16 +129,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS assets_fts USING fts5(
     content_rowid='id'
 );
 
--- Full-text search (FTS5) for metadata/tags
--- Note: contentless table keyed by asset_id to avoid duplicating base rows.
--- Removed metadata_raw to reduce DB size and improve performance
 CREATE VIRTUAL TABLE IF NOT EXISTS asset_metadata_fts USING fts5(
     tags,
     tags_text,
+     metadata_text,
     content=''
 );
 
--- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_assets_filename ON assets(filename);
 CREATE INDEX IF NOT EXISTS idx_assets_subfolder ON assets(subfolder);
 CREATE INDEX IF NOT EXISTS idx_assets_kind ON assets(kind);
@@ -147,13 +144,14 @@ CREATE INDEX IF NOT EXISTS idx_assets_kind_mtime ON assets(kind, mtime);
 CREATE INDEX IF NOT EXISTS idx_assets_source ON assets(source);
 CREATE INDEX IF NOT EXISTS idx_assets_root_id ON assets(root_id);
 CREATE INDEX IF NOT EXISTS idx_assets_source_root_id ON assets(source, root_id);
--- Prevent duplicate entries for the same path/source/root (best-effort; filepath is already UNIQUE).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_filepath_source_root ON assets(filepath, source, root_id);
 CREATE INDEX IF NOT EXISTS idx_metadata_rating ON asset_metadata(rating);
 CREATE INDEX IF NOT EXISTS idx_metadata_workflow_hash ON asset_metadata(workflow_hash);
 CREATE INDEX IF NOT EXISTS idx_metadata_quality_workflow ON asset_metadata(metadata_quality, has_workflow);
--- Performance Audit Additions
 CREATE INDEX IF NOT EXISTS idx_assets_source_mtime_desc ON assets(source, mtime DESC);
+CREATE INDEX IF NOT EXISTS idx_assets_content_hash ON assets(content_hash);
+CREATE INDEX IF NOT EXISTS idx_assets_phash ON assets(phash);
+CREATE INDEX IF NOT EXISTS idx_assets_hash_state ON assets(hash_state);
 CREATE INDEX IF NOT EXISTS idx_asset_metadata_has_workflow_true ON asset_metadata(has_workflow) WHERE has_workflow = 1;
 CREATE INDEX IF NOT EXISTS idx_asset_metadata_has_generation_data_true ON asset_metadata(has_generation_data) WHERE has_generation_data = 1;
 CREATE INDEX IF NOT EXISTS idx_assets_list_cover ON assets(source, mtime DESC, id, filename, filepath, kind);
@@ -175,10 +173,9 @@ CREATE TRIGGER IF NOT EXISTS assets_fts_update AFTER UPDATE ON assets BEGIN
     WHERE rowid = new.id;
 END;
 
--- Keep metadata FTS in sync
 CREATE TRIGGER IF NOT EXISTS asset_metadata_fts_insert AFTER INSERT ON asset_metadata BEGIN
-    INSERT INTO asset_metadata_fts(rowid, tags, tags_text)
-    VALUES (new.asset_id, COALESCE(new.tags, ''), COALESCE(new.tags_text, ''));
+     INSERT INTO asset_metadata_fts(rowid, tags, tags_text, metadata_text)
+     VALUES (new.asset_id, COALESCE(new.tags, ''), COALESCE(new.tags_text, ''), COALESCE(new.metadata_text, ''));
 END;
 
 CREATE TRIGGER IF NOT EXISTS asset_metadata_fts_delete AFTER DELETE ON asset_metadata BEGIN
@@ -187,8 +184,8 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS asset_metadata_fts_update AFTER UPDATE ON asset_metadata BEGIN
     INSERT INTO asset_metadata_fts(asset_metadata_fts, rowid) VALUES('delete', old.asset_id);
-    INSERT INTO asset_metadata_fts(rowid, tags, tags_text)
-    VALUES (new.asset_id, COALESCE(new.tags, ''), COALESCE(new.tags_text, ''));
+     INSERT INTO asset_metadata_fts(rowid, tags, tags_text, metadata_text)
+     VALUES (new.asset_id, COALESCE(new.tags, ''), COALESCE(new.tags_text, ''), COALESCE(new.metadata_text, ''));
 END;
 """
 

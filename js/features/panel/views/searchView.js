@@ -44,7 +44,7 @@ export function createSearchView({ filterBtn, sortBtn, collectionsBtn, filterPop
                     dataList.appendChild(opt);
                 });
             }
-        } catch (err) {
+        } catch {
             // Ignore autocomplete errors
         }
     }, 300);

@@ -3,7 +3,7 @@
  */
 
 import { APP_CONFIG, APP_DEFAULTS } from "./config.js";
-import { getSecuritySettings, setSecuritySettings, setProbeBackendMode, getWatcherStatus, toggleWatcher } from "../api/client.js";
+import { getSecuritySettings, setSecuritySettings, setProbeBackendMode, getWatcherStatus, toggleWatcher, getWatcherSettings, updateWatcherSettings } from "../api/client.js";
 import { comfyToast } from "./toast.js";
 import { safeDispatchCustomEvent } from "../utils/events.js";
 import { t, initI18n, setLang, getCurrentLang, getSupportedLanguages } from "./i18n.js";
@@ -22,6 +22,7 @@ const DEFAULT_SETTINGS = {
     grid: {
         pageSize: APP_DEFAULTS.DEFAULT_PAGE_SIZE,
         minSize: APP_DEFAULTS.GRID_MIN_SIZE,
+        minSizePreset: "medium",
         gap: APP_DEFAULTS.GRID_GAP,
         showExtBadge: APP_DEFAULTS.GRID_SHOW_BADGES_EXTENSION,
         showRatingBadge: APP_DEFAULTS.GRID_SHOW_BADGES_RATING,
@@ -32,6 +33,11 @@ const DEFAULT_SETTINGS = {
         showDimensions: APP_DEFAULTS.GRID_SHOW_DETAILS_DIMENSIONS,
         showGenTime: APP_DEFAULTS.GRID_SHOW_DETAILS_GENTIME,
         showWorkflowDot: APP_DEFAULTS.GRID_SHOW_WORKFLOW_DOT,
+        starColor: APP_DEFAULTS.BADGE_STAR_COLOR,
+        badgeImageColor: APP_DEFAULTS.BADGE_IMAGE_COLOR,
+        badgeVideoColor: APP_DEFAULTS.BADGE_VIDEO_COLOR,
+        badgeAudioColor: APP_DEFAULTS.BADGE_AUDIO_COLOR,
+        badgeModel3dColor: APP_DEFAULTS.BADGE_MODEL3D_COLOR,
     },
     infiniteScroll: {
         enabled: APP_DEFAULTS.INFINITE_SCROLL_ENABLED,
@@ -47,6 +53,11 @@ const DEFAULT_SETTINGS = {
     },
     watcher: {
         enabled: true,
+        debounceMs: APP_DEFAULTS.WATCHER_DEBOUNCE_MS,
+        dedupeTtlMs: APP_DEFAULTS.WATCHER_DEDUPE_TTL_MS,
+    },
+    safety: {
+        confirmDeletion: true,
     },
     status: {
         pollInterval: APP_DEFAULTS.STATUS_POLL_INTERVAL,
@@ -68,9 +79,11 @@ const DEFAULT_SETTINGS = {
     },
     observability: {
         enabled: false,
+        verboseErrors: false,
     },
     sidebar: {
         position: "right",
+        showPreviewThumb: true,
     },
     probeBackend: {
         mode: "auto",
@@ -122,6 +135,27 @@ const _safeOneOf = (value, allowed, fallback) => {
     return allowed.includes(candidate) ? candidate : fallback;
 };
 
+const GRID_SIZE_PRESETS = Object.freeze({
+    small: 140,
+    medium: 200,
+    large: 280,
+});
+
+const GRID_SIZE_PRESET_OPTIONS = Object.freeze(["small", "medium", "large"]);
+
+const resolveGridMinSize = (grid = {}) => {
+    const preset = _safeOneOf(String(grid?.minSizePreset || "").toLowerCase(), GRID_SIZE_PRESET_OPTIONS, "");
+    if (preset) return GRID_SIZE_PRESETS[preset];
+    return Math.max(60, Math.min(600, Math.round(_safeNum(grid?.minSize, APP_DEFAULTS.GRID_MIN_SIZE))));
+};
+
+const detectGridSizePreset = (minSize) => {
+    const val = Math.round(_safeNum(minSize, APP_DEFAULTS.GRID_MIN_SIZE));
+    if (val <= 160) return "small";
+    if (val >= 250) return "large";
+    return "medium";
+};
+
 const deepMerge = (base, next) => {
     const output = { ...base };
     if (!next || typeof next !== "object") {
@@ -161,6 +195,7 @@ export const loadMajoorSettings = () => {
             "cache",
             "workflowMinimap",
             "security",
+            "safety",
         ]);
         const sanitized = {};
         if (parsed && typeof parsed === "object") {
@@ -211,7 +246,7 @@ const applySettingsToConfig = (settings) => {
     APP_CONFIG.DEBUG_SAFE_LISTENERS = !!settings.debug?.safeListeners;
     APP_CONFIG.DEBUG_VIEWER = !!settings.debug?.viewer;
 
-    APP_CONFIG.GRID_MIN_SIZE = Math.max(60, Math.min(600, Math.round(_safeNum(settings.grid?.minSize, APP_DEFAULTS.GRID_MIN_SIZE))));
+    APP_CONFIG.GRID_MIN_SIZE = resolveGridMinSize(settings.grid);
     APP_CONFIG.GRID_GAP = Math.max(0, Math.min(40, Math.round(_safeNum(settings.grid?.gap, APP_DEFAULTS.GRID_GAP))));
 
     APP_CONFIG.GRID_SHOW_BADGES_EXTENSION = !!(settings.grid?.showExtBadge ?? APP_DEFAULTS.GRID_SHOW_BADGES_EXTENSION);
@@ -223,6 +258,24 @@ const applySettingsToConfig = (settings) => {
     APP_CONFIG.GRID_SHOW_DETAILS_DIMENSIONS = !!(settings.grid?.showDimensions ?? APP_DEFAULTS.GRID_SHOW_DETAILS_DIMENSIONS);
     APP_CONFIG.GRID_SHOW_DETAILS_GENTIME = !!(settings.grid?.showGenTime ?? APP_DEFAULTS.GRID_SHOW_DETAILS_GENTIME);
     APP_CONFIG.GRID_SHOW_WORKFLOW_DOT = !!(settings.grid?.showWorkflowDot ?? APP_DEFAULTS.GRID_SHOW_WORKFLOW_DOT);
+
+    const _safeColor = (v, fallback) => /^#[0-9a-fA-F]{3,8}$/.test(String(v || "").trim()) ? String(v).trim() : fallback;
+    APP_CONFIG.BADGE_STAR_COLOR = _safeColor(settings.grid?.starColor, APP_DEFAULTS.BADGE_STAR_COLOR);
+    APP_CONFIG.BADGE_IMAGE_COLOR = _safeColor(settings.grid?.badgeImageColor, APP_DEFAULTS.BADGE_IMAGE_COLOR);
+    APP_CONFIG.BADGE_VIDEO_COLOR = _safeColor(settings.grid?.badgeVideoColor, APP_DEFAULTS.BADGE_VIDEO_COLOR);
+    APP_CONFIG.BADGE_AUDIO_COLOR = _safeColor(settings.grid?.badgeAudioColor, APP_DEFAULTS.BADGE_AUDIO_COLOR);
+    APP_CONFIG.BADGE_MODEL3D_COLOR = _safeColor(settings.grid?.badgeModel3dColor, APP_DEFAULTS.BADGE_MODEL3D_COLOR);
+
+    try {
+        const root = document.querySelector(".mjr-assets-manager");
+        if (root) {
+            root.style.setProperty("--mjr-star-active", APP_CONFIG.BADGE_STAR_COLOR);
+            root.style.setProperty("--mjr-badge-image", APP_CONFIG.BADGE_IMAGE_COLOR);
+            root.style.setProperty("--mjr-badge-video", APP_CONFIG.BADGE_VIDEO_COLOR);
+            root.style.setProperty("--mjr-badge-audio", APP_CONFIG.BADGE_AUDIO_COLOR);
+            root.style.setProperty("--mjr-badge-model3d", APP_CONFIG.BADGE_MODEL3D_COLOR);
+        }
+    } catch {}
 
     APP_CONFIG.INFINITE_SCROLL_ENABLED = !!settings.infiniteScroll?.enabled;
     APP_CONFIG.INFINITE_SCROLL_ROOT_MARGIN = String(settings.infiniteScroll?.rootMargin || APP_DEFAULTS.INFINITE_SCROLL_ROOT_MARGIN);
@@ -243,6 +296,9 @@ const applySettingsToConfig = (settings) => {
     APP_CONFIG.RT_HYDRATE_SEEN_MAX = Math.max(1000, Math.min(200_000, Math.round(_safeNum(settings.rtHydrate?.seenMax, APP_DEFAULTS.RT_HYDRATE_SEEN_MAX))));
     APP_CONFIG.RT_HYDRATE_PRUNE_BUDGET = Math.max(10, Math.min(10_000, Math.round(_safeNum(settings.rtHydrate?.pruneBudget, APP_DEFAULTS.RT_HYDRATE_PRUNE_BUDGET))));
     APP_CONFIG.RT_HYDRATE_SEEN_TTL_MS = Math.max(5_000, Math.min(6 * 60 * 60_000, Math.round(_safeNum(settings.rtHydrate?.seenTtlMs, APP_DEFAULTS.RT_HYDRATE_SEEN_TTL_MS))));
+
+    APP_CONFIG.DELETE_CONFIRMATION = !!settings.safety?.confirmDeletion;
+    APP_CONFIG.DEBUG_VERBOSE_ERRORS = !!settings.observability?.verboseErrors;
 };
 
 export async function syncBackendSecuritySettings() {
@@ -329,18 +385,37 @@ export const registerMajoorSettings = (app, onApplied) => {
             }
         } catch {}
 
-        let supportsCategory = true;
         const safeAddSetting = (payload) => {
             if (!payload || typeof payload !== "object") return;
             try {
                 addSetting(payload);
                 return;
-            } catch (err) {}
-            try {
-                const { category: _cat, ...rest } = payload;
-                supportsCategory = false;
-                addSetting(rest);
-            } catch {}
+            } catch (err1) {
+                // Some ComfyUI builds reject optional attrs payloads.
+                // Retry gracefully so settings remain visible.
+                try {
+                    const noAttrs = { ...payload };
+                    delete noAttrs.attrs;
+                    addSetting(noAttrs);
+                    return;
+                } catch (err2) {
+                    try {
+                        const { category: _cat, attrs: _attrs, ...rest } = payload;
+                        addSetting(rest);
+                        return;
+                    } catch (err3) {
+                        try {
+                            console.warn("[Majoor] addSetting failed", {
+                                id: payload?.id,
+                                name: payload?.name,
+                                err1: String(err1?.message || err1 || ""),
+                                err2: String(err2?.message || err2 || ""),
+                                err3: String(err3?.message || err3 || ""),
+                            });
+                        } catch {}
+                    }
+                }
+            }
         };
 
         const notifyApplied = (key) => {
@@ -351,11 +426,12 @@ export const registerMajoorSettings = (app, onApplied) => {
         };
 
         const cat = (section, label) => [SETTINGS_CATEGORY, section, label];
-        const cardCat = (label) => [SETTINGS_CATEGORY, t("cat.grid"), label];
+        const cardCat = (label) => [SETTINGS_CATEGORY, t("cat.cards", "Cards"), label];
+        const badgeCat = (label) => [SETTINGS_CATEGORY, t("cat.badges", "Badges"), label];
 
           safeAddSetting({
               id: `${SETTINGS_PREFIX}.Grid.ShowExtBadge`,
-              category: cardCat("Show format badges"),
+              category: badgeCat("Show format badges"),
             name: "Show format badges",
             tooltip: "Display format badges (e.g. JPG, MP4) on thumbnails",
             type: "boolean",
@@ -370,7 +446,7 @@ export const registerMajoorSettings = (app, onApplied) => {
 
           safeAddSetting({
               id: `${SETTINGS_PREFIX}.Grid.ShowRatingBadge`,
-              category: cardCat("Show rating badges"),
+              category: badgeCat("Show rating badges"),
             name: "Show ratings",
             tooltip: "Display star ratings on thumbnails",
             type: "boolean",
@@ -385,7 +461,7 @@ export const registerMajoorSettings = (app, onApplied) => {
 
           safeAddSetting({
               id: `${SETTINGS_PREFIX}.Grid.ShowTagsBadge`,
-              category: cardCat("Show tags badges"),
+              category: badgeCat("Show tags badges"),
             name: "Show tags",
             tooltip: "Display a small indicator if an asset has tags",
             type: "boolean",
@@ -395,6 +471,93 @@ export const registerMajoorSettings = (app, onApplied) => {
                 saveMajoorSettings(settings);
                 applySettingsToConfig(settings);
                 notifyApplied("grid.showTagsBadge");
+            },
+        });
+
+        // Badge Colors
+        if (!settings.grid?.minSizePreset) {
+            settings.grid = settings.grid || {};
+            settings.grid.minSizePreset = detectGridSizePreset(settings.grid.minSize);
+            saveMajoorSettings(settings);
+        }
+        const colorCat = (label) => [SETTINGS_CATEGORY, t("cat.badges", "Badges"), label];
+        const normalizeHexColor = (value, fallback) => {
+            const v = String(value || "").trim();
+            return /^#[0-9a-fA-F]{6}$/.test(v) ? v.toUpperCase() : fallback;
+        };
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Badges.StarColor`,
+            category: colorCat(t("cat.badgeColors", "Badge colors")),
+            name: t("setting.starColor", "Majoor: Star color"),
+            tooltip: t("setting.starColor.tooltip", "Color of rating stars on thumbnails (hex, e.g. #FFD45A)"),
+            type: "color",
+            defaultValue: normalizeHexColor(settings.grid?.starColor, APP_DEFAULTS.BADGE_STAR_COLOR),
+            onChange: (value) => {
+                settings.grid.starColor = normalizeHexColor(value, APP_DEFAULTS.BADGE_STAR_COLOR);
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("grid.starColor");
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Badges.ImageColor`,
+            category: colorCat(t("cat.badgeColors", "Badge colors")),
+            name: t("setting.badgeImageColor", "Majoor: Image badge color"),
+            tooltip: t("setting.badgeImageColor.tooltip", "Color for image badges: PNG, JPG, WEBP, GIF, BMP, TIF (hex)"),
+            type: "color",
+            defaultValue: normalizeHexColor(settings.grid?.badgeImageColor, APP_DEFAULTS.BADGE_IMAGE_COLOR),
+            onChange: (value) => {
+                settings.grid.badgeImageColor = normalizeHexColor(value, APP_DEFAULTS.BADGE_IMAGE_COLOR);
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("grid.badgeImageColor");
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Badges.VideoColor`,
+            category: colorCat(t("cat.badgeColors", "Badge colors")),
+            name: t("setting.badgeVideoColor", "Majoor: Video badge color"),
+            tooltip: t("setting.badgeVideoColor.tooltip", "Color for video badges: MP4, WEBM, MOV, AVI, MKV (hex)"),
+            type: "color",
+            defaultValue: normalizeHexColor(settings.grid?.badgeVideoColor, APP_DEFAULTS.BADGE_VIDEO_COLOR),
+            onChange: (value) => {
+                settings.grid.badgeVideoColor = normalizeHexColor(value, APP_DEFAULTS.BADGE_VIDEO_COLOR);
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("grid.badgeVideoColor");
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Badges.AudioColor`,
+            category: colorCat(t("cat.badgeColors", "Badge colors")),
+            name: t("setting.badgeAudioColor", "Majoor: Audio badge color"),
+            tooltip: t("setting.badgeAudioColor.tooltip", "Color for audio badges: MP3, WAV, OGG, FLAC (hex)"),
+            type: "color",
+            defaultValue: normalizeHexColor(settings.grid?.badgeAudioColor, APP_DEFAULTS.BADGE_AUDIO_COLOR),
+            onChange: (value) => {
+                settings.grid.badgeAudioColor = normalizeHexColor(value, APP_DEFAULTS.BADGE_AUDIO_COLOR);
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("grid.badgeAudioColor");
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Badges.Model3dColor`,
+            category: colorCat(t("cat.badgeColors", "Badge colors")),
+            name: t("setting.badgeModel3dColor", "Majoor: 3D model badge color"),
+            tooltip: t("setting.badgeModel3dColor.tooltip", "Color for 3D model badges: OBJ, FBX, GLB, GLTF (hex)"),
+            type: "color",
+            defaultValue: normalizeHexColor(settings.grid?.badgeModel3dColor, APP_DEFAULTS.BADGE_MODEL3D_COLOR),
+            onChange: (value) => {
+                settings.grid.badgeModel3dColor = normalizeHexColor(value, APP_DEFAULTS.BADGE_MODEL3D_COLOR);
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("grid.badgeModel3dColor");
             },
         });
 
@@ -490,34 +653,44 @@ export const registerMajoorSettings = (app, onApplied) => {
             });
         }
 
-        let thumbSizeTimer = null;
-        let thumbSizePending = null;
-        const commitThumbSize = () => {
-            thumbSizeTimer = null;
-            if (thumbSizePending == null) return;
-            const sanitized = Math.max(80, Math.min(400, Math.round(Number(thumbSizePending) || DEFAULT_SETTINGS.grid.minSize)));
-            settings.grid.minSize = sanitized;
-            saveMajoorSettings(settings);
-            applySettingsToConfig(settings);
-            notifyApplied("grid.thumbSize");
-            thumbSizePending = null;
-        };
-        const scheduleThumbSizeUpdate = (value) => {
-            thumbSizePending = value;
-            if (thumbSizeTimer) return;
-            thumbSizeTimer = setTimeout(commitThumbSize, 160);
-        };
-
         safeAddSetting({
             id: `${SETTINGS_PREFIX}.Cards.ThumbSize`,
-            category: cardCat("Thumbnail width"),
-            name: "Thumbnail width",
-            tooltip: "Set the approximate width of each thumbnail. Higher values show fewer cards per row.",
-            type: "slider",
-            defaultValue: settings.grid.minSize,
-            attrs: { min: 80, max: 400, step: 10 },
+            category: cardCat(t("setting.grid.cardSize.group", "Card size")),
+            name: t("setting.grid.cardSize.name", "Majoor: Card Size"),
+            tooltip: t("setting.grid.cardSize.desc", "Choose the card size preset used by the grid layout."),
+            type: "combo",
+            defaultValue: (() => {
+                const preset = _safeOneOf(
+                    String(settings.grid?.minSizePreset || "").toLowerCase(),
+                    GRID_SIZE_PRESET_OPTIONS,
+                    detectGridSizePreset(settings.grid?.minSize)
+                );
+                const labels = {
+                    small: t("setting.grid.cardSize.small", "Small"),
+                    medium: t("setting.grid.cardSize.medium", "Medium"),
+                    large: t("setting.grid.cardSize.large", "Large"),
+                };
+                return labels[preset] || labels.medium;
+            })(),
+            options: [
+                t("setting.grid.cardSize.small", "Small"),
+                t("setting.grid.cardSize.medium", "Medium"),
+                t("setting.grid.cardSize.large", "Large"),
+            ],
             onChange: (value) => {
-                scheduleThumbSizeUpdate(value);
+                const label = String(value || "").trim().toLowerCase();
+                const smallLabel = t("setting.grid.cardSize.small", "Small").toLowerCase();
+                const mediumLabel = t("setting.grid.cardSize.medium", "Medium").toLowerCase();
+                const largeLabel = t("setting.grid.cardSize.large", "Large").toLowerCase();
+                let preset = "medium";
+                if (label === smallLabel || label === "small" || label === "petit") preset = "small";
+                else if (label === largeLabel || label === "large" || label === "grand") preset = "large";
+                else if (label === mediumLabel || label === "medium" || label === "moyen") preset = "medium";
+                settings.grid.minSizePreset = preset;
+                settings.grid.minSize = GRID_SIZE_PRESETS[preset];
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("grid.minSizePreset");
             },
         });
 
@@ -534,6 +707,21 @@ export const registerMajoorSettings = (app, onApplied) => {
                 settings.sidebar.position = value === "left" ? "left" : "right";
                 saveMajoorSettings(settings);
                 notifyApplied("sidebar.position");
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Sidebar.ShowPreviewThumb`,
+            category: cat(t("cat.grid"), "Sidebar preview"),
+            name: "Show sidebar preview thumb",
+            tooltip: "Show/hide the large media preview at the top of the sidebar metadata panel.",
+            type: "boolean",
+            defaultValue: !!(settings.sidebar?.showPreviewThumb ?? true),
+            onChange: (value) => {
+                settings.sidebar = settings.sidebar || {};
+                settings.sidebar.showPreviewThumb = !!value;
+                saveMajoorSettings(settings);
+                notifyApplied("sidebar.showPreviewThumb");
             },
         });
 
@@ -637,7 +825,7 @@ export const registerMajoorSettings = (app, onApplied) => {
             id: `${SETTINGS_PREFIX}.Watcher.Enabled`,
             category: cat(t("cat.scanning"), t("setting.watcher.name").replace("Majoor: ", "")),
             name: t("setting.watcher.name"),
-            tooltip: t("setting.watcher.desc"),
+            tooltip: t("setting.watcher.desc") + " (env: MJR_ENABLE_WATCHER)",
             type: "boolean",
             defaultValue: !!settings.watcher?.enabled,
             onChange: async (value) => {
@@ -661,6 +849,117 @@ export const registerMajoorSettings = (app, onApplied) => {
             },
         });
 
+        const _clampWatcherValue = (raw, fallback, min, max) => {
+            const parsed = Math.round(_safeNum(raw, fallback));
+            return Math.max(min, Math.min(max, parsed));
+        };
+
+        const applyWatcherSettingsFromBackend = (payload = {}) => {
+            const changed = [];
+            settings.watcher = settings.watcher || {};
+            if (typeof payload.debounce_ms === "number") {
+                const normalized = Math.max(50, Math.min(5000, Math.round(payload.debounce_ms)));
+                if (settings.watcher.debounceMs !== normalized) {
+                    settings.watcher.debounceMs = normalized;
+                    changed.push("watcher.debounceMs");
+                }
+            }
+            if (typeof payload.dedupe_ttl_ms === "number") {
+                const normalized = Math.max(100, Math.min(30000, Math.round(payload.dedupe_ttl_ms)));
+                if (settings.watcher.dedupeTtlMs !== normalized) {
+                    settings.watcher.dedupeTtlMs = normalized;
+                    changed.push("watcher.dedupeTtlMs");
+                }
+            }
+            if (!changed.length) {
+                return;
+            }
+            saveMajoorSettings(settings);
+            changed.forEach((key) => notifyApplied(key));
+        };
+
+        const syncWatcherRuntimeSettings = async () => {
+            try {
+                const res = await getWatcherSettings();
+                if (!res?.ok) {
+                    return;
+                }
+                applyWatcherSettingsFromBackend(res.data || {});
+            } catch {}
+        };
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Watcher.DebounceDelay`,
+            category: cat(t("cat.scanning"), t("setting.watcher.name").replace("Majoor: ", "")),
+            name: t("setting.watcher.debounce.name"),
+            tooltip: t("setting.watcher.debounce.desc") + " (env: MJR_WATCHER_DEBOUNCE_MS)",
+            type: "number",
+            defaultValue: settings.watcher?.debounceMs ?? APP_DEFAULTS.WATCHER_DEBOUNCE_MS,
+            attrs: { min: 50, max: 5000, step: 50 },
+            onChange: async (value) => {
+                const fallback = APP_DEFAULTS.WATCHER_DEBOUNCE_MS;
+                const clamped = _clampWatcherValue(value, fallback, 50, 5000);
+                const previous = settings.watcher?.debounceMs ?? fallback;
+                if (clamped === previous) return;
+                settings.watcher = settings.watcher || {};
+                settings.watcher.debounceMs = clamped;
+                saveMajoorSettings(settings);
+                try {
+                    const res = await updateWatcherSettings({ debounce_ms: clamped });
+                    if (!res?.ok) {
+                        throw new Error(res?.error || t("setting.watcher.debounce.error"));
+                    }
+                    const backendValue = Math.round(Number(res?.data?.debounce_ms ?? clamped));
+                    settings.watcher.debounceMs = backendValue;
+                    saveMajoorSettings(settings);
+                    notifyApplied("watcher.debounceMs");
+                } catch (error) {
+                    settings.watcher.debounceMs = previous;
+                    saveMajoorSettings(settings);
+                    notifyApplied("watcher.debounceMs");
+                    comfyToast(error?.message || t("setting.watcher.debounce.error"), "error");
+                }
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Watcher.DedupeWindow`,
+            category: cat(t("cat.scanning"), t("setting.watcher.name").replace("Majoor: ", "")),
+            name: t("setting.watcher.dedupe.name"),
+            tooltip: t("setting.watcher.dedupe.desc") + " (env: MJR_WATCHER_DEDUPE_TTL_MS)",
+            type: "number",
+            defaultValue: settings.watcher?.dedupeTtlMs ?? APP_DEFAULTS.WATCHER_DEDUPE_TTL_MS,
+            attrs: { min: 100, max: 30000, step: 100 },
+            onChange: async (value) => {
+                const fallback = APP_DEFAULTS.WATCHER_DEDUPE_TTL_MS;
+                const clamped = _clampWatcherValue(value, fallback, 100, 30000);
+                const previous = settings.watcher?.dedupeTtlMs ?? fallback;
+                if (clamped === previous) return;
+                settings.watcher = settings.watcher || {};
+                settings.watcher.dedupeTtlMs = clamped;
+                saveMajoorSettings(settings);
+                try {
+                    const res = await updateWatcherSettings({ dedupe_ttl_ms: clamped });
+                    if (!res?.ok) {
+                        throw new Error(res?.error || t("setting.watcher.dedupe.error"));
+                    }
+                    const backendValue = Math.round(Number(res?.data?.dedupe_ttl_ms ?? clamped));
+                    settings.watcher.dedupeTtlMs = backendValue;
+                    saveMajoorSettings(settings);
+                    notifyApplied("watcher.dedupeTtlMs");
+                } catch (error) {
+                    settings.watcher.dedupeTtlMs = previous;
+                    saveMajoorSettings(settings);
+                    notifyApplied("watcher.dedupeTtlMs");
+                    comfyToast(error?.message || t("setting.watcher.dedupe.error"), "error");
+                }
+            },
+        });
+
+        try {
+            syncWatcherRuntimeSettings().catch(() => {});
+        } catch {}
+
         safeAddSetting({
             id: `${SETTINGS_PREFIX}.RatingTagsSync.Enabled`,
             category: cat(t("cat.scanning"), t("setting.sync.rating.name").replace("Majoor: ", "")),
@@ -673,6 +972,38 @@ export const registerMajoorSettings = (app, onApplied) => {
                 settings.ratingTagsSync.enabled = !!value;
                 saveMajoorSettings(settings);
                 notifyApplied("ratingTagsSync.enabled");
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Safety.ConfirmDeletion`,
+            category: cat(t("cat.security"), "Confirm before deleting"),
+            name: "Confirm before deleting",
+            tooltip: "Show a confirmation dialog before deleting files. Disabling this allows instant deletion.",
+            type: "boolean",
+            defaultValue: settings.safety?.confirmDeletion !== false,
+            onChange: (value) => {
+                settings.safety = settings.safety || {};
+                settings.safety.confirmDeletion = !!value;
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("safety.confirmDeletion");
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Observability.VerboseErrors`,
+            category: cat(t("cat.advanced"), "Verbose error logging"),
+            name: "Verbose error logging",
+            tooltip: "Show detailed error messages in toasts and console. Useful for debugging.",
+            type: "boolean",
+            defaultValue: !!settings.observability?.verboseErrors,
+            onChange: (value) => {
+                settings.observability = settings.observability || {};
+                settings.observability.verboseErrors = !!value;
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("observability.verboseErrors");
             },
         });
 
@@ -696,7 +1027,7 @@ export const registerMajoorSettings = (app, onApplied) => {
             id: `${SETTINGS_PREFIX}.ProbeBackend.Mode`,
             category: cat(t("cat.advanced"), t("setting.probe.mode.name").replace("Majoor: ", "")),
             name: t("setting.probe.mode.name"),
-            tooltip: t("setting.probe.mode.desc"),
+            tooltip: t("setting.probe.mode.desc") + " (env: MAJOOR_MEDIA_PROBE_BACKEND)",
             type: "combo",
             defaultValue: settings.probeBackend?.mode || DEFAULT_SETTINGS.probeBackend.mode,
             options: ["auto", "exiftool", "ffprobe", "both"],
@@ -738,12 +1069,10 @@ export const registerMajoorSettings = (app, onApplied) => {
                 "setting.sec.token.desc",
                 "Store the API token used for write operations. Majoor sends it via X-MJR-Token and Authorization headers."
             ),
-            type: "string",
+            type: "text",
             defaultValue: settings.security?.apiToken || "",
             attrs: {
                 placeholder: t("setting.sec.token.placeholder", "Leave blank to disable."),
-                type: "password",
-                autocomplete: "new-password",
             },
             onChange: (value) => {
                 settings.security = settings.security || {};
@@ -806,7 +1135,6 @@ export const registerMajoorSettings = (app, onApplied) => {
         // Language setting
         const languages = getSupportedLanguages();
         const langOptions = languages.map(l => l.code);
-        const langLabels = Object.fromEntries(languages.map(l => [l.code, l.name]));
         safeAddSetting({
             id: `${SETTINGS_PREFIX}.Language`,
             category: cat(t("cat.advanced"), t("setting.language.name", "Language")),
@@ -822,6 +1150,36 @@ export const registerMajoorSettings = (app, onApplied) => {
                     // Toast removed: no notification on language change
                 }
             },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.EnvVars.Reference`,
+            category: cat(t("cat.advanced"), "Environment variables"),
+            name: "Environment variables reference",
+            tooltip: [
+                "Set these env vars before starting ComfyUI to override defaults:",
+                "",
+                "MAJOOR_OUTPUT_DIRECTORY — Override output root directory",
+                "MAJOOR_EXIFTOOL_PATH — Path to exiftool binary",
+                "MAJOOR_FFPROBE_PATH — Path to ffprobe binary",
+                "MAJOOR_MEDIA_PROBE_BACKEND — Probe mode: auto|exiftool|ffprobe|both",
+                "MAJOOR_EXIFTOOL_TIMEOUT — ExifTool timeout in seconds (default: 15)",
+                "MAJOOR_FFPROBE_TIMEOUT — FFprobe timeout in seconds (default: 10)",
+                "MAJOOR_DB_TIMEOUT — Database timeout in seconds (default: 30)",
+                "MAJOOR_DB_MAX_CONNECTIONS — Max DB connections (default: 8)",
+                "MAJOOR_METADATA_CACHE_MAX — Metadata cache max entries (default: 100000)",
+                "MAJOOR_METADATA_EXTRACT_CONCURRENCY — Parallel metadata workers (default: 1)",
+                "MJR_ENABLE_WATCHER — Enable file watcher: 1|0 (default: 1)",
+                "MJR_WATCHER_DEBOUNCE_MS — Watcher debounce delay in ms (default: 500)",
+                "MJR_WATCHER_DEDUPE_TTL_MS — Watcher dedupe window in ms (default: 3000)",
+                "MJR_WATCHER_MAX_FILE_SIZE_BYTES — Max file size to index (default: 512MB)",
+                "MJR_WATCHER_FLUSH_MAX_FILES — Max files per flush batch (default: 256)",
+                "MJR_WATCHER_PENDING_MAX — Max pending watcher queue (default: 5000)",
+                "MAJOOR_SEARCH_MAX_LIMIT — Max search results (default: 500)",
+                "MAJOOR_BG_SCAN_ON_LIST — Scan on directory list: 0|1 (default: 0)",
+            ].join("\n"),
+            type: "text",
+            defaultValue: "Hover for full list of environment variables",
         });
 
         try {

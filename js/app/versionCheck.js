@@ -57,7 +57,7 @@ async function fetchLatestReleaseVersion() {
 }
 
 function emitVersionUpdateState(state) {
-    _versionUpdateState = { ...(state || {}), timestamp: Date.now() };
+    _versionUpdateState = { ...state, timestamp: Date.now() };
     const w = typeof window !== "undefined" ? window : null;
     if (w) {
         try {

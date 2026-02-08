@@ -14,6 +14,7 @@ from .viewer import register_viewer_routes
 from .db_maintenance import register_db_maintenance_routes
 from .releases import register_releases_routes
 from .version import register_version_routes
+from .duplicates import register_duplicates_routes
 
 __all__ = [
     "register_health_routes",
@@ -30,4 +31,5 @@ __all__ = [
     "register_releases_routes",
     "register_version_routes",
     "register_download_routes",
+    "register_duplicates_routes",
 ]

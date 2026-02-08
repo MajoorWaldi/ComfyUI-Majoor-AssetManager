@@ -40,9 +40,11 @@ export function createDefaultViewerState() {
         probeEnabled: false,
         loupeEnabled: false,
         hudEnabled: true,
+        distractionFree: false,
         loupeSize: 120,
         loupeMagnification: 8,
         genInfoOpen: true,
+        audioVisualizerMode: "artistic", // simple|artistic
 
         // UX state
         _userInteracted: false,

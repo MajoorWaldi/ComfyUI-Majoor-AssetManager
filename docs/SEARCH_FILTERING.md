@@ -44,27 +44,9 @@ Search works across all available scopes:
 ## Filtering Options
 
 ### Kind Filter
-Filter assets by file type:
+The kind filter dropdown exposes the four file buckets that the backend consistently understands: **image**, **video**, **audio**, and **model3d**. Pick the bucket that best fits your search and the grid will stay in sync with the backend filters.
 
-#### Image Formats
-- **PNG**: Portable Network Graphics files
-- **JPG/JPEG**: Joint Photographic Experts Group files
-- **WEBP**: Modern image format with compression
-- **GIF**: Animated or static graphics interchange format
-- **BMP**: Bitmap image files
-- **TIFF/TIF**: Tagged Image File Format
-
-#### Video Formats
-- **MP4**: MPEG-4 Part 14 video files
-- **MOV**: Apple QuickTime movie files
-- **AVI**: Audio Video Interleave files
-- **MKV**: Matroska video files
-- **WEBM**: WebM video files
-- **FLV**: Flash video files
-
-#### Workflow Formats
-- **JSON**: Workflow definition files
-- **PNG**: PNG files with embedded workflows
+If you need to target a specific extension (for example `ext:webp` or `ext:gif`), type the `ext:<extension>` token directly in the search bar. The server parses these tokens and applies them as extension filters even if the dropdown remains on “All” or a different category.
 
 ### Rating Filter
 Filter by star ratings (0-5 stars):
@@ -85,8 +67,12 @@ Filter assets by creation or modification dates:
 2. Select date range using calendar pickers
 3. Apply the filter to narrow results
 4. Useful for finding recent work or historical assets
+> **UTC note:** The server evaluates date filters using UTC boundaries so every “today”/“this week” span is consistent regardless of the machine timezone.
 
 ### Advanced Filters
+
+#### Inline Attribute Filters
+Type tokens like `rating:5` or `ext:png` directly into the search input to add filters without touching the dropdowns. The backend recognizes these attribute-style tokens, so the grid applies the extra constraint even when the UI controls stay untouched.
 
 #### Hide PNG Siblings
 When working with video generations that include PNG previews:

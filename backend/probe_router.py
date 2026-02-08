@@ -7,6 +7,7 @@ from pathlib import Path
 from backend.config import MEDIA_PROBE_BACKEND
 from backend.tool_detect import has_exiftool, has_ffprobe
 from backend.shared import get_logger
+from backend.features.audio import AUDIO_EXTENSIONS
 
 logger = get_logger(__name__)
 
@@ -40,6 +41,7 @@ def pick_probe_backend(
     # Determine file type
     ext = Path(filepath).suffix.lower()
     is_video = ext in VIDEO_EXTS
+    is_audio = ext in AUDIO_EXTENSIONS
 
     # Simple modes
     if mode == "exiftool":
@@ -68,7 +70,7 @@ def pick_probe_backend(
 
     # Auto mode (recommended)
     if mode == "auto":
-        if is_video:
+        if is_video or is_audio:
             # For videos: use both if available
             # ExifTool for generation tags, FFprobe for tech metadata
             tools = []

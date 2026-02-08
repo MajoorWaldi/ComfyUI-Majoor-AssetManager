@@ -18,7 +18,7 @@ from aiohttp import web
 
 from backend.config import OUTPUT_ROOT_PATH
 from backend.custom_roots import resolve_custom_root
-from backend.shared import Result, get_logger
+from backend.shared import Result, get_logger, sanitize_error_message
 from backend.routes.core.paths import _is_within_root, _safe_rel_path
 from backend.routes.core.response import _json_response
 from backend.routes.core.request_json import _read_json
@@ -34,6 +34,23 @@ logger = get_logger(__name__)
 _BATCH_DIR = OUTPUT_ROOT_PATH / "_mjr_batch_zips"
 _BATCH_LOCK = threading.Lock()
 _BATCH_CACHE: Dict[str, Dict[str, Any]] = {}
+_TOKEN_LOCKS: Dict[str, threading.Lock] = {}
+_TOKEN_LOCKS_LOCK = threading.Lock()
+
+
+def _get_token_lock(token: str) -> threading.Lock:
+    with _TOKEN_LOCKS_LOCK:
+        lock = _TOKEN_LOCKS.get(token)
+        if lock is None:
+            lock = threading.Lock()
+            _TOKEN_LOCKS[token] = lock
+        return lock
+
+
+def _release_token_lock(token: str) -> None:
+    with _TOKEN_LOCKS_LOCK:
+        if token in _TOKEN_LOCKS:
+            _TOKEN_LOCKS.pop(token, None)
 
 _DEFAULT_BATCH_TTL_SECONDS = 300  # 5 minutes
 _DEFAULT_BATCH_MAX = 50
@@ -86,6 +103,7 @@ def _cleanup_batch_zips() -> None:
         for token in stale:
             entry = _BATCH_CACHE.pop(token, None)
             path = entry.get("path") if isinstance(entry, dict) else None
+            _release_token_lock(token)
             if isinstance(path, Path):
                 try:
                     if path.exists():
@@ -100,14 +118,15 @@ def _cleanup_batch_zips() -> None:
             to_drop = items[: max(0, len(items) - _BATCH_MAX)]
             for token, entry in to_drop:
                 _BATCH_CACHE.pop(token, None)
-                path = entry.get("path") if isinstance(entry, dict) else None
-                if isinstance(path, Path):
-                    try:
-                        if path.exists():
-                            path.unlink()
-                            logger.debug("Cleaned up batch zip (cache cap): %s", path.name)
-                    except Exception as exc:
-                        logger.warning("Failed to cleanup batch zip %s: %s", path.name if path else token, exc)
+                _release_token_lock(token)
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if isinstance(path, Path):
+                try:
+                    if path.exists():
+                        path.unlink()
+                        logger.debug("Cleaned up batch zip (cache cap): %s", path.name)
+                except Exception as exc:
+                    logger.warning("Failed to cleanup batch zip %s: %s", path.name if path else token, exc)
 
 
 def _resolve_item_path(item: Dict[str, Any]) -> Optional[Path]:
@@ -199,10 +218,13 @@ def register_batch_zip_routes(routes: web.RouteTableDef) -> None:
         try:
             _BATCH_DIR.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
-            return _json_response(Result.Err("IO_ERROR", f"Cannot create batch directory: {exc}"))
+            return _json_response(
+                Result.Err("IO_ERROR", sanitize_error_message(exc, "Cannot create batch directory"))
+            )
 
         _cleanup_batch_zips()
 
+        token_lock = _get_token_lock(token)
         zip_path = (_BATCH_DIR / f".mjr_batch_{token}.zip").resolve()
         try:
             zip_path.relative_to(_BATCH_DIR.resolve(strict=True))
@@ -221,59 +243,60 @@ def register_batch_zip_routes(routes: web.RouteTableDef) -> None:
             }
 
         def _build_zip() -> int:
-            try:
-                if zip_path.exists():
-                    zip_path.unlink()
-            except Exception:
-                pass
+            with token_lock:
+                try:
+                    if zip_path.exists():
+                        zip_path.unlink()
+                except Exception:
+                    pass
 
-            count = 0
-            used_names = set()
-            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                for raw in items:
-                    if not isinstance(raw, dict):
-                        continue
-                    target = _resolve_item_path(raw)
-                    if not target:
-                        continue
+                count = 0
+                used_names = set()
+                with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for raw in items:
+                        if not isinstance(raw, dict):
+                            continue
+                        target = _resolve_item_path(raw)
+                        if not target:
+                            continue
 
-                    # Flatten: never include subfolders in the ZIP. This matches drag-out UX
-                    # expectations (a simple bundle of files).
-                    arc_name_rel = _safe_rel_path(str(raw.get("filename") or ""))
-                    if not arc_name_rel or len(arc_name_rel.parts) != 1:
-                        arc_name_rel = Path(target.name)
+                        # Flatten: never include subfolders in the ZIP. This matches drag-out UX
+                        # expectations (a simple bundle of files).
+                        arc_name_rel = _safe_rel_path(str(raw.get("filename") or ""))
+                        if not arc_name_rel or len(arc_name_rel.parts) != 1:
+                            arc_name_rel = Path(target.name)
 
-                    arc_base = arc_name_rel.name or target.name
-                    arc_base = arc_base.replace("\x00", "").replace("\r", "").replace("\n", "")
-                    arc_base = arc_base.replace("/", "_").replace("\\", "_")
-                    if not arc_base:
-                        arc_base = target.name
+                        arc_base = arc_name_rel.name or target.name
+                        arc_base = arc_base.replace("\x00", "").replace("\r", "").replace("\n", "")
+                        arc_base = arc_base.replace("/", "_").replace("\\", "_")
+                        if not arc_base:
+                            arc_base = target.name
 
-                    # Avoid collisions when multiple folders contain the same filename.
-                    stem = Path(arc_base).stem
-                    suffix = Path(arc_base).suffix
-                    if not stem and suffix:
-                        stem = arc_base[: -len(suffix)] or arc_base
-                    candidate = arc_base[:_ZIP_NAME_MAX_LEN]
-                    if candidate in used_names:
-                        n = 2
-                        while True:
-                            attempt = f"{stem} ({n}){suffix}" if suffix else f"{stem} ({n})"
-                            attempt = attempt[:_ZIP_NAME_MAX_LEN]
-                            if attempt not in used_names:
-                                candidate = attempt
-                                break
-                            n += 1
-                    used_names.add(candidate)
+                        # Avoid collisions when multiple folders contain the same filename.
+                        stem = Path(arc_base).stem
+                        suffix = Path(arc_base).suffix
+                        if not stem and suffix:
+                            stem = arc_base[: -len(suffix)] or arc_base
+                        candidate = arc_base[:_ZIP_NAME_MAX_LEN]
+                        if candidate in used_names:
+                            n = 2
+                            while True:
+                                attempt = f"{stem} ({n}){suffix}" if suffix else f"{stem} ({n})"
+                                attempt = attempt[:_ZIP_NAME_MAX_LEN]
+                                if attempt not in used_names:
+                                    candidate = attempt
+                                    break
+                                n += 1
+                        used_names.add(candidate)
 
-                    arc = candidate
-                    try:
-                        ok = _zip_add_file_open_handle(zf, target, arc)
-                        if ok:
-                            count += 1
-                    except Exception:
-                        continue
-            return count
+                        arc = candidate
+                        try:
+                            ok = _zip_add_file_open_handle(zf, target, arc)
+                            if ok:
+                                count += 1
+                        except Exception:
+                            continue
+                return count
 
         def _zip_add_file_open_handle(zf: zipfile.ZipFile, path: Path, arcname: str) -> bool:
             """
@@ -332,7 +355,7 @@ def register_batch_zip_routes(routes: web.RouteTableDef) -> None:
             if not ok:
                 error = "No valid files to archive"
         except Exception as exc:
-            error = str(exc)
+            error = sanitize_error_message(exc, "Batch zip creation failed")
 
         with _BATCH_LOCK:
             entry = _BATCH_CACHE.get(token)

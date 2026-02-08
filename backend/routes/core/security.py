@@ -14,6 +14,7 @@ from typing import Any, Mapping, Optional, Tuple
 from urllib.parse import urlparse
 
 from aiohttp import web
+from backend.shared import Result
 
 # Per-client rate limiting state: {client_id: {endpoint: [timestamps]}}
 # Use LRU eviction to prevent unbounded memory growth from spoofed client IPs.

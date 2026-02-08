@@ -36,6 +36,12 @@
     --mjr-status-info: var(--comfy-status-info, #2196F3);
     --mjr-status-neutral: var(--comfy-status-neutral, #9e9e9e);
     --mjr-star-active: var(--mjr-accent, #FFD45A);
+
+    /* Badge colors (overridden by settings) */
+    --mjr-badge-image: #2196F3;
+    --mjr-badge-video: #9C27B0;
+    --mjr-badge-audio: #FF9800;
+    --mjr-badge-model3d: #4CAF50;
 }
 
 /* Make the theme visibly apply even with inline styles */
@@ -1480,6 +1486,17 @@
 
 .mjr-video-num:focus {
     border-color: rgba(255, 255, 255, 0.38);
+}
+
+.mjr-video-num--speed {
+    color-scheme: dark;
+    background: rgba(0, 0, 0, 0.62);
+    color: rgba(255, 255, 255, 0.95);
+}
+
+.mjr-video-num--speed option {
+    background: var(--comfy-menu-bg, #2a2a2a);
+    color: var(--content-fg, #ddd);
 }
 
 .mjr-video-frame {

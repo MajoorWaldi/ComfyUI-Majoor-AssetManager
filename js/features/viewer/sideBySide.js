@@ -107,8 +107,12 @@ export function renderSideBySideView({
     try {
         const leftVideo = leftMedia?.querySelector?.(".mjr-viewer-video-src") || leftMedia?.querySelector?.("video");
         const rightVideo = rightMedia?.querySelector?.(".mjr-viewer-video-src") || rightMedia?.querySelector?.("video");
+        const leftAudio = leftMedia?.querySelector?.(".mjr-viewer-audio-src") || leftMedia?.querySelector?.("audio");
+        const rightAudio = rightMedia?.querySelector?.(".mjr-viewer-audio-src") || rightMedia?.querySelector?.("audio");
         if (leftVideo?.dataset) leftVideo.dataset.mjrCompareRole = "A";
         if (rightVideo?.dataset) rightVideo.dataset.mjrCompareRole = "B";
+        if (leftAudio?.dataset) leftAudio.dataset.mjrCompareRole = "A";
+        if (rightAudio?.dataset) rightAudio.dataset.mjrCompareRole = "B";
     } catch {}
 
     // Video sync is handled centrally by the viewer bar (Viewer.js) so we avoid double-sync here.

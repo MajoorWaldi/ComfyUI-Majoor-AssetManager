@@ -1,6 +1,3 @@
-
-import { APP_CONFIG } from "../../app/config.js";
-
 /**
  * VirtualGrid
  * @description
@@ -130,7 +127,7 @@ export class VirtualGrid {
 
         if (force) {
             // Recycle all currently rendered items
-            for (const [i, el] of this.renderedItems) {
+            for (const [, el] of this.renderedItems) {
                 // Try to clean up
                 const card = this._getCard(el);
                 if (card) {

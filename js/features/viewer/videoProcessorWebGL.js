@@ -102,7 +102,7 @@ export function isWebGLAvailable() {
 }
 
 export function createWebGLVideoProcessor(opts) {
-    const { canvas, videoEl, getGradeParams, isDefaultGrade, maxProcPixelsVideo } = opts;
+    const { canvas, videoEl, getGradeParams } = opts;
     
     let gl = null;
     let resources = null;

@@ -3,7 +3,6 @@ Application settings persisted in the local metadata store.
 """
 from __future__ import annotations
 
-import threading
 import os
 import asyncio
 import time

@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-import asyncio
 from backend.routes.handlers import filesystem
 
 

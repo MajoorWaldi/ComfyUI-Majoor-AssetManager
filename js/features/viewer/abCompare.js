@@ -10,7 +10,7 @@ export function renderABCompareView({
     const PERCENT_MIN = 0;
     const PERCENT_MAX = 100;
     const DEFAULT_WIPE_PERCENT = 50;
-    const SLIDER_BAR_WIDTH_PX = 2;
+    const SLIDER_BAR_WIDTH_PX = 1;
     const SLIDER_Z_INDEX = 10;
     const SLIDER_HIT_AREA_PX = 40;
 
@@ -80,6 +80,8 @@ export function renderABCompareView({
     try {
         const baseVideo = baseMedia?.querySelector?.(".mjr-viewer-video-src") || baseMedia?.querySelector?.("video");
         if (baseVideo?.dataset) baseVideo.dataset.mjrCompareRole = "B";
+        const baseAudio = baseMedia?.querySelector?.(".mjr-viewer-audio-src") || baseMedia?.querySelector?.("audio");
+        if (baseAudio?.dataset) baseAudio.dataset.mjrCompareRole = "B";
     } catch {}
     try {
         const baseCanvas = baseMedia?.querySelector?.("canvas.mjr-viewer-media") || (baseMedia instanceof HTMLCanvasElement ? baseMedia : null);
@@ -151,6 +153,8 @@ export function renderABCompareView({
     try {
         const topVideo = topMedia?.querySelector?.(".mjr-viewer-video-src") || topMedia?.querySelector?.("video");
         if (topVideo?.dataset) topVideo.dataset.mjrCompareRole = "A";
+        const topAudio = topMedia?.querySelector?.(".mjr-viewer-audio-src") || topMedia?.querySelector?.("audio");
+        if (topAudio?.dataset) topAudio.dataset.mjrCompareRole = "A";
     } catch {}
     try {
         const topCanvas = topMedia?.querySelector?.("canvas.mjr-viewer-media") || (topMedia instanceof HTMLCanvasElement ? topMedia : null);
@@ -180,7 +184,6 @@ export function renderABCompareView({
     // Video sync is handled centrally by the viewer bar (Viewer.js) so we avoid double-sync here.
 
     const isCompositeMode = (m) => m === "multiply" || m === "screen" || m === "add";
-    const isMathMode = (m) => m === "difference" || m === "absdiff" || m === "subtract";
 
     // Compare display mode
     try {

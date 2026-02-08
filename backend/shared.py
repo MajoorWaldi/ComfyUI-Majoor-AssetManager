@@ -28,6 +28,7 @@ log_success = _root_shared.log_success
 log_structured = _root_shared.log_structured
 request_id_var = getattr(_root_shared, "request_id_var", None)
 classify_file = _root_shared.classify_file
+sanitize_error_message = _root_shared.sanitize_error_message
 FileKind = _root_shared.FileKind
 MetadataQuality = _root_shared.MetadataQuality
 IndexMode = _root_shared.IndexMode
@@ -57,4 +58,5 @@ __all__ = _root_shared.__all__ + [
     "IndexMode",
     "MetadataMode",
     "EXTENSIONS",
+    "sanitize_error_message",
 ]

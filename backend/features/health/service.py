@@ -153,6 +153,27 @@ class HealthService:
             return "1=1", []
         return "(" + " OR ".join(clauses) + ")", params
 
+    def _get_db_file_size_bytes(self) -> int:
+        """
+        Return total on-disk SQLite footprint (main DB + sidecar files).
+        """
+        try:
+            base = Path(str(getattr(self.db, "db_path", ""))).resolve(strict=False)
+            if not str(base):
+                return 0
+            total = 0
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                p = Path(str(base) + suffix)
+                try:
+                    if p.exists():
+                        total += int(p.stat().st_size or 0)
+                except Exception:
+                    # Best effort: skip inaccessible sidecar files.
+                    continue
+            return max(0, int(total))
+        except Exception:
+            return 0
+
     async def get_counters(self, roots: Optional[Sequence[str]] = None) -> Result[dict]:
         """
         Get database counters.
@@ -243,6 +264,7 @@ class HealthService:
                 "last_index_end": last_index_end,
                 "tool_availability": self._get_tool_capabilities(),
                 "tool_paths": get_tool_paths(),
+                "db_size_bytes": self._get_db_file_size_bytes(),
             }
 
             return Result.Ok(counters)

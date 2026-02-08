@@ -230,8 +230,16 @@ tox
 - `MAJOOR_EXIFTOOL_PATH` / `MAJOOR_EXIFTOOL_BIN` - ExifTool path
 - `MAJOOR_FFPROBE_PATH` / `MAJOOR_FFPROBE_BIN` - FFprobe path
 - `MAJOOR_MEDIA_PROBE_BACKEND` - `auto|exiftool|ffprobe|both`
+- `MAJOOR_EXIFTOOL_MIN_VERSION` - minimum ExifTool version required (optional, e.g. `12.40`)
+- `MAJOOR_FFPROBE_MIN_VERSION` - minimum FFprobe version required (optional, e.g. `6.0.0`)
 - `MAJOOR_ENABLE_FILE_WATCHER` - auto reindexing (default `false`)
 - `MAJOOR_WATCHER_INTERVAL` / `MAJOOR_WATCHER_JOIN_TIMEOUT` / `MAJOOR_WATCHER_PATHS`
+  - `MJR_WATCHER_DEBOUNCE_MS` - debounce delay (ms) for watcher batches (default `500`)
+  - `MJR_WATCHER_DEDUPE_TTL_MS` - dup suppression window (ms) before a file can be reprocessed (default `3000`)
+  - `MJR_WATCHER_PENDING_MAX` - max outstanding watcher events queued before new ones are dropped (default `5000`)
+  - `MJR_WATCHER_MAX_FLUSH_CONCURRENCY` - max concurrent watcher flush jobs (default `2`)
+ - `MJR_DB_CONSISTENCY_SAMPLE` - how many random DB entries to poke during periodic consistency sweeps (default `32`)
+ - `MJR_DB_CONSISTENCY_COOLDOWN_SECONDS` - minimum seconds between consistency sweeps (default `3600`)
 - `MAJOOR_DB_TIMEOUT` / `MAJOOR_DB_MAX_CONNECTIONS` / `MAJOOR_DB_QUERY_TIMEOUT`
 - `MAJOOR_TO_THREAD_TIMEOUT` - timeout (seconds) for `asyncio.to_thread(...)` work in HTTP handlers (default `30`)
 - `MAJOOR_MAX_METADATA_JSON_BYTES` - max metadata JSON size stored in DB/cache (default `2097152`)
@@ -297,6 +305,23 @@ The backend still requires the environment variable (`MAJOOR_API_TOKEN`/`MJR_API
 - Custom roots store: `<output>/_mjr_index/custom_roots.json`
 - Collections store: `<output>/_mjr_index/collections/*.json`
 - Temporary drag-out ZIPs: `<output>/_mjr_batch_zips/` (auto-cleaned)
+
+## Troubleshooting (DB Corruption)
+
+If the index DB is too corrupted, use the emergency endpoint:
+
+- `POST /mjr/am/db/force-delete`
+
+This force-deletes the SQLite files, recreates a clean DB, then triggers a rescan.
+
+Manual fallback (with ComfyUI stopped):
+
+- Delete:
+  - `assets.sqlite`
+  - `assets.sqlite-wal`
+  - `assets.sqlite-shm`
+- Location: `<output>/_mjr_index/`
+- Restart ComfyUI, then run a scan/reset index.
 
 ## Development
 

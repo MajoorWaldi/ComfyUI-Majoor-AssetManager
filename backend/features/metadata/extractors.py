@@ -2,13 +2,10 @@
 Metadata extractors for different file types.
 Extracts ComfyUI workflow and generation parameters from PNG, WEBP, MP4.
 """
-import json
 import os
-import re
 from typing import Optional, Dict, Any, Tuple
 
 from ...shared import Result, ErrorCode, get_logger
-from .graph_traversal import iter_nested_dicts
 from .parsing_utils import (
     try_parse_json_text,
     parse_json_value,

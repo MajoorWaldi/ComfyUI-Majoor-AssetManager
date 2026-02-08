@@ -43,11 +43,16 @@ MAX_SCAN_JOURNAL_LOOKUP = 5000
 STAT_RETRY_COUNT = 3
 STAT_RETRY_BASE_DELAY_S = 0.15
 
+# Extensions explicitly excluded from indexing
+_EXCLUDED_EXTENSIONS: set = {".psd", ".json", ".txt", ".csv", ".db", ".sqlite", ".log"}
+
 _EXT_TO_KIND: Dict[str, FileKind] = {}
 try:
     for _kind, _exts in (EXTENSIONS or {}).items():
         for _ext in _exts or []:
-            _EXT_TO_KIND[str(_ext).lower()] = _kind  # type: ignore[assignment]
+            ext_lower = str(_ext).lower()
+            if ext_lower not in _EXCLUDED_EXTENSIONS:
+                _EXT_TO_KIND[ext_lower] = _kind  # type: ignore[assignment]
 except Exception:
     _EXT_TO_KIND = {}
 
@@ -690,7 +695,6 @@ class IndexScanner:
 
         # Apply DB writes for the whole batch in one transaction.
         # If the batch fails, fall back to processing items individually
-        batch_failed = False
         try:
             async with self.db.atransaction(mode="immediate") as tx:
                 if not tx.ok:
@@ -842,7 +846,6 @@ class IndexScanner:
                 )
                 raise
             # If the entire batch transaction fails, fall back to processing items individually
-            batch_failed = True
             logger.warning("Batch transaction failed: %s. Falling back to individual processing.", str(batch_error))
             stats["errors"] += len(prepared)  # Temporarily count all as errors, will be corrected below
             failed_entries: list[str] = []
@@ -1484,7 +1487,6 @@ class IndexScanner:
                                 await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
                     except sqlite3.BusyError as exc:
                         logger.warning("Database busy while refreshing metadata (asset=%s): %s", existing_id, exc)
-                        stats["errors"] += 1
                         raise
             except sqlite3.BusyError:
                 return Result.Err("DB_BUSY", "Database busy while refreshing metadata")
@@ -1518,7 +1520,6 @@ class IndexScanner:
                                     await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
                         except sqlite3.BusyError as exc:
                             logger.warning("Database busy while updating asset %s: %s", existing_id, exc)
-                            stats["errors"] += 1
                             raise
                 except sqlite3.BusyError:
                     return Result.Err("DB_BUSY", "Database busy while updating asset")
@@ -1553,7 +1554,6 @@ class IndexScanner:
                     await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
         except sqlite3.BusyError as exc:
             logger.warning("Database busy while inserting asset %s: %s", filepath, exc)
-            stats["errors"] += 1
             return Result.Err("DB_BUSY", "Database busy while inserting asset")
         if not tx_state or not tx_state.ok:
             return Result.Err("DB_ERROR", tx_state.error or "Commit failed")
@@ -1670,6 +1670,9 @@ class IndexScanner:
                     duration = COALESCE(?, duration),
                     size = ?, mtime = ?,
                     source = ?, root_id = ?,
+                    content_hash = NULL,
+                    phash = NULL,
+                    hash_state = NULL,
                     indexed_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,

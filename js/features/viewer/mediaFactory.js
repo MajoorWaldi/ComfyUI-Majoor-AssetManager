@@ -1,7 +1,16 @@
 import { createImageProcessor, drawMediaError } from "./imageProcessor.js";
 import { createVideoProcessor } from "./videoProcessor.js";
+import { createAudioVisualizer } from "./audioVisualizer.js";
 import { safeAddListener as defaultSafeAddListener, safeCall as defaultSafeCall } from "../../utils/safeCall.js";
 import { APP_CONFIG } from "../../app/config.js";
+
+const AUDIO_BG_URL = (() => {
+    try {
+        return new URL("../../assets/audio-bg.png", import.meta.url).href;
+    } catch {
+        return "";
+    }
+})();
 
 export function createViewerMediaFactory({
     overlay,
@@ -130,6 +139,72 @@ export function createViewerMediaFactory({
         } catch {}
     };
 
+    const _createAudioElement = (asset, url, { compare = false } = {}) => {
+        const wrap = document.createElement("div");
+        wrap.style.cssText = `
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            gap: 12px;
+            color: rgba(255,255,255,0.85);
+            padding: 14px;
+            background-image: linear-gradient(rgba(0,0,0,0.42), rgba(0,0,0,0.42)), url('${AUDIO_BG_URL}');
+            background-size: cover;
+            background-position: center center;
+            background-repeat: no-repeat;
+        `;
+
+        if (!compare) {
+            const label = document.createElement("div");
+            label.textContent = String(asset?.filename || "Audio");
+            label.style.cssText =
+                "font-size: 12px; opacity: 0.9; max-width: 90%; text-align: center; overflow: hidden; text-overflow: ellipsis;";
+            wrap.appendChild(label);
+        }
+
+        const viz = document.createElement("canvas");
+        viz.className = "mjr-viewer-audio-viz";
+        viz.style.cssText = `
+            width: min(1920px, 96%);
+            aspect-ratio: 16 / 9;
+            height: auto;
+            max-height: min(1080px, 68vh);
+            min-height: 260px;
+            border: none;
+            border-radius: 10px;
+            background: transparent;
+        `;
+
+        const audio = document.createElement("audio");
+        audio.className = "mjr-viewer-audio-src";
+        audio.src = url;
+        audio.controls = false;
+        audio.autoplay = true;
+        audio.preload = "metadata";
+        audio.style.cssText = "width: min(680px, 90%);";
+
+        try {
+            const vizProc = createAudioVisualizer({
+                canvas: viz,
+                audioEl: audio,
+                mode: state?.audioVisualizerMode,
+            });
+            // Keep lifecycle compatibility: audio cleanup + canvas processor cleanup.
+            audio._mjrAudioViz = vizProc;
+            viz._mjrProc = vizProc;
+        } catch {
+            audio._mjrAudioViz = null;
+            viz._mjrProc = null;
+        }
+
+        wrap.appendChild(viz);
+        wrap.appendChild(audio);
+        return wrap;
+    };
+
     function createMediaElement(asset, url) {
         const container = document.createElement("div");
         container.className = "mjr-video-host";
@@ -143,7 +218,7 @@ export function createViewerMediaFactory({
         `;
 
         const kind = String(asset?.kind || "").toLowerCase();
-        if (kind && kind !== "image" && kind !== "video") {
+        if (kind && kind !== "image" && kind !== "video" && kind !== "audio") {
             const canvas = document.createElement("canvas");
             canvas.className = "mjr-viewer-media";
             try {
@@ -162,6 +237,8 @@ export function createViewerMediaFactory({
             } catch {}
             return canvas;
         }
+
+        if (kind === "audio") return _createAudioElement(asset, url, { compare: false });
 
         if (kind === "video") {
             const canvas = document.createElement("canvas");
@@ -305,7 +382,7 @@ export function createViewerMediaFactory({
     // Important: the returned element fills the container so both layers share identical sizing/centering.
         function createCompareMediaElement(asset, url) {
         const kind = String(asset?.kind || "").toLowerCase();
-        if (kind && kind !== "image" && kind !== "video") {
+        if (kind && kind !== "image" && kind !== "video" && kind !== "audio") {
             const canvas = document.createElement("canvas");
             canvas.className = "mjr-viewer-media";
             try {
@@ -324,6 +401,8 @@ export function createViewerMediaFactory({
             } catch {}
             return canvas;
         }
+
+        if (kind === "audio") return _createAudioElement(asset, url, { compare: true });
 
             if (kind === "video") {
                 const wrap = document.createElement("div");

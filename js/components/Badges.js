@@ -14,79 +14,30 @@ export function createFileBadge(filename, kind, nameCollision = false) {
         badge.dataset.mjrExt = ext;
     } catch {}
 
-    let bgColor = "rgba(0,0,0,0.7)";
+    let category = "unknown";
     switch (ext) {
-        case "PNG":
-            bgColor = "rgba(33, 150, 243, 0.85)";
-            break;
-        case "JPG":
-        case "JPEG":
-            bgColor = "rgba(0, 188, 212, 0.85)";
-            break;
-        case "WEBP":
-            bgColor = "rgba(3, 169, 244, 0.85)";
-            break;
-        case "GIF":
-            bgColor = "rgba(0, 150, 136, 0.85)";
-            break;
-        case "BMP":
-        case "TIF":
-        case "TIFF":
-            bgColor = "rgba(63, 81, 181, 0.85)";
-            break;
-
-        case "MP4":
-            bgColor = "rgba(156, 39, 176, 0.85)";
-            break;
-        case "WEBM":
-            bgColor = "rgba(103, 58, 183, 0.85)";
-            break;
-        case "MOV":
-            bgColor = "rgba(142, 36, 170, 0.85)";
-            break;
-        case "AVI":
-            bgColor = "rgba(123, 31, 162, 0.85)";
-            break;
-        case "MKV":
-            bgColor = "rgba(171, 71, 188, 0.85)";
-            break;
-
-        case "MP3":
-            bgColor = "rgba(255, 152, 0, 0.85)";
-            break;
-        case "WAV":
-            bgColor = "rgba(255, 111, 0, 0.85)";
-            break;
-        case "OGG":
-        case "FLAC":
-            bgColor = "rgba(255, 193, 7, 0.85)";
-            break;
-
-        case "OBJ":
-        case "FBX":
-        case "GLB":
-        case "GLTF":
-            bgColor = "rgba(76, 175, 80, 0.85)";
-            break;
-
+        case "PNG": case "JPG": case "JPEG": case "WEBP": case "GIF": case "BMP": case "TIF": case "TIFF":
+            category = "image"; break;
+        case "MP4": case "WEBM": case "MOV": case "AVI": case "MKV":
+            category = "video"; break;
+        case "MP3": case "WAV": case "OGG": case "FLAC":
+            category = "audio"; break;
+        case "OBJ": case "FBX": case "GLB": case "GLTF":
+            category = "model3d"; break;
         default:
-            switch (kind) {
-                case "image":
-                    bgColor = "rgba(33, 150, 243, 0.8)";
-                    break;
-                case "video":
-                    bgColor = "rgba(156, 39, 176, 0.8)";
-                    break;
-                case "audio":
-                    bgColor = "rgba(255, 152, 0, 0.8)";
-                    break;
-                case "model3d":
-                    bgColor = "rgba(76, 175, 80, 0.8)";
-                    break;
-                default:
-                    bgColor = "rgba(96, 125, 139, 0.8)";
-            }
+            category = kind || "unknown";
     }
+
+    const cssVarMap = {
+        image: "--mjr-badge-image",
+        video: "--mjr-badge-video",
+        audio: "--mjr-badge-audio",
+        model3d: "--mjr-badge-model3d",
+    };
+    const cssVar = cssVarMap[category];
+    const bgColor = cssVar
+        ? `var(${cssVar}, #607D8B)`
+        : "#607D8B";
 
     badge.textContent = ext + (nameCollision ? "+" : "");
     badge.title = nameCollision ? `${ext} file (duplicate filename in view)` : `${ext} file`;
@@ -99,6 +50,7 @@ export function createFileBadge(filename, kind, nameCollision = false) {
         font-size: 10px;
         font-weight: 700;
         background: ${bgColor};
+        opacity: 0.85;
         color: white;
         text-transform: uppercase;
         pointer-events: auto;

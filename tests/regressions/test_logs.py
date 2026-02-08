@@ -1,4 +1,3 @@
-import pytest
 """
 Test all log levels with emojis.
 """

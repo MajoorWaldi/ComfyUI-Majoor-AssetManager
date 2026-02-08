@@ -11,7 +11,7 @@ from backend.custom_roots import (
     remove_custom_root,
     resolve_custom_root,
 )
-from backend.shared import Result, get_logger
+from backend.shared import Result, get_logger, sanitize_error_message
 from ..core import (
     _json_response,
     _csrf_error,
@@ -44,7 +44,6 @@ def register_custom_roots_routes(routes: web.RouteTableDef) -> None:
 
     @routes.post("/mjr/sys/browse-folder")
     async def browse_folder_dialog(request):
-        import sys
         import os
 
         allowed, retry_after = _check_rate_limit(request, "browse_folder", max_requests=3, window_seconds=30)
@@ -249,4 +248,6 @@ def register_custom_roots_routes(routes: web.RouteTableDef) -> None:
         except FileNotFoundError:
             return _json_response(Result.Err("NOT_FOUND", "File not found"))
         except (OSError, RuntimeError, ValueError) as exc:
-            return _json_response(Result.Err("VIEW_FAILED", f"Failed to serve file: {exc}"))
+            return _json_response(
+                Result.Err("VIEW_FAILED", sanitize_error_message(exc, "Failed to serve file"))
+            )

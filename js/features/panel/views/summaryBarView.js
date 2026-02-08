@@ -31,6 +31,13 @@ export function createSummaryBarView() {
     text.className = "mjr-am-summary-text";
 
     const pillsView = createContextPillsView();
+    const dupAlert = document.createElement("button");
+    dupAlert.type = "button";
+    dupAlert.className = "mjr-am-dup-alert";
+    dupAlert.style.cssText = "padding:2px 8px;border:1px solid var(--border-color,#555);background:var(--comfy-menu-bg,#222);color:var(--input-text,#eee);border-radius:999px;cursor:pointer;";
+    dupAlert.style.display = "none";
+    dupAlert.title = "Duplicate/similarity suggestions";
+    right.appendChild(dupAlert);
 
     left.appendChild(text);
     right.appendChild(pillsView.wrap);
@@ -58,16 +65,14 @@ export function createSummaryBarView() {
             }
         })();
 
-        const total = (() => {
-            const v = Number(state?.lastGridTotal ?? 0) || 0;
-            return v > 0 ? v : 0;
-        })();
+        const datasetTotal = Number(gridContainer?.dataset?.mjrTotal || 0) || 0;
+        const total = datasetTotal || Math.max(0, Number(state?.lastGridTotal ?? 0) || 0);
 
-        const shown = (() => {
-            const v = Number(state?.lastGridCount ?? 0) || 0;
-            if (v > 0) return v;
-            return cardsCount;
-        })();
+        const datasetShown = Number(gridContainer?.dataset?.mjrShown || 0) || 0;
+        const shown =
+            datasetShown ||
+            Math.max(0, Number(state?.lastGridCount ?? 0) || 0) ||
+            cardsCount;
 
         const scope = _titleScope(state?.scope || gridContainer?.dataset?.mjrScope || "output");
 
@@ -83,6 +88,25 @@ export function createSummaryBarView() {
 
         try {
             text.textContent = parts.filter(Boolean).join(" | ");
+        } catch {}
+
+        try {
+            const alert = context?.duplicatesAlert || null;
+            const exact = Number(alert?.exactCount || 0) || 0;
+            const similar = Number(alert?.similarCount || 0) || 0;
+            const hasAlert = exact > 0 || similar > 0;
+            if (!hasAlert) {
+                dupAlert.style.display = "none";
+                dupAlert.onclick = null;
+            } else {
+                dupAlert.style.display = "";
+                dupAlert.textContent = `duplicates: ${exact} | similar: ${similar}`;
+                dupAlert.onclick = () => {
+                    try {
+                        actions?.onDuplicateAlertClick?.(alert);
+                    } catch {}
+                };
+            }
         } catch {}
 
         const rawQuery = _safeText(context?.rawQuery || "").trim();

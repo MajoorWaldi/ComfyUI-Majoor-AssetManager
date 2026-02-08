@@ -5,6 +5,7 @@
 import { updateAssetTags, getAvailableTags } from "../api/client.js";
 import { ASSET_TAGS_CHANGED_EVENT } from "../app/events.js";
 import { comfyToast } from "../app/toast.js";
+import { t } from "../app/i18n.js";
 import { getPopoverManagerForElement } from "../features/panel/views/popoverManager.js";
 import { safeDispatchCustomEvent } from "../utils/events.js";
 import { MENU_Z_INDEX } from "./contextmenu/MenuCore.js";
@@ -208,7 +209,10 @@ export function createTagsEditor(asset, onUpdate) {
             if (!s) return null;
             if (s.length > MAX_TAG_LEN) return null;
             // Disallow control chars/newlines (keep tags single-line and UI-safe).
-            if (/[\x00-\x1F\x7F]/.test(s)) return null;
+            for (let i = 0; i < s.length; i += 1) {
+                const code = s.charCodeAt(i);
+                if (code <= 31 || code === 127) return null;
+            }
             // Avoid separators that are used for input parsing.
             if (/[;,]/.test(s)) return null;
             return s;
@@ -266,7 +270,7 @@ export function createTagsEditor(asset, onUpdate) {
                 renderTags();
                 saveInFlight = false;
                 saveAC = null;
-                comfyToast(result?.error || "Failed to update tags", "error");
+                comfyToast(result?.error || t("toast.tagsUpdateFailed"), "error");
                 return;
             }
 
@@ -284,7 +288,7 @@ export function createTagsEditor(asset, onUpdate) {
             { assetId: String(asset.id), tags: [...snapshot] },
             { warnPrefix: "[TagsEditor]" }
         );
-        comfyToast("Tags updated", "success", 1000);
+        comfyToast(t("toast.tagsUpdated"), "success", 1000);
             if (!savePending) break;
             savePending = false;
         }

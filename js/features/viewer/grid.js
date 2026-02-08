@@ -90,24 +90,6 @@ export function createViewerGrid({
         }
     };
 
-    const _fitContainRect = (boxW, boxH, naturalW, naturalH) => {
-        try {
-            const bw = Number(boxW) || 0;
-            const bh = Number(boxH) || 0;
-            const nw = Number(naturalW) || 0;
-            const nh = Number(naturalH) || 0;
-            if (!(bw > 0 && bh > 0 && nw > 0 && nh > 0)) return { x: 0, y: 0, w: bw, h: bh };
-            const s = Math.min(bw / nw, bh / nh);
-            const w = nw * s;
-            const h = nh * s;
-            const x = (bw - w) / 2;
-            const y = (bh - h) / 2;
-            return { x, y, w, h };
-        } catch {
-            return { x: 0, y: 0, w: Number(boxW) || 0, h: Number(boxH) || 0 };
-        }
-    };
-
     const _fitHeightRect = (boxW, boxH, naturalW, naturalH) => {
         try {
             const bw = Number(boxW) || 0;

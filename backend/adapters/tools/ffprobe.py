@@ -6,7 +6,7 @@ import json
 import shutil
 import os
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
 
 from ...config import FFPROBE_TIMEOUT
 from ...shared import Result, ErrorCode, get_logger

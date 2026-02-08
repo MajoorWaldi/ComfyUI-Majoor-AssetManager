@@ -1,5 +1,4 @@
-import pytest
-from backend.features.geninfo.parser import parse_geninfo_from_prompt, Result
+from backend.features.geninfo.parser import parse_geninfo_from_prompt
 
 def test_extract_qwen_workflow_linked_prompt():
     """
@@ -153,9 +152,6 @@ def test_extract_qwen_workflow_instruction():
     assert result.ok, result.error
     data = result.data
     assert data is not None, "Should extract metadata"
-    
-    # We expect "Edit this image to make it cyberpunk" to be in the positive prompt.
-    prompt_found = False
     
     # parse_geninfo_from_prompt returns data structure where positive/negative are top-level keys
     pos = data.get("positive", {}).get("value")

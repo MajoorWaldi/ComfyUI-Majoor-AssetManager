@@ -24,6 +24,7 @@ except Exception:
 from backend.config import OUTPUT_ROOT
 from backend.custom_roots import list_custom_roots
 from backend.shared import get_logger
+from backend.features.audio import AUDIO_VIEW_MIME_TYPES
 
 logger = get_logger(__name__)
 
@@ -195,6 +196,15 @@ _ALLOWED_VIEW_EXTS = {
     ".mkv",
     ".avi",
     ".m4v",
+    # Audio
+    ".wav",
+    ".mp3",
+    ".flac",
+    ".ogg",
+    ".aiff",
+    ".aif",
+    ".m4a",
+    ".aac",
 }
 
 
@@ -228,6 +238,7 @@ def _guess_content_type_for_file(path: Path) -> str:
                 ".mkv": "video/x-matroska",
                 ".avi": "video/x-msvideo",
             }
+            known.update(AUDIO_VIEW_MIME_TYPES)
             if ext in known:
                 return known[ext]
     except Exception:
@@ -254,6 +265,6 @@ def _is_allowed_view_media_file(path: Path) -> bool:
             return True
         # Fallback: allow if mimetype is clearly media.
         ct = _guess_content_type_for_file(path)
-        return ct.startswith("image/") or ct.startswith("video/")
+        return ct.startswith("image/") or ct.startswith("video/") or ct.startswith("audio/")
     except Exception:
         return False

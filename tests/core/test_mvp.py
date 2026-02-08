@@ -4,7 +4,6 @@ MVP test to validate architecture.
 Tests: Result pattern, logging with emojis, ExifTool, FFProbe, SQLite.
 """
 import sys
-import os
 from pathlib import Path
 
 # Add project to path

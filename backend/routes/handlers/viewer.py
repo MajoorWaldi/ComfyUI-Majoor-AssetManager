@@ -81,7 +81,9 @@ def register_viewer_routes(routes: web.RouteTableDef) -> None:
         except Exception:
             resolved = None
 
-        info = build_viewer_media_info(asset, resolved_path=resolved)
+        refresh = (request.query.get("refresh") or "").strip().lower() in ("1", "true", "yes")
+
+        info = build_viewer_media_info(asset, resolved_path=resolved, refresh=refresh)
         try:
             if resolved is not None:
                 info["mime"] = _guess_content_type_for_file(resolved)

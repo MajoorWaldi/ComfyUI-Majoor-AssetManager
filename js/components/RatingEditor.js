@@ -5,6 +5,7 @@
 import { updateAssetRating } from "../api/client.js";
 import { ASSET_RATING_CHANGED_EVENT } from "../app/events.js";
 import { comfyToast } from "../app/toast.js";
+import { t } from "../app/i18n.js";
 import { getPopoverManagerForElement } from "../features/panel/views/popoverManager.js";
 import { safeDispatchCustomEvent } from "../utils/events.js";
 import { MENU_Z_INDEX } from "./contextmenu/MenuCore.js";
@@ -70,7 +71,7 @@ export function createRatingEditor(asset, onUpdate) {
                     currentRating = savedRating;
                     desiredRating = savedRating;
                     updateStarColors(container, savedRating);
-                    comfyToast(result?.error || "Failed to update rating", "error");
+                    comfyToast(result?.error || t("toast.ratingUpdateFailed"), "error");
                     break;
                 }
 
@@ -93,7 +94,7 @@ export function createRatingEditor(asset, onUpdate) {
                 );
 
                 if (desiredRating === toSave) {
-                    comfyToast(`Rating set to ${toSave} stars`, "success", 1000);
+                    comfyToast(t("toast.ratingSetN", { n: toSave }), "success", 1000);
                     break;
                 }
             }

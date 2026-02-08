@@ -613,9 +613,6 @@ function getOrCreateState(gridContainer) {
             stemMap: new Map(), // stem -> [Asset]
             renderedFilenameMap: new Map(), // filenameKey -> [DOMElement] (only currently rendered)
             
-            // Legacy / unused in virtual mode but kept for safety if referenced elsewhere
-            cardStemMap: new Map(),
-            cardFilenameMap: new Map(),
             
             sentinel: null,
             observer: null,
@@ -706,7 +703,7 @@ function ensureVirtualGrid(gridContainer, state) {
         minItemWidth: APP_CONFIG.GRID_MIN_SIZE || 120,
         gap: APP_CONFIG.GRID_GAP || 10,
         bufferRows: 3, 
-        createItem: (asset, index) => {
+        createItem: (asset, _index) => {
             const card = createAssetCard(asset);
             const selectedIds = getSelectedIdSet(gridContainer);
             // Handle selection
@@ -1241,7 +1238,7 @@ function captureScrollMetrics(state) {
     return { clientHeight, scrollHeight, scrollTop, bottomGap };
 }
 
-function maybeKeepPinnedToBottom(state, before) {
+function maybeKeepPinnedToBottom(_state, _before) {
     // Disabled: Standard infinite scroll should not force pin to bottom on append.
     // This logic is problematic for grids where we want to seeing new content naturally.
     return; 
@@ -1411,6 +1408,19 @@ async function loadNextPage(gridContainer, state) {
         const added = appendAssets(gridContainer, page.assets || [], state);
         state.offset += (page.count || 0);
 
+        try {
+            const count = Number(state?.offset || 0) || 0;
+            const total = Number(state?.total ?? 0) || 0;
+            const evt = new CustomEvent("mjr:grid-stats", { detail: { count, total } });
+            gridContainer?.dispatchEvent?.(evt);
+            if (gridContainer && typeof gridContainer.dataset === "object") {
+                try {
+                    gridContainer.dataset.mjrShown = String(count);
+                    gridContainer.dataset.mjrTotal = String(total);
+                } catch {}
+            }
+        } catch {}
+
         gridDebug("loadNextPage:append", {
             added,
             pageCount: Number(page?.count || 0) || 0,
@@ -1421,8 +1431,6 @@ async function loadNextPage(gridContainer, state) {
 
         maybeKeepPinnedToBottom(state, before);
 
-        const hasTotal = state.total != null && Number(state.total) > 0;
-        
         // Fix: Conservative stop condition.
         // We ignore state.total because it might be approximate.
         // We only stop if we received 0 items. 
@@ -1587,8 +1595,6 @@ export async function loadAssets(gridContainer, query = "*", options = {}) {
         state.seenKeys = new Set();
         state.assets = [];
         state.filenameCounts = new Map();
-        state.cardStemMap = new Map();
-        state.cardFilenameMap = new Map();
         state.stemMap = new Map();
         state.renderedFilenameMap = new Map();
         state.nonImageStems = new Set();
@@ -1659,8 +1665,6 @@ export async function loadAssetsFromList(gridContainer, assets, options = {}) {
         state.seenKeys = new Set();
         state.assets = [];
         state.filenameCounts = new Map();
-        state.cardStemMap = new Map();
-        state.cardFilenameMap = new Map();
         state.stemMap = new Map();
         state.renderedFilenameMap = new Map();
         state.nonImageStems = new Set();
@@ -2202,7 +2206,7 @@ export function refreshGrid(gridContainer) {
 const GRID_SCAN_EVENT_NAMES = ["mjr-scan-complete", "mjr:scan-complete"];
 let _gridScanListenersBound = false;
 
-const _onScanComplete = (e) => {
+const _onScanComplete = (_e) => {
     try {
         if (typeof document === "undefined" || !document.querySelectorAll) return;
         const grids = document.querySelectorAll(".mjr-grid-container");

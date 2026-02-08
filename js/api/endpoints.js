@@ -62,9 +62,15 @@ export const ENDPOINTS = {
     WATCHER_STATUS: "/mjr/am/watcher/status",
     WATCHER_TOGGLE: "/mjr/am/watcher/toggle",
     WATCHER_SCOPE: "/mjr/am/watcher/scope",
+    WATCHER_SETTINGS: "/mjr/am/watcher/settings",
 
     // Collections
-    COLLECTIONS: "/mjr/am/collections"
+    COLLECTIONS: "/mjr/am/collections",
+
+    // Duplicate detection
+    DUPLICATES_ALERTS: "/mjr/am/duplicates/alerts",
+    DUPLICATES_ANALYZE: "/mjr/am/duplicates/analyze",
+    DUPLICATES_MERGE_TAGS: "/mjr/am/duplicates/merge-tags"
 };
 
 /**

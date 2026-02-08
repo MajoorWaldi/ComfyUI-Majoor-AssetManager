@@ -43,7 +43,7 @@ export function createImageProcessor({
     url,
     getGradeParams,
     isDefaultGrade,
-    tonemap,
+    _tonemap,
     maxProcPixels,
     onReady,
 } = {}) {
