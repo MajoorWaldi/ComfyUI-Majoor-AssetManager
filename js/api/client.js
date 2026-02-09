@@ -562,6 +562,21 @@ export async function forceDeleteDb() {
     return post("/mjr/am/db/force-delete", {});
 }
 
+export async function listDbBackups(options = {}) {
+    return get(ENDPOINTS.DB_BACKUPS, options);
+}
+
+export async function saveDbBackup() {
+    return post(ENDPOINTS.DB_BACKUP_SAVE, {});
+}
+
+export async function restoreDbBackup({ name = "", useLatest = false } = {}) {
+    const body = {};
+    if (name) body.name = String(name);
+    if (useLatest) body.use_latest = true;
+    return post(ENDPOINTS.DB_BACKUP_RESTORE, body);
+}
+
 export async function startDuplicatesAnalysis(limit = 250) {
     return post("/mjr/am/duplicates/analyze", { limit: Math.max(10, Math.min(5000, Number(limit) || 250)) });
 }

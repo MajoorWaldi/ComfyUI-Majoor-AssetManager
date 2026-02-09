@@ -145,7 +145,7 @@ function _updateCardRatingTagsBadges(card, rating, tags) {
                 for (let i = 0; i < ratingValue; i++) {
                     const star = document.createElement("span");
                     star.textContent = "★";
-                    star.style.color = "var(--mjr-star-active, #FFD45A)";
+                    star.style.color = "var(--mjr-rating-color, var(--mjr-star-active, #FFD45A))";
                     star.style.marginRight = i < ratingValue - 1 ? "2px" : "0";
                     stars.push(star);
                 }
@@ -293,6 +293,15 @@ function _updateGridSettingsClasses(container) {
                 object-fit: cover;
                 display: block;
             }
+            
+            .mjr-grid .mjr-asset-card:hover {
+                background-color: var(--mjr-card-hover-color) !important;
+            }
+            
+            .mjr-grid .mjr-asset-card.is-selected {
+                outline: 2px solid var(--mjr-card-selection-color) !important;
+                box-shadow: 0 0 0 2px var(--mjr-card-selection-color) !important;
+            }
 
             .mjr-grid .mjr-card-filename { display: none; }
             .mjr-grid.mjr-show-filename .mjr-card-filename { display: block; }
@@ -334,7 +343,7 @@ function _updateGridSettingsClasses(container) {
                 opacity: 0.5;
                 margin: 0 4px;
             }
-            // Hide separator if previous element is hidden
+            /* Hide separator if previous element is hidden */
             .mjr-card-meta-row > span[style*="display: none"] + span::before {
                  display: none;
             }
@@ -365,6 +374,16 @@ function _updateGridSettingsClasses(container) {
     // Helper for CSS vars
     container.style.setProperty("--mjr-grid-min-size", `${APP_CONFIG.GRID_MIN_SIZE}px`);
     container.style.setProperty("--mjr-grid-gap", `${APP_CONFIG.GRID_GAP}px`);
+    // Fallback color vars on grid root so cards/badges always inherit even if parent scope differs.
+    container.style.setProperty("--mjr-star-active", APP_CONFIG.BADGE_STAR_COLOR);
+    container.style.setProperty("--mjr-badge-image", APP_CONFIG.BADGE_IMAGE_COLOR);
+    container.style.setProperty("--mjr-badge-video", APP_CONFIG.BADGE_VIDEO_COLOR);
+    container.style.setProperty("--mjr-badge-audio", APP_CONFIG.BADGE_AUDIO_COLOR);
+    container.style.setProperty("--mjr-badge-model3d", APP_CONFIG.BADGE_MODEL3D_COLOR);
+    container.style.setProperty("--mjr-card-hover-color", APP_CONFIG.UI_CARD_HOVER_COLOR);
+    container.style.setProperty("--mjr-card-selection-color", APP_CONFIG.UI_CARD_SELECTION_COLOR);
+    container.style.setProperty("--mjr-rating-color", APP_CONFIG.UI_RATING_COLOR);
+    container.style.setProperty("--mjr-tag-color", APP_CONFIG.UI_TAG_COLOR);
 }
 
 /**
@@ -375,6 +394,8 @@ export function createGridContainer() {
     const container = document.createElement("div");
     container.id = "mjr-assets-grid";
     container.classList.add("mjr-grid");
+    container.tabIndex = 0;
+    container.setAttribute("role", "grid");
 
     // Provide a stable accessor for full asset lists (VirtualGrid-safe).
     try {
@@ -390,14 +411,56 @@ export function createGridContainer() {
     try {
         container._mjrSetSelection = (ids, activeId = "") => setSelectionIds(container, ids, { activeId });
         container._mjrSyncSelection = (ids) => syncSelectionClasses(container, ids);
+        container._mjrScrollToAssetId = (assetId) => {
+            const id = String(assetId || "").trim();
+            if (!id) return;
+            const state = GRID_STATE.get(container);
+            if (!state?.virtualGrid || !Array.isArray(state.assets)) return;
+            const idx = state.assets.findIndex(a => String(a?.id || "") === id);
+            if (idx >= 0) state.virtualGrid.scrollToIndex(idx);
+        };
     } catch {}
     
     // Initial class application
     _updateGridSettingsClasses(container);
 
+    // Keep keyboard navigation reliable: ensure grid can receive focus and owns hotkey scope when interacted with.
+    const focusGrid = () => {
+        try {
+            container.focus({ preventScroll: true });
+        } catch {
+            try { container.focus(); } catch {}
+        }
+        try {
+            if (!window._mjrHotkeysState) window._mjrHotkeysState = {};
+            window._mjrHotkeysState.scope = "grid";
+        } catch {}
+    };
+    try {
+        container.addEventListener("pointerdown", focusGrid, true);
+        container.addEventListener("mousedown", focusGrid, true);
+        container.addEventListener("focusin", focusGrid);
+        container._mjrGridFocusHandler = focusGrid;
+    } catch {}
+
     // Listen for settings changes to update CSS classes reactively
+    let settingsRefreshTimer = null;
+    const SETTINGS_REFRESH_DEBOUNCE_MS = 180;
     const onSettingsChanged = () => {
-        requestAnimationFrame(() => _updateGridSettingsClasses(container));
+        // Apply class/CSS var updates immediately (cheap) for responsive UI.
+        requestAnimationFrame(() => {
+            _updateGridSettingsClasses(container);
+        });
+
+        // Heavy virtual-grid redraw is debounced to avoid picker-drag freeze.
+        if (settingsRefreshTimer) {
+            clearTimeout(settingsRefreshTimer);
+            settingsRefreshTimer = null;
+        }
+        settingsRefreshTimer = setTimeout(() => {
+            settingsRefreshTimer = null;
+            refreshGrid(container);
+        }, SETTINGS_REFRESH_DEBOUNCE_MS);
     };
     
     // We bind to the custom event dispatched by settings.js
@@ -408,6 +471,12 @@ export function createGridContainer() {
         container._mjrSettingsChangedCleanup = () => {
             try {
                 window.removeEventListener("mjr-settings-changed", onSettingsChanged);
+            } catch {}
+            try {
+                if (settingsRefreshTimer) {
+                    clearTimeout(settingsRefreshTimer);
+                    settingsRefreshTimer = null;
+                }
             } catch {}
         };
     } catch {}
@@ -1925,6 +1994,15 @@ export function disposeGrid(gridContainer) {
     // Cleanup settings-changed listener
     try {
         gridContainer._mjrSettingsChangedCleanup?.();
+    } catch {}
+    try {
+        const focusHandler = gridContainer._mjrGridFocusHandler;
+        if (focusHandler) {
+            gridContainer.removeEventListener("pointerdown", focusHandler, true);
+            gridContainer.removeEventListener("mousedown", focusHandler, true);
+            gridContainer.removeEventListener("focusin", focusHandler);
+        }
+        gridContainer._mjrGridFocusHandler = null;
     } catch {}
 
     try {

@@ -34,7 +34,7 @@ _BACKGROUND_SCAN_HISTORY_MAX = 1000
 
 _SCAN_PENDING_LOCK = asyncio.Lock()
 _SCAN_PENDING: OrderedDict[str, dict[str, Any]] = OrderedDict()
-_SCAN_TASK: Optional[asyncio.Task] = None
+_SCAN_TASK: Optional[asyncio.Task[Any]] = None
 _SCAN_PENDING_MAX = int(SCAN_PENDING_MAX)
 
 _FS_LIST_CACHE_LOCK = asyncio.Lock()
@@ -205,6 +205,10 @@ async def _worker_loop() -> None:
             if error_result:
                 _record_scan_failure(str(task.get("directory")), str(task.get("source")), "SERVICE_UNAVAILABLE", str(error_result.error or ""))
                 await asyncio.sleep(2) # Backoff if services unavailable
+                continue
+            if svc is None:
+                _record_scan_failure(str(task.get("directory")), str(task.get("source")), "SERVICE_UNAVAILABLE", "Services are unavailable")
+                await asyncio.sleep(2)
                 continue
 
             try:

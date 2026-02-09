@@ -4,12 +4,53 @@ Database maintenance endpoints (safe, opt-in).
 
 from __future__ import annotations
 
+import datetime
+import shutil
+import sqlite3
+from pathlib import Path
+
 from aiohttp import web
 
+from backend.config import INDEX_DB_PATH
 from backend.shared import Result, get_logger
 from ..core import _json_response, _csrf_error, _require_services, safe_error_message
 
 logger = get_logger(__name__)
+
+_DB_ARCHIVE_DIR = INDEX_DB_PATH.parent / "archive"
+
+
+def _backup_name(now: datetime.datetime | None = None) -> str:
+    ts = (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y%m%d_%H%M%S")
+    return f"assets_{ts}.sqlite"
+
+
+def _list_backup_files() -> list[dict[str, str | int]]:
+    if not _DB_ARCHIVE_DIR.exists():
+        return []
+    rows: list[dict[str, str | int]] = []
+    for p in _DB_ARCHIVE_DIR.glob("*.sqlite"):
+        try:
+            st = p.stat()
+            rows.append(
+                {
+                    "name": p.name,
+                    "path": str(p),
+                    "size_bytes": int(st.st_size),
+                    "mtime": int(st.st_mtime),
+                }
+            )
+        except Exception:
+            continue
+    rows.sort(key=lambda x: int(x.get("mtime") or 0), reverse=True)
+    return rows
+
+
+def _sqlite_backup_file(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(src)) as src_conn:
+        with sqlite3.connect(str(dst)) as dst_conn:
+            src_conn.backup(dst_conn)
 
 
 def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
@@ -181,3 +222,112 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
             "deleted_files": deleted_files,
             "scans_triggered": started_scans,
         }))
+
+    @routes.get("/mjr/am/db/backups")
+    async def db_backups_list(_request: web.Request):
+        """List archived DB backups (newest first)."""
+        try:
+            rows = _list_backup_files()
+            latest = rows[0]["name"] if rows else None
+            return _json_response(Result.Ok({"archive_dir": str(_DB_ARCHIVE_DIR), "items": rows, "latest": latest}))
+        except Exception as exc:
+            return _json_response(Result.Err("DB_ERROR", safe_error_message(exc, "Failed to list DB backups")))
+
+    @routes.post("/mjr/am/db/backup-save")
+    async def db_backup_save(request: web.Request):
+        """Create a consistent DB snapshot into archive folder."""
+        import asyncio
+
+        csrf = _csrf_error(request)
+        if csrf:
+            return _json_response(Result.Err("CSRF", csrf))
+
+        svc, error_result = await _require_services()
+        if error_result:
+            return _json_response(error_result)
+        db = svc.get("db") if isinstance(svc, dict) else None
+        if not db:
+            return _json_response(Result.Err("SERVICE_UNAVAILABLE", "Database service unavailable"))
+
+        target = _DB_ARCHIVE_DIR / _backup_name()
+        try:
+            try:
+                await db.aquery("PRAGMA wal_checkpoint(TRUNCATE)", ())
+            except Exception:
+                pass
+            await asyncio.to_thread(_sqlite_backup_file, INDEX_DB_PATH, target)
+        except Exception as exc:
+            return _json_response(Result.Err("DB_ERROR", safe_error_message(exc, "Failed to save DB backup")))
+
+        return _json_response(
+            Result.Ok(
+                {
+                    "saved": True,
+                    "archive_dir": str(_DB_ARCHIVE_DIR),
+                    "name": target.name,
+                    "path": str(target),
+                    "size_bytes": int(target.stat().st_size) if target.exists() else 0,
+                }
+            )
+        )
+
+    @routes.post("/mjr/am/db/backup-restore")
+    async def db_backup_restore(request: web.Request):
+        """
+        Restore DB from archive.
+        Body: { name?: str, use_latest?: bool }
+        """
+        csrf = _csrf_error(request)
+        if csrf:
+            return _json_response(Result.Err("CSRF", csrf))
+
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        payload = payload if isinstance(payload, dict) else {}
+        requested_name = str(payload.get("name") or "").strip()
+        use_latest = bool(payload.get("use_latest") or not requested_name)
+
+        try:
+            items = _list_backup_files()
+            if not items:
+                return _json_response(Result.Err("NOT_FOUND", "No DB backup found in archive"))
+            if use_latest:
+                chosen = items[0]
+            else:
+                chosen = next((x for x in items if str(x.get("name")) == requested_name), None)
+                if not chosen:
+                    return _json_response(Result.Err("NOT_FOUND", f"Backup not found: {requested_name}"))
+            src = _DB_ARCHIVE_DIR / str(chosen.get("name") or "")
+            if not src.exists():
+                return _json_response(Result.Err("NOT_FOUND", f"Backup file missing: {src.name}"))
+        except Exception as exc:
+            return _json_response(Result.Err("DB_ERROR", safe_error_message(exc, "Failed to resolve backup file")))
+
+        svc, error_result = await _require_services()
+        if error_result:
+            return _json_response(error_result)
+        db = svc.get("db") if isinstance(svc, dict) else None
+        if not db:
+            return _json_response(Result.Err("SERVICE_UNAVAILABLE", "Database service unavailable"))
+
+        try:
+            reset_res = await db.areset()
+            if not reset_res.ok:
+                return _json_response(Result.Err(reset_res.code or "DB_ERROR", reset_res.error or "Failed to reset DB"))
+            shutil.copy2(src, INDEX_DB_PATH)
+            try:
+                db._init_db()
+            except Exception:
+                pass
+            try:
+                from backend.adapters.db.schema import migrate_schema
+
+                await migrate_schema(db)
+            except Exception:
+                pass
+        except Exception as exc:
+            return _json_response(Result.Err("DB_ERROR", safe_error_message(exc, "Failed to restore DB backup")))
+
+        return _json_response(Result.Ok({"restored": True, "name": src.name, "path": str(src)}))

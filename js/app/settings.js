@@ -205,6 +205,7 @@ export const loadMajoorSettings = () => {
             "probeBackend",
             "ratingTagsSync",
             "cache",
+            "search",
             "workflowMinimap",
             "ui",
             "security",
@@ -273,7 +274,11 @@ const applySettingsToConfig = (settings) => {
     APP_CONFIG.GRID_SHOW_WORKFLOW_DOT = !!(settings.grid?.showWorkflowDot ?? APP_DEFAULTS.GRID_SHOW_WORKFLOW_DOT);
     APP_CONFIG.GRID_VIDEO_HOVER_AUTOPLAY = !!(settings.grid?.videoHoverAutoplay ?? APP_DEFAULTS.GRID_VIDEO_HOVER_AUTOPLAY);
 
-    const _safeColor = (v, fallback) => /^#[0-9a-fA-F]{3,8}$/.test(String(v || "").trim()) ? String(v).trim() : fallback;
+    const _safeColor = (v, fallback) => {
+        let c = String(v || "").trim();
+        if (/^[0-9a-fA-F]{6}$/.test(c)) c = `#${c}`;
+        return /^#[0-9a-fA-F]{3,8}$/.test(c) ? c : fallback;
+    };
     APP_CONFIG.BADGE_STAR_COLOR = _safeColor(settings.grid?.starColor, APP_DEFAULTS.BADGE_STAR_COLOR);
     APP_CONFIG.BADGE_IMAGE_COLOR = _safeColor(settings.grid?.badgeImageColor, APP_DEFAULTS.BADGE_IMAGE_COLOR);
     APP_CONFIG.BADGE_VIDEO_COLOR = _safeColor(settings.grid?.badgeVideoColor, APP_DEFAULTS.BADGE_VIDEO_COLOR);
@@ -285,8 +290,8 @@ const applySettingsToConfig = (settings) => {
     APP_CONFIG.UI_TAG_COLOR = _safeColor(settings.ui?.tagColor, APP_DEFAULTS.UI_TAG_COLOR);
 
     try {
-        const root = document.querySelector(".mjr-assets-manager");
-        if (root) {
+        const roots = Array.from(document.querySelectorAll(".mjr-assets-manager"));
+        for (const root of roots) {
             root.style.setProperty("--mjr-star-active", APP_CONFIG.BADGE_STAR_COLOR);
             root.style.setProperty("--mjr-badge-image", APP_CONFIG.BADGE_IMAGE_COLOR);
             root.style.setProperty("--mjr-badge-video", APP_CONFIG.BADGE_VIDEO_COLOR);
@@ -362,7 +367,21 @@ export const registerMajoorSettings = (app, onApplied) => {
     void syncBackendSecuritySettings();
 
     let notifyTimer = null;
+    let notifyColorTimer = null;
     const pendingKeys = new Set();
+    const pendingColorKeys = new Set();
+    const COLOR_NOTIFY_DEBOUNCE_MS = 450;
+    const COLOR_SETTING_KEYS = new Set([
+        "grid.starColor",
+        "grid.badgeImageColor",
+        "grid.badgeVideoColor",
+        "grid.badgeAudioColor",
+        "grid.badgeModel3dColor",
+        "ui.cardHoverColor",
+        "ui.cardSelectionColor",
+        "ui.ratingColor",
+        "ui.tagColor",
+    ]);
     const flushNotify = () => {
         notifyTimer = null;
         if (!pendingKeys.size) return;
@@ -372,10 +391,24 @@ export const registerMajoorSettings = (app, onApplied) => {
             safeDispatchCustomEvent("mjr-settings-changed", { key: pendingKey }, { warnPrefix: "[Majoor]" });
         }
     };
+    const flushColorNotify = () => {
+        notifyColorTimer = null;
+        if (!pendingColorKeys.size) return;
+        const keys = Array.from(pendingColorKeys);
+        pendingColorKeys.clear();
+        for (const pendingKey of keys) {
+            safeDispatchCustomEvent("mjr-settings-changed", { key: pendingKey }, { warnPrefix: "[Majoor]" });
+        }
+    };
     const scheduleNotify = (key) => {
         if (typeof key === "string") pendingKeys.add(key);
         if (notifyTimer) return;
         notifyTimer = setTimeout(flushNotify, 120);
+    };
+    const scheduleColorNotify = (key) => {
+        if (typeof key === "string") pendingColorKeys.add(key);
+        if (notifyColorTimer) clearTimeout(notifyColorTimer);
+        notifyColorTimer = setTimeout(flushColorNotify, COLOR_NOTIFY_DEBOUNCE_MS);
     };
 
     const refreshFromStorage = () => {
@@ -479,7 +512,11 @@ export const registerMajoorSettings = (app, onApplied) => {
             if (typeof onApplied === "function") {
                 onApplied(settings, key);
             }
-            scheduleNotify(key);
+            if (COLOR_SETTING_KEYS.has(String(key || ""))) {
+                scheduleColorNotify(key);
+            } else {
+                scheduleNotify(key);
+            }
         };
 
         const cat = (section, label) => [SETTINGS_CATEGORY, section, label];
@@ -487,7 +524,9 @@ export const registerMajoorSettings = (app, onApplied) => {
         const badgeCat = (label) => [SETTINGS_CATEGORY, t("cat.badges", "Badges"), label];
         const colorCat = (label) => [SETTINGS_CATEGORY, t("cat.badges", "Badges"), label];
         const normalizeHexColor = (value, fallback) => {
-            const v = String(value || "").trim();
+            let v = String(value || "").trim();
+            // PrimeVue ColorPicker returns hex without '#' prefix
+            if (/^[0-9a-fA-F]{6}$/.test(v)) v = `#${v}`;
             return /^#[0-9a-fA-F]{6}$/.test(v) ? v.toUpperCase() : fallback;
         };
 

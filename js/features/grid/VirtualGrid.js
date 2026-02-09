@@ -494,6 +494,43 @@ export class VirtualGrid {
             }
         }
 
+        /**
+         * Scroll the scroll container so that a given item index is visible.
+         * Works even when the item is not yet rendered in the DOM (virtualized).
+         * @param {number} index Index of the item in the items array
+         */
+        scrollToIndex(index) {
+            if (index < 0 || index >= this.items.length) return;
+
+            const gap = this.options.gap;
+            const row = Math.floor(index / this.columnCount);
+            const itemTop = row * (this.rowHeight + gap);
+            const itemBottom = itemTop + this.rowHeight;
+
+            if (this.scrollTarget === window) {
+                const containerRect = this.container.getBoundingClientRect();
+                const viewportH = window.innerHeight || document.documentElement.clientHeight;
+                const absTop = containerRect.top + (window.scrollY || 0) + itemTop;
+                const absBottom = absTop + this.rowHeight;
+                const scrollY = window.scrollY || window.pageYOffset || 0;
+
+                if (absBottom > scrollY + viewportH) {
+                    window.scrollTo({ top: absBottom - viewportH, behavior: "instant" });
+                } else if (absTop < scrollY) {
+                    window.scrollTo({ top: absTop, behavior: "instant" });
+                }
+            } else if (this.scrollElement) {
+                const el = this.scrollElement;
+                const viewportH = el.clientHeight;
+
+                if (itemBottom > el.scrollTop + viewportH) {
+                    el.scrollTop = itemBottom - viewportH;
+                } else if (itemTop < el.scrollTop) {
+                    el.scrollTop = itemTop;
+                }
+            }
+        }
+
         _getCard(el) {
             return el.firstElementChild || el;
         }

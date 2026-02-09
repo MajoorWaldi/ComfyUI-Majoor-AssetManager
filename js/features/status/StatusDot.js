@@ -2,7 +2,7 @@
  * Status Dot Feature - Health indicator
  */
 
-import { get, getToolsStatus, post, resetIndex, getWatcherStatus, forceDeleteDb } from "../../api/client.js";
+import { get, getToolsStatus, post, resetIndex, getWatcherStatus, forceDeleteDb, listDbBackups, saveDbBackup, restoreDbBackup } from "../../api/client.js";
 import { ENDPOINTS } from "../../api/endpoints.js";
 import { APP_CONFIG } from "../../app/config.js";
 import { comfyToast } from "../../app/toast.js";
@@ -214,6 +214,133 @@ export function createStatusIndicator(options = {}) {
     toolsStatus.style.cssText = "font-size: 11px; opacity: 0.7; margin-top: 10px;";
     toolsStatus.textContent = t("status.toolStatusChecking", "Tool status: checking...");
     body.appendChild(toolsStatus);
+
+    const backupRow = document.createElement("div");
+    backupRow.style.cssText = "margin-top: 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;";
+
+    const backupSelect = document.createElement("select");
+    backupSelect.style.cssText = `
+        min-width: 240px;
+        padding: 4px 8px;
+        font-size: 11px;
+        border-radius: 6px;
+        border: 1px solid rgba(255,255,255,0.2);
+        background: rgba(255,255,255,0.04);
+        color: inherit;
+    `;
+    backupSelect.title = t("status.dbBackupSelectHint", "Select a DB backup to restore");
+    backupSelect.innerHTML = `<option value="">${t("status.dbBackupLoading", "Loading DB backups...")}</option>`;
+
+    const refreshBackups = async () => {
+        try {
+            const res = await listDbBackups();
+            if (!res?.ok) {
+                backupSelect.innerHTML = `<option value="">${t("status.dbBackupNone", "No DB backup found")}</option>`;
+                return;
+            }
+            const items = Array.isArray(res?.data?.items) ? res.data.items : [];
+            if (!items.length) {
+                backupSelect.innerHTML = `<option value="">${t("status.dbBackupNone", "No DB backup found")}</option>`;
+                return;
+            }
+            backupSelect.replaceChildren();
+            for (const item of items) {
+                const name = String(item?.name || "");
+                if (!name) continue;
+                const mtime = Number(item?.mtime || 0);
+                const size = Number(item?.size_bytes || 0);
+                const stamp = mtime > 0 ? new Date(mtime * 1000).toLocaleString() : "";
+                const label = `${name}${stamp ? ` (${stamp}` : ""}${size > 0 ? `, ${formatBytes(size)}` : ""}${stamp ? ")" : ""}`;
+                const opt = document.createElement("option");
+                opt.value = name;
+                opt.textContent = label;
+                backupSelect.appendChild(opt);
+            }
+        } catch {
+            backupSelect.innerHTML = `<option value="">${t("status.dbBackupNone", "No DB backup found")}</option>`;
+        }
+    };
+    void refreshBackups();
+    backupRow.appendChild(backupSelect);
+
+    const saveDbBtn = document.createElement("button");
+    saveDbBtn.type = "button";
+    saveDbBtn.textContent = t("btn.dbSave", "Save DB");
+    saveDbBtn.title = t("status.dbSaveHint", "Save a DB snapshot into archive folder");
+    saveDbBtn.style.cssText = `
+        padding: 5px 10px;
+        font-size: 11px;
+        border-radius: 6px;
+        border: 1px solid rgba(120,200,255,0.35);
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+    `;
+    saveDbBtn.onclick = async (event) => {
+        event.stopPropagation();
+        const original = saveDbBtn.textContent;
+        saveDbBtn.disabled = true;
+        saveDbBtn.textContent = t("btn.saving", "Saving...");
+        try {
+            const res = await saveDbBackup();
+            if (res?.ok) {
+                comfyToast(t("toast.dbSaveSuccess", "Database backup saved"), "success", 2200);
+                await refreshBackups();
+            } else {
+                comfyToast(res?.error || t("toast.dbSaveFailed", "Failed to save DB backup"), "error");
+            }
+        } catch (error) {
+            comfyToast(error?.message || t("toast.dbSaveFailed", "Failed to save DB backup"), "error");
+        } finally {
+            saveDbBtn.disabled = false;
+            saveDbBtn.textContent = original;
+        }
+    };
+    backupRow.appendChild(saveDbBtn);
+
+    const restoreDbBtn = document.createElement("button");
+    restoreDbBtn.type = "button";
+    restoreDbBtn.textContent = t("btn.dbRestore", "Restore");
+    restoreDbBtn.title = t("status.dbRestoreHint", "Restore selected DB backup");
+    restoreDbBtn.style.cssText = `
+        padding: 5px 10px;
+        font-size: 11px;
+        border-radius: 6px;
+        border: 1px solid rgba(255,180,80,0.35);
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+    `;
+    restoreDbBtn.onclick = async (event) => {
+        event.stopPropagation();
+        const selected = String(backupSelect.value || "");
+        if (!selected) {
+            comfyToast(t("toast.dbRestoreSelect", "Select a DB backup first"), "warning", 2000);
+            return;
+        }
+        const confirmed = confirm(t("dialog.dbRestore.confirm", "Restore selected DB backup? Current DB will be replaced."));
+        if (!confirmed) return;
+        const original = restoreDbBtn.textContent;
+        restoreDbBtn.disabled = true;
+        restoreDbBtn.textContent = t("btn.restoring", "Restoring...");
+        try {
+            const res = await restoreDbBackup({ name: selected, useLatest: false });
+            if (res?.ok) {
+                comfyToast(t("toast.dbRestoreSuccess", "Database backup restored"), "success", 2800);
+                await refreshBackups();
+            } else {
+                comfyToast(res?.error || t("toast.dbRestoreFailed", "Failed to restore DB backup"), "error");
+            }
+        } catch (error) {
+            comfyToast(error?.message || t("toast.dbRestoreFailed", "Failed to restore DB backup"), "error");
+        } finally {
+            restoreDbBtn.disabled = false;
+            restoreDbBtn.textContent = original;
+        }
+    };
+    backupRow.appendChild(restoreDbBtn);
+
+    body.appendChild(backupRow);
 
     const actionsRow = document.createElement("div");
     actionsRow.style.cssText = "margin-top: 10px; display: flex; justify-content: flex-end; gap: 8px;";

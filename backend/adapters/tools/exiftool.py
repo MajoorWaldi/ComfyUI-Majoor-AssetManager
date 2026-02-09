@@ -17,6 +17,45 @@ logger = get_logger(__name__)
 _TAG_SAFE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_:-]*$")
 
 
+def _decode_bytes_best_effort(blob: Optional[bytes]) -> Tuple[str, bool]:
+    """
+    Decode subprocess bytes robustly across Windows code pages.
+
+    Returns:
+      (text, had_replacement_chars)
+    """
+    if blob is None:
+        return "", False
+    if not isinstance(blob, (bytes, bytearray)):
+        try:
+            text = str(blob)
+        except Exception:
+            text = ""
+        return text, ("\ufffd" in text)
+
+    raw = bytes(blob)
+    if not raw:
+        return "", False
+
+    # Preferred: UTF-8 strict (ExifTool JSON/output should be UTF-8 in our setup).
+    for enc in ("utf-8", "utf-8-sig"):
+        try:
+            return raw.decode(enc, errors="strict"), False
+        except UnicodeDecodeError:
+            pass
+
+    # Fallback for Windows environments where stderr/stdout may be emitted in local codepage.
+    try:
+        cp_text = raw.decode("cp1252", errors="strict")
+        return cp_text, False
+    except UnicodeDecodeError:
+        pass
+
+    utf_text = raw.decode("utf-8", errors="replace")
+    had_rep = "\ufffd" in utf_text
+    return utf_text, had_rep
+
+
 def _is_safe_exiftool_tag(tag: str) -> bool:
     """
     Return True if a tag/key looks safe to pass to ExifTool as `-TAG` / `-TAG=...`.
@@ -220,15 +259,18 @@ class ExifTool:
         safe_tags = tags_res.data or []
 
         def _run(cmd: List[str], stdin_input: Optional[str]) -> subprocess.CompletedProcess:
+            stdin_bytes: Optional[bytes]
+            if stdin_input is None:
+                stdin_bytes = None
+            else:
+                stdin_bytes = str(stdin_input).encode("utf-8", errors="replace")
             return subprocess.run(
                 cmd,
                 capture_output=True,
-                text=True,
+                text=False,
                 check=False,
                 timeout=self.timeout,
-                encoding="utf-8",
-                errors="replace",
-                input=stdin_input,
+                input=stdin_bytes,
                 shell=False,
             )
 
@@ -271,9 +313,9 @@ class ExifTool:
                     if retry_process.returncode == 0:
                         process = retry_process
 
-            stdout = process.stdout or ""
-            stderr = process.stderr or ""
-            had_replacements = ("\ufffd" in stdout) or ("\ufffd" in stderr)
+            stdout, stdout_rep = _decode_bytes_best_effort(process.stdout)
+            stderr, stderr_rep = _decode_bytes_best_effort(process.stderr)
+            had_replacements = bool(stdout_rep or stderr_rep)
             if had_replacements:
                 logger.warning("ExifTool output contained decoding replacement characters for %s", path)
 
@@ -395,21 +437,42 @@ class ExifTool:
             # Add all paths (de-duplicated by normalized key to avoid repeated work)
             cmd.extend(cmd_paths)
 
+            timeout_s = self.timeout * len(cmd_paths)
+
             # Run command
             process = subprocess.run(
                 cmd,
                 capture_output=True,
-                text=True,
+                text=False,
                 check=False,
-                timeout=self.timeout * len(cmd_paths),  # Scale timeout with file count
-                encoding="utf-8",
-                errors="replace",
+                timeout=timeout_s,  # Scale timeout with file count
                 shell=False,
             )
 
-            stdout = process.stdout or ""
-            stderr = process.stderr or ""
-            had_replacements = ("\ufffd" in stdout) or ("\ufffd" in stderr)
+            # Windows retry path: use stdin argfile in UTF-8 when argv path decoding fails.
+            if os.name == "nt" and process.returncode != 0:
+                stderr0, _ = _decode_bytes_best_effort(process.stderr)
+                if "file not found" in (stderr0 or "").lower():
+                    retry_cmd = [self.bin, "-j", "-G1", "-ee", "-a", "-U", "-s"]
+                    if safe_tags:
+                        retry_cmd.extend([f"-{tag}" for tag in safe_tags])
+                    retry_cmd.extend(["-charset", "filename=utf8", "-@", "-"])
+                    stdin_lines = "".join(f"{p}\r\n" for p in cmd_paths)
+                    retry_process = subprocess.run(
+                        retry_cmd,
+                        capture_output=True,
+                        text=False,
+                        check=False,
+                        timeout=timeout_s,
+                        input=stdin_lines.encode("utf-8", errors="replace"),
+                        shell=False,
+                    )
+                    if retry_process.returncode == 0:
+                        process = retry_process
+
+            stdout, stdout_rep = _decode_bytes_best_effort(process.stdout)
+            stderr, stderr_rep = _decode_bytes_best_effort(process.stderr)
+            had_replacements = bool(stdout_rep or stderr_rep)
 
             if had_replacements:
                 logger.warning("ExifTool batch output contained decoding replacement characters")
@@ -572,18 +635,16 @@ class ExifTool:
             process = subprocess.run(
                 cmd,
                 capture_output=True,
-                text=True,
+                text=False,
                 check=False,
                 timeout=self.timeout,
-                encoding="utf-8",
-                errors="replace",
-                input=stdin_input,
+                input=(stdin_input.encode("utf-8", errors="replace") if stdin_input is not None else None),
                 shell=False,
             )
 
-            stdout = process.stdout or ""
-            stderr = process.stderr or ""
-            if "\ufffd" in stdout or "\ufffd" in stderr:
+            stdout, stdout_rep = _decode_bytes_best_effort(process.stdout)
+            stderr, stderr_rep = _decode_bytes_best_effort(process.stderr)
+            if stdout_rep or stderr_rep:
                 logger.warning("ExifTool write output contained decoding replacement characters for %s", path)
 
             if process.returncode != 0:

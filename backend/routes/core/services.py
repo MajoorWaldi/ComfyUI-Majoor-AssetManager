@@ -2,6 +2,8 @@
 Service management and initialization.
 """
 import asyncio
+from typing import Any
+
 from backend.deps import build_services
 from backend.shared import Result, get_logger
 
@@ -70,7 +72,7 @@ async def _build_services(force: bool = False):
         return _services
 
 
-async def _require_services():
+async def _require_services() -> tuple[dict[str, Any] | None, Result[Any] | None]:
     services = await _build_services()
     if services:
         return services, None

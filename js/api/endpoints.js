@@ -71,7 +71,12 @@ export const ENDPOINTS = {
     // Duplicate detection
     DUPLICATES_ALERTS: "/mjr/am/duplicates/alerts",
     DUPLICATES_ANALYZE: "/mjr/am/duplicates/analyze",
-    DUPLICATES_MERGE_TAGS: "/mjr/am/duplicates/merge-tags"
+    DUPLICATES_MERGE_TAGS: "/mjr/am/duplicates/merge-tags",
+
+    // DB backup/restore
+    DB_BACKUPS: "/mjr/am/db/backups",
+    DB_BACKUP_SAVE: "/mjr/am/db/backup-save",
+    DB_BACKUP_RESTORE: "/mjr/am/db/backup-restore"
 };
 
 /**

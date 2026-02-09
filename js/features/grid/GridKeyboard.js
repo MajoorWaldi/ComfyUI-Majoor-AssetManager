@@ -259,6 +259,14 @@ export function installGridKeyboard({
     const scrollToAssetId = (assetId) => {
         const id = String(assetId || "").trim();
         if (!id) return;
+        // Prefer VirtualGrid-aware scroll (calculates position from index, works for off-screen items)
+        try {
+            if (typeof gridContainer?._mjrScrollToAssetId === "function") {
+                gridContainer._mjrScrollToAssetId(id);
+                return;
+            }
+        } catch {}
+        // Fallback: DOM-based scroll (only works if the card is already rendered)
         try {
             const esc = typeof CSS !== "undefined" && CSS?.escape ? CSS.escape(id) : id.replace(/["\\]/g, "\\$&");
             const card = gridContainer.querySelector(`.mjr-asset-card[data-mjr-asset-id="${esc}"]`);
@@ -279,6 +287,7 @@ export function installGridKeyboard({
         const activeAsset = getActive();
         const currentId = String(activeAsset?.id || gridContainer?.dataset?.mjrSelectedAssetId || "");
         let currentIndex = assets.findIndex((a) => String(a?.id || "") === currentId);
+        const hadSelection = currentIndex >= 0;
         if (currentIndex < 0) currentIndex = 0;
 
         const cols = Math.max(1, getGridColumns());
@@ -291,7 +300,8 @@ export function installGridKeyboard({
         else if (key === "End") nextIndex = assets.length - 1;
 
         nextIndex = Math.max(0, Math.min(assets.length - 1, nextIndex));
-        if (nextIndex === currentIndex && key !== "Home" && key !== "End") return false;
+        // If nothing is selected yet, first arrow/home/end should still select an item.
+        if (hadSelection && nextIndex === currentIndex && key !== "Home" && key !== "End") return false;
 
         const nextId = String(assets[nextIndex]?.id || "");
         if (!nextId) return false;

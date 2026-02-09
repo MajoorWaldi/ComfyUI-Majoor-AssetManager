@@ -114,6 +114,14 @@ def _is_missing_column_error(exc: Exception) -> bool:
         return False
     return "no such column" in msg
 
+
+def _is_missing_table_error(exc: Exception) -> bool:
+    try:
+        msg = str(exc).lower()
+    except Exception:
+        return False
+    return "no such table" in msg
+
 def _populate_known_columns_from_schema(db_path: Path) -> None:
     global _KNOWN_COLUMNS_LOWER
     try:
@@ -363,6 +371,8 @@ class Sqlite:
         self._asset_locks_lock = threading.Lock()
         self._malformed_recovery_lock = threading.Lock()
         self._malformed_recovery_last_ts = 0.0
+        self._schema_repair_lock = threading.Lock()
+        self._schema_repair_last_ts = 0.0
         self._diag_lock = threading.Lock()
         self._diag: Dict[str, Any] = {
             "locked": False,
@@ -515,10 +525,30 @@ class Sqlite:
             self._set_recovery_state("failed", str(rec_exc))
             logger.error("Online recovery failed: %s", rec_exc)
             return False
-        except Exception as rec_exc:
-            self._set_recovery_state("failed", str(rec_exc))
-            logger.error("Online recovery failed: %s", rec_exc)
-            return False
+
+    async def _attempt_missing_table_recovery_async(self) -> bool:
+        """
+        Best-effort schema recovery when a query fails with "no such table".
+        Throttled to avoid repeated heavy repairs under concurrent failures.
+        """
+        now = time.time()
+        with self._schema_repair_lock:
+            if (now - self._schema_repair_last_ts) < 5.0:
+                return False
+            self._schema_repair_last_ts = now
+        try:
+            from .schema import migrate_schema
+
+            result = await migrate_schema(self)
+            if result and result.ok:
+                try:
+                    _populate_known_columns_from_schema(self.db_path)
+                except Exception:
+                    pass
+                return True
+        except Exception as exc:
+            logger.warning("Schema self-heal after missing table failed: %s", exc)
+        return False
 
     async def _sleep_backoff(self, attempt: int):
         base = float(self._lock_retry_base_seconds)
@@ -781,6 +811,12 @@ class Sqlite:
                             )
                     except Exception as heal_exc:
                         logger.warning("Schema self-heal after missing column failed: %s", heal_exc)
+                if _is_missing_table_error(exc):
+                    repaired = await self._attempt_missing_table_recovery_async()
+                    if repaired:
+                        return await self._execute_on_conn_locked_async(
+                            conn, query, params, fetch, commit=commit
+                        )
                 logger.error("Operational error: %s", exc)
                 return Result.Err(ErrorCode.DB_ERROR, f"Operational error: {exc}")
             except sqlite3.DatabaseError as exc:
