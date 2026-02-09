@@ -199,6 +199,124 @@ export function installGridKeyboard({
         }
     };
 
+    const getAllAssets = () => {
+        try {
+            if (Array.isArray(getState?.()?.assets) && getState().assets.length) return getState().assets;
+        } catch {}
+        try {
+            if (typeof gridContainer?._mjrGetAssets === "function") {
+                const list = gridContainer._mjrGetAssets();
+                if (Array.isArray(list) && list.length) return list;
+            }
+        } catch {}
+        try {
+            return Array.from(gridContainer.querySelectorAll(".mjr-asset-card"))
+                .map((card) => card?._mjrAsset)
+                .filter(Boolean);
+        } catch {
+            return [];
+        }
+    };
+
+    const getGridColumns = () => {
+        try {
+            const cards = Array.from(gridContainer.querySelectorAll(".mjr-asset-card"));
+            if (cards.length >= 2) {
+                const firstTop = Math.round(cards[0].getBoundingClientRect().top);
+                const sameRow = cards.filter((c) => {
+                    try {
+                        return Math.abs(Math.round(c.getBoundingClientRect().top) - firstTop) <= 4;
+                    } catch {
+                        return false;
+                    }
+                });
+                if (sameRow.length >= 1) return Math.max(1, sameRow.length);
+            }
+            if (cards.length >= 1) {
+                const cardRect = cards[0].getBoundingClientRect();
+                const hostRect = gridContainer.getBoundingClientRect();
+                const cardW = Math.max(1, Math.round(cardRect.width));
+                const hostW = Math.max(1, Math.round(hostRect.width));
+                return Math.max(1, Math.floor(hostW / cardW));
+            }
+        } catch {}
+        return 1;
+    };
+
+    const selectByIds = (ids, activeId) => {
+        const list = Array.isArray(ids) ? ids.map(String).filter(Boolean) : [];
+        const active = String(activeId || list[0] || "");
+        try {
+            if (typeof gridContainer?._mjrSetSelection === "function") {
+                gridContainer._mjrSetSelection(list, active);
+            } else {
+                gridContainer.dataset.mjrSelectedAssetIds = JSON.stringify(list);
+                gridContainer.dataset.mjrSelectedAssetId = active;
+            }
+        } catch {}
+    };
+
+    const scrollToAssetId = (assetId) => {
+        const id = String(assetId || "").trim();
+        if (!id) return;
+        try {
+            const esc = typeof CSS !== "undefined" && CSS?.escape ? CSS.escape(id) : id.replace(/["\\]/g, "\\$&");
+            const card = gridContainer.querySelector(`.mjr-asset-card[data-mjr-asset-id="${esc}"]`);
+            card?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+        } catch {}
+    };
+
+    const handleGridNavigation = (e) => {
+        const key = String(e.key || "");
+        const isArrow = key === "ArrowLeft" || key === "ArrowRight" || key === "ArrowUp" || key === "ArrowDown";
+        const isEdge = key === "Home" || key === "End";
+        if (!isArrow && !isEdge) return false;
+        if (e.ctrlKey || e.altKey || e.metaKey) return false;
+
+        const assets = getAllAssets();
+        if (!Array.isArray(assets) || assets.length === 0) return false;
+
+        const activeAsset = getActive();
+        const currentId = String(activeAsset?.id || gridContainer?.dataset?.mjrSelectedAssetId || "");
+        let currentIndex = assets.findIndex((a) => String(a?.id || "") === currentId);
+        if (currentIndex < 0) currentIndex = 0;
+
+        const cols = Math.max(1, getGridColumns());
+        let nextIndex = currentIndex;
+        if (key === "ArrowLeft") nextIndex -= 1;
+        else if (key === "ArrowRight") nextIndex += 1;
+        else if (key === "ArrowUp") nextIndex -= cols;
+        else if (key === "ArrowDown") nextIndex += cols;
+        else if (key === "Home") nextIndex = 0;
+        else if (key === "End") nextIndex = assets.length - 1;
+
+        nextIndex = Math.max(0, Math.min(assets.length - 1, nextIndex));
+        if (nextIndex === currentIndex && key !== "Home" && key !== "End") return false;
+
+        const nextId = String(assets[nextIndex]?.id || "");
+        if (!nextId) return false;
+
+        if (e.shiftKey) {
+            let anchorId = String(gridContainer?._mjrSelectionAnchorId || "");
+            if (!anchorId) anchorId = currentId || nextId;
+            const anchorIndex = assets.findIndex((a) => String(a?.id || "") === anchorId);
+            const from = anchorIndex >= 0 ? anchorIndex : currentIndex;
+            const lo = Math.min(from, nextIndex);
+            const hi = Math.max(from, nextIndex);
+            const rangeIds = assets.slice(lo, hi + 1).map((a) => String(a?.id || "")).filter(Boolean);
+            selectByIds(rangeIds, nextId);
+        } else {
+            gridContainer._mjrSelectionAnchorId = nextId;
+            selectByIds([nextId], nextId);
+        }
+
+        scrollToAssetId(nextId);
+        try {
+            onSelectionChanged?.();
+        } catch {}
+        return true;
+    };
+
     const handleKeydown = async (e) => {
         // Skip if typing in input
         const target = e.target;
@@ -208,6 +326,8 @@ export function installGridKeyboard({
 
         // Skip if hotkeys suspended (dialog open, etc.)
         if (globalThis?._mjrHotkeysState?.suspended) return;
+        // Viewer must have priority over grid shortcuts.
+        if (globalThis?._mjrHotkeysState?.scope === "viewer") return;
 
         // Skip if grid not visible/focused
         // Allow if focus is:
@@ -231,28 +351,37 @@ export function installGridKeyboard({
             e.stopPropagation();
         };
 
+        // Grid navigation (arrows + Home/End, with Shift range extension)
+        try {
+            if (handleGridNavigation(e)) {
+                consume();
+                return;
+            }
+        } catch {}
+
         const selected = getSelection();
         const asset = getActive();
         const state = getState();
 
-        // Rating shortcuts (1-5, 0 for reset) - Lightroom/Bridge standard
+        // Rating shortcuts (1-5, 0 for reset) - handled by dedicated rating controller when enabled.
+        const ratingHotkeysActive = !!globalThis?._mjrRatingHotkeysActive;
         if (!e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
-            if (matchesShortcut(e, GRID_SHORTCUTS.RATING_1)) {
+            if (!ratingHotkeysActive && matchesShortcut(e, GRID_SHORTCUTS.RATING_1)) {
                 if (asset?.id) { consume(); setRating(asset, 1, onAssetChanged); return; }
             }
-            if (matchesShortcut(e, GRID_SHORTCUTS.RATING_2)) {
+            if (!ratingHotkeysActive && matchesShortcut(e, GRID_SHORTCUTS.RATING_2)) {
                 if (asset?.id) { consume(); setRating(asset, 2, onAssetChanged); return; }
             }
-            if (matchesShortcut(e, GRID_SHORTCUTS.RATING_3)) {
+            if (!ratingHotkeysActive && matchesShortcut(e, GRID_SHORTCUTS.RATING_3)) {
                 if (asset?.id) { consume(); setRating(asset, 3, onAssetChanged); return; }
             }
-            if (matchesShortcut(e, GRID_SHORTCUTS.RATING_4)) {
+            if (!ratingHotkeysActive && matchesShortcut(e, GRID_SHORTCUTS.RATING_4)) {
                 if (asset?.id) { consume(); setRating(asset, 4, onAssetChanged); return; }
             }
-            if (matchesShortcut(e, GRID_SHORTCUTS.RATING_5)) {
+            if (!ratingHotkeysActive && matchesShortcut(e, GRID_SHORTCUTS.RATING_5)) {
                 if (asset?.id) { consume(); setRating(asset, 5, onAssetChanged); return; }
             }
-            if (matchesShortcut(e, GRID_SHORTCUTS.RATING_RESET)) {
+            if (!ratingHotkeysActive && matchesShortcut(e, GRID_SHORTCUTS.RATING_RESET)) {
                 if (asset?.id) { consume(); setRating(asset, 0, onAssetChanged); return; }
             }
         }

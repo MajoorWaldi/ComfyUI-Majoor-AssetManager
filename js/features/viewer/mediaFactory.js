@@ -139,6 +139,110 @@ export function createViewerMediaFactory({
         } catch {}
     };
 
+    const _parseFps = (v) => {
+        try {
+            const n = Number(v);
+            if (Number.isFinite(n) && n > 0) return n;
+            const s = String(v || "").trim();
+            if (!s) return null;
+            if (s.includes("/")) {
+                const [a, b] = s.split("/");
+                const na = Number(a);
+                const nb = Number(b);
+                if (Number.isFinite(na) && Number.isFinite(nb) && nb !== 0) return na / nb;
+            }
+            const f = Number.parseFloat(s);
+            if (Number.isFinite(f) && f > 0) return f;
+        } catch {}
+        return null;
+    };
+
+    const _fpsFromAssetMeta = (asset) => {
+        try {
+            const raw = asset?.metadata_raw;
+            const ff = raw?.raw_ffprobe || {};
+            const vs = ff?.video_stream || {};
+            return _parseFps(raw?.fps ?? vs?.avg_frame_rate ?? vs?.r_frame_rate);
+        } catch {
+            return null;
+        }
+    };
+
+    const _emitDetectedFps = (video, asset, fps, source = "metadata") => {
+        try {
+            const n = Number(fps);
+            if (!Number.isFinite(n) || n <= 0) return;
+            const rounded = Math.round(n * 1000) / 1000;
+            const last = Number(video?._mjrDetectedFps || 0) || 0;
+            if (last > 0 && Math.abs(last - rounded) < 0.01) return;
+            video._mjrDetectedFps = rounded;
+            window.dispatchEvent(
+                new CustomEvent("mjr:viewer-fps-detected", {
+                    detail: {
+                        fps: rounded,
+                        source: String(source || "metadata"),
+                        assetId: asset?.id != null ? String(asset.id) : "",
+                    },
+                })
+            );
+        } catch {}
+    };
+
+    const _attachFpsDetection = (video, asset) => {
+        try {
+            const fromMeta = _fpsFromAssetMeta(asset);
+            if (fromMeta) _emitDetectedFps(video, asset, fromMeta, "asset-metadata");
+        } catch {}
+
+        try {
+            video.addEventListener(
+                "loadedmetadata",
+                () => {
+                    try {
+                        const fromMeta = _fpsFromAssetMeta(asset);
+                        if (fromMeta) _emitDetectedFps(video, asset, fromMeta, "loadedmetadata");
+                    } catch {}
+                },
+                { once: true }
+            );
+        } catch {}
+
+        // Runtime estimate via media timestamps (best effort, modern browsers only).
+        try {
+            if (typeof video?.requestVideoFrameCallback !== "function") return;
+            let prevMediaTime = null;
+            let samples = 0;
+            let acc = 0;
+            const maxSamples = 10;
+            const onFrame = (_now, meta) => {
+                try {
+                    const mt = Number(meta?.mediaTime);
+                    if (Number.isFinite(mt) && mt >= 0) {
+                        if (prevMediaTime != null) {
+                            const dt = mt - prevMediaTime;
+                            if (dt > 0 && dt < 1) {
+                                acc += dt;
+                                samples += 1;
+                            }
+                        }
+                        prevMediaTime = mt;
+                    }
+                    if (samples >= 3) {
+                        const avg = acc / Math.max(1, samples);
+                        const fps = avg > 0 ? 1 / avg : 0;
+                        if (Number.isFinite(fps) && fps > 1) {
+                            _emitDetectedFps(video, asset, fps, "rvfc");
+                        }
+                    }
+                    if (samples < maxSamples) {
+                        video.requestVideoFrameCallback(onFrame);
+                    }
+                } catch {}
+            };
+            video.requestVideoFrameCallback(onFrame);
+        } catch {}
+    };
+
     const _createAudioElement = (asset, url, { compare = false } = {}) => {
         const wrap = document.createElement("div");
         wrap.style.cssText = `
@@ -267,6 +371,7 @@ export function createViewerMediaFactory({
             video.muted = true;
             video.preload = "metadata";
             video.style.cssText = "position:absolute; width:1px; height:1px; opacity:0; pointer-events:none;";
+            _attachFpsDetection(video, asset);
 
             try {
                 canvas._mjrProc = createVideoProcessor({
@@ -433,6 +538,7 @@ export function createViewerMediaFactory({
             video.autoplay = true;
             video.preload = "metadata";
             video.style.cssText = "position:absolute; width:1px; height:1px; opacity:0; pointer-events:none;";
+            _attachFpsDetection(video, asset);
 
                 try {
                     canvas._mjrProc = createVideoProcessor({

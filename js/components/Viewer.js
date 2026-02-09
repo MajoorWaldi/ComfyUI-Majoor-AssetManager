@@ -43,6 +43,34 @@ export const VIEWER_MODES = {
     SIDE_BY_SIDE: 'sidebyside'
 };
 
+const VIEWER_PREFS_KEY = "mjr_viewer_prefs_v1";
+
+function loadViewerPrefs() {
+    try {
+        const raw = localStorage.getItem(VIEWER_PREFS_KEY);
+        if (!raw) return {};
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function saveViewerPrefs(state) {
+    try {
+        if (!state) return;
+        const prefs = {
+            analysisMode: String(state.analysisMode || "none"),
+            loupeEnabled: !!state.loupeEnabled,
+            probeEnabled: !!state.probeEnabled,
+            hudEnabled: !!state.hudEnabled,
+            genInfoOpen: !!state.genInfoOpen,
+            audioVisualizerMode: String(state.audioVisualizerMode || "artistic"),
+        };
+        localStorage.setItem(VIEWER_PREFS_KEY, JSON.stringify(prefs));
+    } catch {}
+}
+
 /**
  * Create the main viewer overlay
  */
@@ -72,6 +100,17 @@ export function createViewer() {
 
     const state = createDefaultViewerState();
     state.mode = VIEWER_MODES.SINGLE;
+    try {
+        const prefs = loadViewerPrefs();
+        if (prefs && typeof prefs === "object") {
+            if (typeof prefs.analysisMode === "string") state.analysisMode = prefs.analysisMode || "none";
+            if (typeof prefs.loupeEnabled === "boolean") state.loupeEnabled = prefs.loupeEnabled;
+            if (typeof prefs.probeEnabled === "boolean") state.probeEnabled = prefs.probeEnabled;
+            if (typeof prefs.hudEnabled === "boolean") state.hudEnabled = prefs.hudEnabled;
+            if (typeof prefs.genInfoOpen === "boolean") state.genInfoOpen = prefs.genInfoOpen;
+            if (typeof prefs.audioVisualizerMode === "string") state.audioVisualizerMode = prefs.audioVisualizerMode || "artistic";
+        }
+    } catch {}
     const IMAGE_PRELOAD_EXTENSIONS = new Set([
         "png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "avif", "heic", "hdr", "svg", "apng"
     ]);
@@ -298,6 +337,9 @@ export function createViewer() {
             onToolsChanged: () => {
                 try {
                     toolbar?.syncToolsUIFromState?.();
+                } catch {}
+                try {
+                    saveViewerPrefs(state);
                 } catch {}
                 try {
                     applyDistractionFreeUI();
@@ -1583,6 +1625,10 @@ export function createViewer() {
         } catch {}
         state._videoMetaAbort = null;
         try {
+            state._videoFpsEventAbort?.abort?.();
+        } catch {}
+        state._videoFpsEventAbort = null;
+        try {
             state._scopesVideoAbort?.abort?.();
         } catch {}
         state._scopesVideoAbort = null;
@@ -1715,6 +1761,9 @@ export function createViewer() {
             state._videoControlsDestroy = mounted?.destroy || null;
             state._activeVideoEl = mediaEl;
             try {
+                state.nativeFps = Number(initialFps) > 0 ? Number(initialFps) : null;
+            } catch {}
+            try {
                 if (mediaKind === "audio") {
                     const p = mediaEl.play?.();
                     if (p && typeof p.catch === "function") p.catch(() => {});
@@ -1809,7 +1858,7 @@ export function createViewer() {
                 const applyFromViewerInfo = (info) => {
                     try {
                         if (!info || typeof info !== "object") return;
-                        const fps = parseFps(info?.fps ?? info?.fps_raw);
+                        const fps = parseFps(info?.fps ?? info?.fps_raw ?? info?.frame_rate);
                         const frameCount = parseFrameCount(info?.frame_count);
                         if (fps != null || frameCount != null) mounted?.setMediaInfo?.({ fps, frameCount });
                     } catch {}
@@ -1839,6 +1888,32 @@ export function createViewer() {
                         applyFromViewerInfo(res.data);
                     } catch {}
                 })();
+            } catch {}
+
+            // Best-effort: listen for FPS detected from video metadata/runtime in mediaFactory.
+            try {
+                state._videoFpsEventAbort?.abort?.();
+            } catch {}
+            try {
+                const ac = new AbortController();
+                state._videoFpsEventAbort = ac;
+                window.addEventListener(
+                    "mjr:viewer-fps-detected",
+                    (e) => {
+                        try {
+                            const detail = e?.detail || {};
+                            const aid = String(detail?.assetId || "");
+                            const currentId = String(current?.id ?? "");
+                            if (!aid || !currentId || aid !== currentId) return;
+                            if (state._activeVideoEl !== mediaEl) return;
+                            const fps = Number(detail?.fps);
+                            if (!Number.isFinite(fps) || fps <= 0) return;
+                            state.nativeFps = fps;
+                            mounted?.setMediaInfo?.({ fps });
+                        } catch {}
+                    },
+                    { signal: ac.signal, passive: true }
+                );
             } catch {}
         } catch {
             destroyPlayerBar();
@@ -2358,7 +2433,6 @@ export function createViewer() {
             state._mediaH = 0;
             state.compareAsset = compareAsset;
             state.gridMode = 0;
-            state.genInfoOpen = true;
             stopGenInfoFetch();
             state._probe = null;
             try {

@@ -31,6 +31,16 @@ _SETTINGS_CACHE_TTL_S = 10.0
 _VERSION_CACHE_TTL_S = 1.0
 _MS_PER_S = 1000.0
 
+# Frontend-consumed default settings payload (kept for cross-layer parity).
+DEFAULT_SETTINGS: dict[str, Any] = {
+    "ui": {
+        "cardHoverColor": "#3d3d3d",
+        "cardSelectionColor": "#4a90e2",
+        "ratingColor": "#ff9500",
+        "tagColor": "#4a90e2",
+    }
+}
+
 
 
 class AppSettings:

@@ -35,6 +35,7 @@ const DEFAULT_SETTINGS = {
         showDimensions: APP_DEFAULTS.GRID_SHOW_DETAILS_DIMENSIONS,
         showGenTime: APP_DEFAULTS.GRID_SHOW_DETAILS_GENTIME,
         showWorkflowDot: APP_DEFAULTS.GRID_SHOW_WORKFLOW_DOT,
+        videoHoverAutoplay: APP_DEFAULTS.GRID_VIDEO_HOVER_AUTOPLAY,
         starColor: APP_DEFAULTS.BADGE_STAR_COLOR,
         badgeImageColor: APP_DEFAULTS.BADGE_IMAGE_COLOR,
         badgeVideoColor: APP_DEFAULTS.BADGE_VIDEO_COLOR,
@@ -107,6 +108,12 @@ const DEFAULT_SETTINGS = {
         renderBypassState: true,
         renderErrorState: true,
         showViewport: true,
+    },
+    ui: {
+        cardHoverColor: APP_DEFAULTS.UI_CARD_HOVER_COLOR,
+        cardSelectionColor: APP_DEFAULTS.UI_CARD_SELECTION_COLOR,
+        ratingColor: APP_DEFAULTS.UI_RATING_COLOR,
+        tagColor: APP_DEFAULTS.UI_TAG_COLOR,
     },
     security: {
         safeMode: false,
@@ -199,6 +206,7 @@ export const loadMajoorSettings = () => {
             "ratingTagsSync",
             "cache",
             "workflowMinimap",
+            "ui",
             "security",
             "safety",
         ]);
@@ -263,6 +271,7 @@ const applySettingsToConfig = (settings) => {
     APP_CONFIG.GRID_SHOW_DETAILS_DIMENSIONS = !!(settings.grid?.showDimensions ?? APP_DEFAULTS.GRID_SHOW_DETAILS_DIMENSIONS);
     APP_CONFIG.GRID_SHOW_DETAILS_GENTIME = !!(settings.grid?.showGenTime ?? APP_DEFAULTS.GRID_SHOW_DETAILS_GENTIME);
     APP_CONFIG.GRID_SHOW_WORKFLOW_DOT = !!(settings.grid?.showWorkflowDot ?? APP_DEFAULTS.GRID_SHOW_WORKFLOW_DOT);
+    APP_CONFIG.GRID_VIDEO_HOVER_AUTOPLAY = !!(settings.grid?.videoHoverAutoplay ?? APP_DEFAULTS.GRID_VIDEO_HOVER_AUTOPLAY);
 
     const _safeColor = (v, fallback) => /^#[0-9a-fA-F]{3,8}$/.test(String(v || "").trim()) ? String(v).trim() : fallback;
     APP_CONFIG.BADGE_STAR_COLOR = _safeColor(settings.grid?.starColor, APP_DEFAULTS.BADGE_STAR_COLOR);
@@ -270,6 +279,10 @@ const applySettingsToConfig = (settings) => {
     APP_CONFIG.BADGE_VIDEO_COLOR = _safeColor(settings.grid?.badgeVideoColor, APP_DEFAULTS.BADGE_VIDEO_COLOR);
     APP_CONFIG.BADGE_AUDIO_COLOR = _safeColor(settings.grid?.badgeAudioColor, APP_DEFAULTS.BADGE_AUDIO_COLOR);
     APP_CONFIG.BADGE_MODEL3D_COLOR = _safeColor(settings.grid?.badgeModel3dColor, APP_DEFAULTS.BADGE_MODEL3D_COLOR);
+    APP_CONFIG.UI_CARD_HOVER_COLOR = _safeColor(settings.ui?.cardHoverColor, APP_DEFAULTS.UI_CARD_HOVER_COLOR);
+    APP_CONFIG.UI_CARD_SELECTION_COLOR = _safeColor(settings.ui?.cardSelectionColor, APP_DEFAULTS.UI_CARD_SELECTION_COLOR);
+    APP_CONFIG.UI_RATING_COLOR = _safeColor(settings.ui?.ratingColor, APP_DEFAULTS.UI_RATING_COLOR);
+    APP_CONFIG.UI_TAG_COLOR = _safeColor(settings.ui?.tagColor, APP_DEFAULTS.UI_TAG_COLOR);
 
     try {
         const root = document.querySelector(".mjr-assets-manager");
@@ -279,6 +292,10 @@ const applySettingsToConfig = (settings) => {
             root.style.setProperty("--mjr-badge-video", APP_CONFIG.BADGE_VIDEO_COLOR);
             root.style.setProperty("--mjr-badge-audio", APP_CONFIG.BADGE_AUDIO_COLOR);
             root.style.setProperty("--mjr-badge-model3d", APP_CONFIG.BADGE_MODEL3D_COLOR);
+            root.style.setProperty("--mjr-card-hover-color", APP_CONFIG.UI_CARD_HOVER_COLOR);
+            root.style.setProperty("--mjr-card-selection-color", APP_CONFIG.UI_CARD_SELECTION_COLOR);
+            root.style.setProperty("--mjr-rating-color", APP_CONFIG.UI_RATING_COLOR);
+            root.style.setProperty("--mjr-tag-color", APP_CONFIG.UI_TAG_COLOR);
         }
     } catch {}
 
@@ -821,6 +838,89 @@ export const registerMajoorSettings = (app, onApplied) => {
                 settings.siblings.hidePngSiblings = !!value;
                 saveMajoorSettings(settings);
                 notifyApplied("siblings.hidePngSiblings");
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Grid.VideoHoverAutoplay`,
+            category: cat(t("cat.grid"), t("setting.grid.videoHoverAutoplay.name", "Video hover autoplay").replace("Majoor: ", "")),
+            name: t("setting.grid.videoHoverAutoplay.name", "Majoor: Video hover autoplay"),
+            tooltip: t(
+                "setting.grid.videoHoverAutoplay.desc",
+                "Play video thumbnails only while hovered and visible in the grid."
+            ),
+            type: "boolean",
+            defaultValue: !!(settings.grid?.videoHoverAutoplay ?? APP_DEFAULTS.GRID_VIDEO_HOVER_AUTOPLAY),
+            onChange: (value) => {
+                settings.grid = settings.grid || {};
+                settings.grid.videoHoverAutoplay = !!value;
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("grid.videoHoverAutoplay");
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Cards.HoverColor`,
+            category: cardCat("Hover color"),
+            name: "Majoor: Card hover color",
+            tooltip: "Background tint used when hovering a card (hex, e.g. #3D3D3D).",
+            type: "color",
+            defaultValue: normalizeHexColor(settings.ui?.cardHoverColor, APP_DEFAULTS.UI_CARD_HOVER_COLOR),
+            onChange: (value) => {
+                settings.ui = settings.ui || {};
+                settings.ui.cardHoverColor = normalizeHexColor(value, APP_DEFAULTS.UI_CARD_HOVER_COLOR);
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("ui.cardHoverColor");
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Cards.SelectionColor`,
+            category: cardCat("Selection color"),
+            name: "Majoor: Card selection color",
+            tooltip: "Outline/accent color used for selected cards (hex, e.g. #4A90E2).",
+            type: "color",
+            defaultValue: normalizeHexColor(settings.ui?.cardSelectionColor, APP_DEFAULTS.UI_CARD_SELECTION_COLOR),
+            onChange: (value) => {
+                settings.ui = settings.ui || {};
+                settings.ui.cardSelectionColor = normalizeHexColor(value, APP_DEFAULTS.UI_CARD_SELECTION_COLOR);
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("ui.cardSelectionColor");
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Badges.RatingColor`,
+            category: badgeCat("Rating color"),
+            name: "Majoor: Rating badge color",
+            tooltip: "Color used for rating badge text/accent (hex, e.g. #FF9500).",
+            type: "color",
+            defaultValue: normalizeHexColor(settings.ui?.ratingColor, APP_DEFAULTS.UI_RATING_COLOR),
+            onChange: (value) => {
+                settings.ui = settings.ui || {};
+                settings.ui.ratingColor = normalizeHexColor(value, APP_DEFAULTS.UI_RATING_COLOR);
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("ui.ratingColor");
+            },
+        });
+
+        safeAddSetting({
+            id: `${SETTINGS_PREFIX}.Badges.TagColor`,
+            category: badgeCat("Tag color"),
+            name: "Majoor: Tags badge color",
+            tooltip: "Color used for tags badge text/accent (hex, e.g. #4A90E2).",
+            type: "color",
+            defaultValue: normalizeHexColor(settings.ui?.tagColor, APP_DEFAULTS.UI_TAG_COLOR),
+            onChange: (value) => {
+                settings.ui = settings.ui || {};
+                settings.ui.tagColor = normalizeHexColor(value, APP_DEFAULTS.UI_TAG_COLOR);
+                saveMajoorSettings(settings);
+                applySettingsToConfig(settings);
+                notifyApplied("ui.tagColor");
             },
         });
 

@@ -6,6 +6,7 @@
 import { buildAssetViewURL } from "../api/endpoints.js";
 import { createFileBadge, createRatingBadge, createTagsBadge, createWorkflowDot } from "./Badges.js";
 import { formatDuration, formatDate, formatTime } from "../utils/format.js";
+import { APP_CONFIG } from "../app/config.js";
 
 const AUDIO_THUMB_URL = (() => {
     try {
@@ -39,7 +40,14 @@ const VIDEO_THUMBS_KEY = "__MJR_VIDEO_THUMBS__";
 const VIDEO_THUMB_MAX_AUTOPLAY = 6;
 const VIDEO_THUMB_MAX_PREPARED = 48;
 const VIDEO_THUMB_LOAD_TIMEOUT_MS = 5000;
-const VIDEO_THUMB_FIRST_FRAME_SEEK_S = 0.05;
+const VIDEO_THUMB_FIRST_FRAME_SEEK_S = 1.0;
+
+const isVideoHoverAutoplayEnabled = () => {
+    try {
+        return !!APP_CONFIG.GRID_VIDEO_HOVER_AUTOPLAY;
+    } catch {}
+    return true;
+};
 
 export function cleanupVideoThumbsIn(rootEl) {
     try {
@@ -79,8 +87,10 @@ const getVideoThumbManager = () => {
 
     const playing = new Set();
     const prepared = new Set();
+    const observed = new Set();
     let cleanupTimer = null;
     let removeVisibilityListener = null;
+    let removeSettingsListener = null;
 
     const pruneSets = () => {
         try {
@@ -155,8 +165,14 @@ const getVideoThumbManager = () => {
             if (video.readyState < 2) return;
         } catch {}
         try {
-            // Nudge off 0 to force frame decode on some mp4s.
+            // Prefer a later frame to avoid black/fade-in thumbnails when frame 0 is empty.
             video.currentTime = VIDEO_THUMB_FIRST_FRAME_SEEK_S;
+        } catch {}
+        try {
+            // Fallback for very short clips where 1.0s may be out of range.
+            if (!Number.isFinite(video.currentTime) || video.currentTime <= 0) {
+                video.currentTime = 0.05;
+            }
         } catch {}
         try {
             video.pause();
@@ -261,6 +277,28 @@ const getVideoThumbManager = () => {
             } catch {}
         }
     };
+
+    const applyAutoplayModeToObserved = () => {
+        const enabled = isVideoHoverAutoplayEnabled();
+        for (const v of Array.from(observed)) {
+            if (!(v instanceof HTMLVideoElement)) continue;
+            const overlay = v._mjrPlayOverlay || null;
+            if (!enabled) {
+                try { v._mjrHovered = false; } catch {}
+                stopVideo(v);
+                if (overlay) overlay.style.opacity = "1";
+                continue;
+            }
+            if (v._mjrVisible && v._mjrHovered && !document.hidden) {
+                playVideo(v);
+                if (overlay) overlay.style.opacity = "0";
+            } else {
+                pauseVideo(v);
+                if (overlay) overlay.style.opacity = "1";
+            }
+        }
+    };
+
     try {
         document.addEventListener("visibilitychange", onVisibility);
         removeVisibilityListener = () => {
@@ -285,12 +323,21 @@ const getVideoThumbManager = () => {
                             // Just unbind
                             try { observer?.unobserve?.(v); } catch {}
                         }
+                        try { observed.delete(v); } catch {}
                     }
                 }
             };
             checkSet(playing, true);
             checkSet(prepared, false);
         }, 10_000);
+        const onSettingsChanged = () => applyAutoplayModeToObserved();
+        window.addEventListener?.("mjr-settings-changed", onSettingsChanged);
+        removeSettingsListener = () => {
+            try {
+                window.removeEventListener?.("mjr-settings-changed", onSettingsChanged);
+            } catch {}
+            removeSettingsListener = null;
+        };
     } catch (e) {
         console.debug("[Majoor] Video cleanup error:", e);
     }
@@ -303,8 +350,10 @@ const getVideoThumbManager = () => {
                           const video = entry.target;
                           if (!(video instanceof HTMLVideoElement)) continue;
                           const overlay = video._mjrPlayOverlay || null;
+                          const autoplayEnabled = isVideoHoverAutoplayEnabled();
 
                           if (!video.isConnected || document.hidden) {
+                              try { video._mjrVisible = false; } catch {}
                               playing.delete(video);
                               stopVideo(video);
                               try {
@@ -314,13 +363,18 @@ const getVideoThumbManager = () => {
                               continue;
                           }
 
-                          if (entry.isIntersecting && entry.intersectionRatio >= 0.2) {
-                              // Auto play when visible
+                          const isVisible = entry.isIntersecting && entry.intersectionRatio >= 0.2;
+                          try { video._mjrVisible = isVisible; } catch {}
+                          const isHovered = !!video._mjrHovered;
+
+                          if (autoplayEnabled && isVisible && isHovered) {
+                              // Play only if visible + hovered/focused.
                               playVideo(video);
                               if (overlay) overlay.style.opacity = "0";
                           } else {
-                              // Use pauseVideo to keep the frame ("prepared") until pruneSets evicts it.
-                              pauseVideo(video);
+                              // Keep a prepared frame, but avoid background playback.
+                              if (autoplayEnabled) pauseVideo(video);
+                              else stopVideo(video);
                               if (overlay) overlay.style.opacity = "1";
                           }
                       }
@@ -352,6 +406,7 @@ const getVideoThumbManager = () => {
             if (!observer || !video) return;
             try {
                 api._bindVideo(video);
+                observed.add(video);
                 observer.observe(video);
             } catch {}
         },
@@ -360,6 +415,7 @@ const getVideoThumbManager = () => {
             try {
                 observer.unobserve(video);
             } catch {}
+            observed.delete(video);
             playing.delete(video);
             stopVideo(video);
             
@@ -386,10 +442,21 @@ const getVideoThumbManager = () => {
             };
 
             const onEnter = () => {
-                showOverlay("0");
-                playVideo(video);
+                if (!isVideoHoverAutoplayEnabled()) {
+                    showOverlay("1");
+                    return;
+                }
+                try { video._mjrHovered = true; } catch {}
+                const canPlay = !!video?._mjrVisible && !document.hidden;
+                if (canPlay) {
+                    showOverlay("0");
+                    playVideo(video);
+                } else {
+                    showOverlay("1");
+                }
             };
             const onLeave = () => {
+                try { video._mjrHovered = false; } catch {}
                 showOverlay("1");
                 pauseVideo(video);
             };
@@ -419,8 +486,12 @@ const getVideoThumbManager = () => {
                 removeVisibilityListener?.();
             } catch {}
             try {
+                removeSettingsListener?.();
+            } catch {}
+            try {
                 playing.clear();
                 prepared.clear();
+                observed.clear();
             } catch {}
         }
     };
@@ -652,12 +723,16 @@ function createThumbnail(asset, viewUrl) {
     } else if (asset.kind === "video") {
         // Create video element lazily to avoid eager network/decoder cost on large grids
         const video = document.createElement("video");
+        const poster =
+            String(asset?.thumbnail_url || asset?.thumb_url || asset?.poster || "").trim() || null;
         video.muted = true;
         video.loop = true;
+        video.autoplay = false;
         video.playsInline = true;
         video.preload = "metadata";
         video.classList.add("mjr-thumb-media");
         video.dataset.src = viewUrl;
+        if (poster) video.poster = poster;
         video.controls = false;
         // Avoid capturing clicks (selection is handled at card level); hover is bound on the thumb wrapper.
         video.tabIndex = -1;
@@ -693,8 +768,7 @@ function createThumbnail(asset, viewUrl) {
         // Observe after insertion for reliable IntersectionObserver behavior.
         const mgr = getVideoThumbManager();
         mgr.observe(video);
-        // Hover binding removed in favor of autoplay-in-grid
-        // mgr.bindHover(thumb, video);
+        mgr.bindHover(thumb, video);
     } else if (asset.kind === "audio") {
         // Audio thumbnail: background image + transparent waveform overlay
         if (AUDIO_THUMB_URL) {

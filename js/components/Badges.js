@@ -154,7 +154,7 @@ export function createRatingBadge(rating) {
     for (let i = 1; i <= ratingValue; i++) {
         const star = document.createElement("span");
         star.textContent = "\u2605";
-        star.style.color = "var(--mjr-star-active, #FFD45A)";
+        star.style.color = "var(--mjr-rating-color, var(--mjr-star-active, #FFD45A))";
         star.style.marginRight = i < ratingValue ? "2px" : "0";
         badge.appendChild(star);
     }
@@ -183,7 +183,7 @@ export function createTagsBadge(tags) {
         padding: 3px 6px;
         border-radius: 4px;
         background: rgba(0,0,0,0.8);
-        color: #90CAF9;
+        color: var(--mjr-tag-color, #90CAF9);
         font-size: 9px;
         max-width: 80%;
         overflow: hidden;

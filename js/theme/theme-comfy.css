@@ -42,6 +42,10 @@
     --mjr-badge-video: #9C27B0;
     --mjr-badge-audio: #FF9800;
     --mjr-badge-model3d: #4CAF50;
+    --mjr-card-hover-color: #3D3D3D;
+    --mjr-card-selection-color: #4A90E2;
+    --mjr-rating-color: #FF9500;
+    --mjr-tag-color: #4A90E2;
 }
 
 /* Make the theme visibly apply even with inline styles */
@@ -670,13 +674,14 @@
 
 .mjr-assets-manager .mjr-asset-card.is-selected {
     box-shadow:
-        0 0 0 3px color-mix(in srgb, var(--mjr-accent) 80%, var(--content-fg)),
-        0 0 0 6px color-mix(in srgb, var(--mjr-accent) 30%, transparent),
-        0 0 20px color-mix(in srgb, var(--mjr-accent) 40%, transparent),
+        0 0 0 3px color-mix(in srgb, var(--mjr-card-selection-color) 80%, var(--content-fg)),
+        0 0 0 6px color-mix(in srgb, var(--mjr-card-selection-color) 30%, transparent),
+        0 0 20px color-mix(in srgb, var(--mjr-card-selection-color) 40%, transparent),
         0 10px 28px rgba(0,0,0,0.28);
     border-radius: var(--mjr-r-lg);
     transform: scale(0.92) !important;
     z-index: 10;
+    outline: 2px solid var(--mjr-card-selection-color);
 }
 
 .mjr-assets-manager .mjr-asset-card:focus-visible {
@@ -844,7 +849,8 @@
 .mjr-assets-manager .mjr-asset-card:hover,
 .mjr-assets-manager .mjr-card:hover {
     transform: translateY(-1px) !important;
-    border-color: color-mix(in srgb, var(--mjr-accent) 55%, var(--mjr-border)) !important;
+    border-color: color-mix(in srgb, var(--mjr-card-selection-color) 55%, var(--mjr-border)) !important;
+    background-color: var(--mjr-card-hover-color) !important;
     box-shadow: 0 8px 22px rgba(0, 0, 0, 0.25) !important;
 }
 
@@ -1013,6 +1019,14 @@
 .mjr-rating-badge,
 .mjr-tags-badge {
     transition: all 0.2s ease;
+}
+
+.mjr-rating-badge {
+    color: var(--mjr-rating-color) !important;
+}
+
+.mjr-tags-badge {
+    color: var(--mjr-tag-color) !important;
 }
 
 .mjr-rating-badge:hover,

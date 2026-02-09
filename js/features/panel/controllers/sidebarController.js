@@ -571,6 +571,32 @@ export function bindSidebarOpen({
         } catch {}
     };
 
+    const refreshActiveAsset = async () => {
+        try {
+            const isOpen = !!sidebar?.classList?.contains?.("is-open");
+            if (!isOpen) return false;
+        } catch {
+            return false;
+        }
+
+        const activeId = String(state?.activeAssetId || "").trim();
+        if (!activeId) return false;
+
+        let card = null;
+        try {
+            card = queryCardById(gridContainer, activeId);
+        } catch {}
+        const asset = card?._mjrAsset;
+        if (!asset) return false;
+
+        try {
+            await showAssetInSidebar(sidebar, asset, (updatedAsset) => applyAssetUpdateToCard(card, asset, updatedAsset));
+            try { state.sidebarOpen = true; } catch {}
+            return true;
+        } catch {}
+        return false;
+    };
+
     // Keyboard accessibility: toggle details from focused card.
     const onKeyDown = (e) => {
         if (e.defaultPrevented) return;
@@ -640,5 +666,5 @@ export function bindSidebarOpen({
     };
 
     gridContainer._mjrSidebarOpenDispose = dispose;
-    return { dispose, toggleDetails: openDetailsForSelection };
+    return { dispose, toggleDetails: openDetailsForSelection, refreshActiveAsset };
 }

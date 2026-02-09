@@ -453,6 +453,24 @@ export function createViewerToolbar({
         } catch {}
     };
 
+    const setGroupHighlighted = (groupEl, { accentRgb, active } = {}) => {
+        try {
+            if (!groupEl) return;
+            const on = Boolean(active);
+            if (!on) {
+                groupEl.style.background = "";
+                groupEl.style.borderColor = "transparent";
+                groupEl.style.boxShadow = "";
+                return;
+            }
+            const rgb = String(accentRgb || "").trim();
+            if (!rgb) return;
+            groupEl.style.background = `rgba(${rgb},0.10)`;
+            groupEl.style.borderColor = `rgba(${rgb},0.38)`;
+            groupEl.style.boxShadow = `0 0 0 1px rgba(${rgb},0.12) inset`;
+        } catch {}
+    };
+
     const zebraToggle = createToggle("Zebra", "Zebra Highlights (Z)", { iconClass: "pi-bars", accentRgb: ACCENT.zebra });
     const scopesToggle = createToggle("Scopes", "Scopes overlay", { iconClass: "pi-chart-bar", accentRgb: ACCENT.analysis });
     const scopesSelect = createSelect("Scopes", [
@@ -629,6 +647,10 @@ export function createViewerToolbar({
     toolsRow.appendChild(ovGroup);
 
     const cmpGroup = toolsGroup({ key: "compare", label: "Compare", accentRgb: ACCENT.compare });
+    cmpGroup.style.borderRadius = "8px";
+    cmpGroup.style.padding = "4px 6px";
+    cmpGroup.style.border = "1px solid transparent";
+    cmpGroup.style.transition = "background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease";
     cmpGroup.appendChild(compareModeSelect);
     toolsRow.appendChild(cmpGroup);
 
@@ -938,11 +960,15 @@ export function createViewerToolbar({
         try {
             compareModeSelect.value = String(state.abCompareMode || "wipe");
             const abOk = typeof getCanAB === "function" ? !!getCanAB() : false;
-            const showCompare = state.mode === VIEWER_MODES.AB_COMPARE && abOk;
-            compareModeSelect.disabled = !showCompare;
+            const isABCompare = state.mode === VIEWER_MODES.AB_COMPARE && abOk;
+            const isSideCompare = state.mode === VIEWER_MODES.SIDE_BY_SIDE;
+            const showCompare = isABCompare || isSideCompare;
+            compareModeSelect.disabled = !isABCompare;
             try {
                 cmpGroup.dataset.active = showCompare ? "1" : "0";
                 cmpGroup.style.display = showCompare ? "" : "none";
+                setGroupHighlighted(cmpGroup, { accentRgb: ACCENT.compare, active: showCompare });
+                cmpGroup.title = showCompare ? "Compare tools (active)" : "Compare tools";
             } catch {}
         } catch {}
         try {

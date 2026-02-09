@@ -1,4 +1,5 @@
 import { normalizeQuery } from "./query.js";
+import { APP_CONFIG } from "../../../app/config.js";
 
 const _safeSetValue = (el, value) => {
     if (!el) return;
@@ -33,6 +34,21 @@ export function createContextController({
     extraActions = null,
     getExtraContext = null
 } = {}) {
+    const applyBadgeCssVars = () => {
+        try {
+            const root =
+                gridContainer?.closest?.(".mjr-assets-manager")
+                || document.querySelector?.(".mjr-assets-manager")
+                || document.documentElement;
+            if (!root?.style?.setProperty) return;
+            root.style.setProperty("--mjr-star-active", String(APP_CONFIG.BADGE_STAR_COLOR || "#FFD45A"));
+            root.style.setProperty("--mjr-badge-image", String(APP_CONFIG.BADGE_IMAGE_COLOR || "#2196F3"));
+            root.style.setProperty("--mjr-badge-video", String(APP_CONFIG.BADGE_VIDEO_COLOR || "#9C27B0"));
+            root.style.setProperty("--mjr-badge-audio", String(APP_CONFIG.BADGE_AUDIO_COLOR || "#FF9800"));
+            root.style.setProperty("--mjr-badge-model3d", String(APP_CONFIG.BADGE_MODEL3D_COLOR || "#4CAF50"));
+        } catch {}
+    };
+
     const actions = {
         clearQuery: async () => {
             try {
@@ -229,6 +245,9 @@ export function createContextController({
                 actions
             });
         } catch {}
+
+        // Keep badge CSS vars aligned with live settings/theme changes.
+        applyBadgeCssVars();
     };
 
     return { update, actions };

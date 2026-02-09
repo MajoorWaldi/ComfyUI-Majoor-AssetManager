@@ -67,6 +67,63 @@ function setStatusWithHint(statusText, mainText, hintText) {
     statusText.appendChild(span);
 }
 
+function applyStatusHighlight(section, tone = "neutral", options = {}) {
+    if (!section) return;
+    const notifyToast = options?.toast !== false;
+    const map = {
+        neutral: {
+            bg: "var(--bg-color, #1a1a1a)",
+            border: "var(--border-color, #333)",
+            glow: "transparent",
+        },
+        info: {
+            bg: "linear-gradient(135deg, rgba(33,150,243,0.14) 0%, rgba(100,181,246,0.08) 100%)",
+            border: "rgba(33,150,243,0.55)",
+            glow: "rgba(33,150,243,0.15)",
+        },
+        success: {
+            bg: "linear-gradient(135deg, rgba(76,175,80,0.16) 0%, rgba(139,195,74,0.08) 100%)",
+            border: "rgba(76,175,80,0.55)",
+            glow: "rgba(76,175,80,0.16)",
+        },
+        warning: {
+            bg: "linear-gradient(135deg, rgba(255,167,38,0.18) 0%, rgba(255,193,7,0.08) 100%)",
+            border: "rgba(255,167,38,0.58)",
+            glow: "rgba(255,167,38,0.18)",
+        },
+        error: {
+            bg: "linear-gradient(135deg, rgba(244,67,54,0.18) 0%, rgba(239,83,80,0.08) 100%)",
+            border: "rgba(244,67,54,0.62)",
+            glow: "rgba(244,67,54,0.2)",
+        },
+    };
+    const style = map[tone] || map.neutral;
+    const prevTone = String(section.dataset?.mjrStatusTone || "neutral");
+    section.style.background = style.bg;
+    section.style.borderColor = style.border;
+    section.style.boxShadow = `0 0 0 1px ${style.glow} inset`;
+    section.dataset.mjrStatusTone = tone;
+
+    // Toast only when status tone changes, throttled to avoid polling spam.
+    if (notifyToast && tone !== prevTone) {
+        const now = Date.now();
+        const lastAt = Number(section._mjrStatusToastAt || 0) || 0;
+        if (now - lastAt >= 4000) {
+            section._mjrStatusToastAt = now;
+            const messages = {
+                info: t("status.toast.info", "Index status: checking"),
+                success: t("status.toast.success", "Index status: ready"),
+                warning: t("status.toast.warning", "Index status: attention needed"),
+                error: t("status.toast.error", "Index status: error"),
+            };
+            const level = tone === "error" ? "error" : tone === "warning" ? "warning" : tone === "success" ? "success" : "info";
+            try {
+                comfyToast(messages[tone] || messages.info, level, 1800);
+            } catch {}
+        }
+    }
+}
+
 function formatWatcherScopeLabel(scope) {
     const s = String(scope || "").toLowerCase();
     if (s === "all") return t("scope.allFull", "All (Inputs + Outputs)");
@@ -105,6 +162,7 @@ export function createStatusIndicator(options = {}) {
         typeof options?.getScanContext === "function" ? options.getScanContext : null;
     const section = document.createElement("div");
     section.style.cssText = "margin-bottom: 20px; padding: 12px; background: var(--bg-color, #1a1a1a); border-radius: 6px; border: 1px solid var(--border-color, #333); cursor: pointer; transition: all 0.2s;";
+    applyStatusHighlight(section, "info", { toast: false });
 
     // Header container
     const header = document.createElement("div");
@@ -113,7 +171,7 @@ export function createStatusIndicator(options = {}) {
     // Status dot
     const statusDot = document.createElement("span");
     statusDot.id = "mjr-status-dot";
-    statusDot.style.cssText = "width: 12px; height: 12px; border-radius: 50%; background: #FFA726; display: inline-block; cursor: pointer;";
+    statusDot.style.cssText = "width: 12px; height: 12px; border-radius: 50%; background: var(--mjr-status-info, #64B5F6); display: inline-block; cursor: pointer;";
 
     // Title container
     const titleSpan = document.createElement("span");
@@ -193,6 +251,7 @@ export function createStatusIndicator(options = {}) {
         
         // Status indicator feedback
         statusDot.style.background = "var(--mjr-status-warning, #FFA726)"; // Orange (working)
+        applyStatusHighlight(section, "warning");
 
         try {
             const ctx = getScanContext ? getScanContext() : {};
@@ -213,9 +272,11 @@ export function createStatusIndicator(options = {}) {
             });
             if (res?.ok) {
                 statusDot.style.background = "var(--mjr-status-success, #4CAF50)";
+                applyStatusHighlight(section, "success");
                 comfyToast(t("toast.resetStarted"), "success");
             } else {
                 statusDot.style.background = "var(--mjr-status-error, #f44336)";
+                applyStatusHighlight(section, "error");
                 const err = String(res?.error || "").toLowerCase();
                 const isCorrupt = err.includes("malform") || err.includes("corrupt") || err.includes("disk image") || res?.code === "SERVICE_UNAVAILABLE" || res?.code === "QUERY_FAILED";
                 if (isCorrupt) {
@@ -226,6 +287,7 @@ export function createStatusIndicator(options = {}) {
             }
         } catch (error) {
             statusDot.style.background = "var(--mjr-status-error, #f44336)";
+            applyStatusHighlight(section, "error");
             const msg = String(error?.message || "").toLowerCase();
             const isCorrupt = msg.includes("malform") || msg.includes("corrupt") || msg.includes("disk image");
             if (isCorrupt) {
@@ -277,19 +339,23 @@ export function createStatusIndicator(options = {}) {
         resetBtn.disabled = true;
 
         statusDot.style.background = "var(--mjr-status-warning, #FFA726)";
+        applyStatusHighlight(section, "warning");
 
         try {
             const res = await forceDeleteDb();
             if (res?.ok) {
                 globalThis._mjrCorruptToastShown = false;
                 statusDot.style.background = "var(--mjr-status-success, #4CAF50)";
+                applyStatusHighlight(section, "success");
                 comfyToast(t("toast.dbDeleteSuccess"), "success");
             } else {
                 statusDot.style.background = "var(--mjr-status-error, #f44336)";
+                applyStatusHighlight(section, "error");
                 comfyToast(res?.error || t("toast.dbDeleteFailed"), "error");
             }
         } catch (error) {
             statusDot.style.background = "var(--mjr-status-error, #f44336)";
+            applyStatusHighlight(section, "error");
             comfyToast(error?.message || t("toast.dbDeleteFailed"), "error");
         } finally {
             deleteDbBtn.disabled = false;
@@ -320,12 +386,11 @@ export function createStatusIndicator(options = {}) {
     setBodyCollapsed(section, true);
     // Add hover effect
     section.onmouseenter = () => {
-        section.style.borderColor = "var(--mjr-accent-border, var(--border-color, #333))";
-        section.style.background = "var(--mjr-accent-bg, var(--bg-color, #1a1a1a))";
+        section.style.transform = "translateY(-1px)";
     };
     section.onmouseleave = () => {
-        section.style.borderColor = "var(--border-color, #333)";
-        section.style.background = "var(--bg-color, #1a1a1a)";
+        section.style.transform = "";
+        applyStatusHighlight(section, section.dataset?.mjrStatusTone || "neutral", { toast: false });
     };
 
     return section;
@@ -335,6 +400,7 @@ export function createStatusIndicator(options = {}) {
  * Trigger a scan
  */
 export async function triggerScan(statusDot, statusText, capabilitiesSection = null, scanTarget = null) {
+    const section = statusText?.closest?.("#mjr-status-body")?.parentElement || statusText?.closest?.("div");
     const desiredScope = String(scanTarget?.scope || "output").toLowerCase();
     const desiredCustomRootId = scanTarget?.customRootId || scanTarget?.custom_root_id || scanTarget?.root_id || null;
 
@@ -379,6 +445,8 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
     if (!roots) {
         const configResult = await get(ENDPOINTS.CONFIG);
         if (!configResult.ok) {
+            statusDot.style.background = "var(--mjr-status-error, #f44336)";
+            applyStatusHighlight(section, "error");
             statusText.textContent = t("status.errorGetConfig");
             clearScanInFlight();
             return;
@@ -405,6 +473,7 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
 
     // Show scanning status
     statusDot.style.background = "var(--mjr-status-warning, #FFA726)"; // Orange
+    applyStatusHighlight(section, "warning");
     setStatusWithHint(statusText, t("status.scanningScope", `Scanning ${scopeLabel}${detail}...`, { scope: scopeLabel, detail }), t("status.scanningHint", "This may take a while"));
 
     const payload = {
@@ -417,6 +486,7 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
     if (desiredScope === "custom") {
         if (!desiredCustomRootId) {
             statusDot.style.background = "var(--mjr-status-error, #f44336)";
+            applyStatusHighlight(section, "error");
             statusText.textContent = t("status.selectCustomFolder");
             clearScanInFlight();
             return;
@@ -435,6 +505,7 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
     if (scanResult?.ok) {
         const stats = scanResult.data;
         statusDot.style.background = "var(--mjr-status-success, #4CAF50)"; // Green
+        applyStatusHighlight(section, "success");
         setStatusWithHint(
             statusText,
             t("toast.scanComplete"),
@@ -447,6 +518,7 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
         }, 2000);
     } else {
         statusDot.style.background = "var(--mjr-status-error, #f44336)"; // Red
+        applyStatusHighlight(section, "error");
         setStatusLines(statusText, [t("toast.scanFailed") + `: ${scanResult?.error || "Unknown error"}`]);
 
         // Restore status after 3 seconds
@@ -565,6 +637,7 @@ function setBodyCollapsed(section, collapsed) {
     }
 }
 export async function updateStatus(statusDot, statusText, capabilitiesSection = null, scanTarget = null, meta = null, options = {}) {
+    const section = statusText?.closest?.("#mjr-status-body")?.parentElement || statusText?.closest?.("div");
     const signal = options?.signal || null;
     try {
         if (signal?.aborted) return null;
@@ -647,6 +720,7 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
         if (totalAssets === 0) {
             // No assets indexed - yellow
             statusDot.style.background = "var(--mjr-status-warning, #FFA726)";
+            applyStatusHighlight(section, "warning");
             setStatusWithHint(
                 statusText,
                 t("status.noAssets", `No assets indexed yet (${scopeLabel})`, { scope: scopeLabel }),
@@ -655,6 +729,7 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
         } else {
             // Assets indexed - green
             statusDot.style.background = "var(--mjr-status-success, #4CAF50)";
+            applyStatusHighlight(section, "success");
             setStatusLines(
                 statusText,
                 [
@@ -673,6 +748,7 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
         renderCapabilities(capabilitiesSection, {}, {});
         renderToolsStatusLine(capabilitiesSection, toolStatusData);
         statusDot.style.background = "var(--mjr-status-error, #f44336)";
+        applyStatusHighlight(section, "error");
         if (result?.code === "INVALID_RESPONSE" && result?.status === 404) {
             setStatusWithHint(
                 statusText,

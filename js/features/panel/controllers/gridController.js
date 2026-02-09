@@ -1,7 +1,10 @@
 import { t } from "../../../app/i18n.js";
 
 export function createGridController({ gridContainer, loadAssets, loadAssetsFromList, getCollectionAssets, disposeGrid, getQuery, state }) {
-    const reloadGrid = async () => {
+    let _isReloading = false;
+    let _pendingReload = false;
+
+    const runReloadOnce = async () => {
         // Expose the current query on the container so external listeners (ComfyUI executed events)
         // can decide whether to do incremental upserts or avoid disrupting an active search.
         try {
@@ -70,6 +73,20 @@ export function createGridController({ gridContainer, loadAssets, loadAssetsFrom
             state.lastGridTotal = Number(result?.total || 0) || 0;
             gridContainer.dispatchEvent?.(new CustomEvent("mjr:grid-stats", { detail: result || {} }));
         } catch {}
+    };
+
+    const reloadGrid = async () => {
+        _pendingReload = true;
+        if (_isReloading) return;
+        _isReloading = true;
+        try {
+            while (_pendingReload) {
+                _pendingReload = false;
+                await runReloadOnce();
+            }
+        } finally {
+            _isReloading = false;
+        }
     };
 
     return { reloadGrid };

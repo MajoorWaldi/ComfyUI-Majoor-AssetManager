@@ -69,6 +69,7 @@ export function createRatingHotkeysController({ gridContainer, createRatingBadge
     const bind = () => {
         if (bound || !gridContainer) return;
         bound = true;
+        try { window._mjrRatingHotkeysActive = true; } catch {}
 
         onKeyDown = async (e) => {
             // Check if hotkeys are suspended (e.g. when dialogs/popovers are open)
@@ -135,6 +136,7 @@ export function createRatingHotkeysController({ gridContainer, createRatingBadge
     const dispose = () => {
         if (!bound) return;
         bound = false;
+        try { window._mjrRatingHotkeysActive = false; } catch {}
         try {
             // Remove window-level listener
             window.removeEventListener("keydown", onKeyDown, { capture: true });

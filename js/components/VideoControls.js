@@ -370,8 +370,6 @@ export function mountVideoControls(video, opts = {}) {
         const setOutBtn = createBtn("mjr-video-btn--mark mjr-video-btn--out", "O", "Set Out from current frame");
         const loopIcon = createIconBtn("mjr-video-btn--toggle", "pi-refresh", "Loop playback in range", "Loop");
         const loopBtn = loopIcon.btn;
-        const onceIcon = createIconBtn("mjr-video-btn--toggle", "pi-stop", "Play once (stop at Out)", "Once");
-        const onceBtn = onceIcon.btn;
 
         const inInput = createNumberInput("mjr-video-num--in", { min: 0, step: 1, value: 0, title: "In frame", ariaLabel: "In frame", widthPx: 72 });
         const outInput = createNumberInput("mjr-video-num--out", { min: 0, step: 1, value: 0, title: "Out frame", ariaLabel: "Out frame", widthPx: 72 });
@@ -428,15 +426,23 @@ export function mountVideoControls(video, opts = {}) {
 
         const inGroup = document.createElement("div");
         inGroup.className = "mjr-video-group mjr-video-group--in";
+        const inLabel = document.createElement("span");
+        inLabel.textContent = "In";
+        inLabel.title = "Reset In to start";
+        inLabel.style.cssText = "cursor:pointer; user-select:none;";
         if (advanced) {
-            inGroup.appendChild(document.createTextNode("In"));
+            inGroup.appendChild(inLabel);
             inGroup.appendChild(inInput);
         }
 
         const outGroup = document.createElement("div");
         outGroup.className = "mjr-video-group mjr-video-group--out";
+        const outLabel = document.createElement("span");
+        outLabel.textContent = "Out";
+        outLabel.title = "Reset Out to end";
+        outLabel.style.cssText = "cursor:pointer; user-select:none;";
         if (advanced) {
-            outGroup.appendChild(document.createTextNode("Out"));
+            outGroup.appendChild(outLabel);
             outGroup.appendChild(outInput);
         }
 
@@ -455,7 +461,6 @@ export function mountVideoControls(video, opts = {}) {
         rightAdjustGroup.className = "mjr-video-group mjr-video-group--adjust-right";
         if (advanced) {
             rightAdjustGroup.appendChild(loopBtn);
-            rightAdjustGroup.appendChild(onceBtn);
         }
         const speedGroup = document.createElement("div");
         speedGroup.className = "mjr-video-group mjr-video-group--speed";
@@ -611,13 +616,8 @@ export function mountVideoControls(video, opts = {}) {
         const applyLoopOnceUI = () => {
             try {
                 setToggleBtn(loopBtn, Boolean(state.loop));
-                setToggleBtn(onceBtn, Boolean(state.once));
-                // Keep loop as default; when switching to "single" (once), update icon for clarity.
                 try {
                     if (loopIcon?.icon) loopIcon.icon.className = "pi pi-refresh";
-                } catch {}
-                try {
-                    if (onceIcon?.icon) onceIcon.icon.className = `pi ${state.once ? "pi-arrow-right" : "pi-stop"}`;
                 } catch {}
             } catch {}
         };
@@ -874,6 +874,50 @@ export function mountVideoControls(video, opts = {}) {
             } catch {}
         };
 
+        const resetInToStart = () => {
+            try {
+                state.inFrame = 0;
+                normalizeRange();
+                updateTimeUI();
+                updateSeekRangeStyle();
+                applyRangeChange({ prefer: "in" });
+            } catch {}
+        };
+
+        const resetOutToEnd = () => {
+            try {
+                const { maxF } = getEffectiveInOut();
+                state.outFrame = Math.max(0, Number(maxF) || 0);
+                normalizeRange();
+                updateTimeUI();
+                updateSeekRangeStyle();
+                applyRangeChange({ prefer: "out" });
+            } catch {}
+        };
+
+        const resetPlayerAll = () => {
+            try {
+                const maxF = durationFrames();
+                state.inFrame = 0;
+                state.outFrame = maxF > 0 ? maxF : null;
+                state.step = 1;
+                state.loop = Boolean(advanced);
+                state.once = false;
+                setPlaybackRate(1);
+                try {
+                    stepInput.value = "1";
+                } catch {}
+                try {
+                    if (!speedSelect.matches?.(":focus")) speedSelect.value = "1";
+                } catch {}
+                normalizeRange();
+                applyLoopOnceUI();
+                updateTimeUI();
+                updateSeekRangeStyle();
+                applyRangeChange({ prefer: "in" });
+            } catch {}
+        };
+
         const updateVolumeUI = () => {
             try {
                 const v = clamp01(Number(video?.volume) || 0);
@@ -1083,13 +1127,28 @@ export function mountVideoControls(video, opts = {}) {
                 })
             );
             unsubs.push(
-                safeAddListener(onceBtn, "click", (e) => {
+                safeAddListener(inLabel, "click", (e) => {
                     stop(e);
-                    state.once = !state.once;
-                    if (state.once) state.loop = false;
-                    applyLoopOnceUI();
+                    resetInToStart();
                 })
             );
+            unsubs.push(
+                safeAddListener(outLabel, "click", (e) => {
+                    stop(e);
+                    resetOutToEnd();
+                })
+            );
+            unsubs.push(
+                safeAddListener(rangeCountLabel, "click", (e) => {
+                    stop(e);
+                    resetPlayerAll();
+                })
+            );
+            try {
+                rangeCountLabel.title = "Reset player controls";
+                rangeCountLabel.style.cursor = "pointer";
+                rangeCountLabel.style.userSelect = "none";
+            } catch {}
         }
 
         unsubs.push(

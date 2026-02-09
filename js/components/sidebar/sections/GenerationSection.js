@@ -65,31 +65,21 @@ export function createGenerationSection(asset) {
         gap: 12px;
     `;
     
-    // Check for truncated flag (backend sets this if metadata > limit)
-    const isTruncated = asset?.geninfo?._truncated || asset?.metadata?._truncated || asset?.prompt?._truncated;
-
-    if (isTruncated) {
-         container.appendChild(
-            createInfoBox(
-                "Metadata Truncated",
-                "Generation data is incomplete because it exceeded the size limit.",
-                "#FF9800"
-            )
-        );
-    }
-    
-    // Workflow Type Header
+    // Workflow Type Header (top of panel, visually emphasized)
     if (metadata.engine && metadata.engine.type) {
         const typeBox = document.createElement("div");
         typeBox.style.cssText = `
             display: flex;
             align-items: center;
             justify-content: space-between;
-            padding: 4px 8px;
-            background: rgba(255, 255, 255, 0.05);
-            border-radius: 4px;
+            padding: 10px 12px;
+            background: linear-gradient(135deg, rgba(33, 150, 243, 0.18) 0%, rgba(0, 188, 212, 0.10) 100%);
+            border-left: 3px solid #2196f3;
+            border: 1px solid rgba(33, 150, 243, 0.45);
+            box-shadow: 0 0 0 1px rgba(33, 150, 243, 0.15) inset;
+            border-radius: 6px;
             font-size: 11px;
-            color: #ccc;
+            color: var(--fg-color, #ccc);
         `;
         
         const badge = document.createElement("span");
@@ -106,11 +96,24 @@ export function createGenerationSection(asset) {
         
         const label = document.createElement("span");
         label.textContent = "Workflow Type";
-        label.style.opacity = "0.7";
+        label.style.opacity = "0.85";
 
         typeBox.appendChild(label);
         typeBox.appendChild(badge);
         container.appendChild(typeBox);
+    }
+
+    // Check for truncated flag (backend sets this if metadata > limit)
+    const isTruncated = asset?.geninfo?._truncated || asset?.metadata?._truncated || asset?.prompt?._truncated;
+
+    if (isTruncated) {
+         container.appendChild(
+            createInfoBox(
+                "Metadata Truncated",
+                "Generation data is incomplete because it exceeded the size limit.",
+                "#FF9800"
+            )
+        );
     }
 
     const cleaned = normalizePromptsForDisplay(
@@ -121,11 +124,27 @@ export function createGenerationSection(asset) {
     );
 
     if (typeof cleaned.positive === "string" && cleaned.positive.trim()) {
-        container.appendChild(createInfoBox("Positive Prompt", cleaned.positive, "#4CAF50"));
+        const positiveBox = createInfoBox("Positive Prompt", cleaned.positive, "#4CAF50", {
+                showCopyButton: false,
+                copyOnContentClick: true,
+            });
+        positiveBox.style.background = "linear-gradient(135deg, rgba(76, 175, 80, 0.16) 0%, rgba(33, 150, 243, 0.10) 100%)";
+        positiveBox.style.borderLeft = "3px solid #4CAF50";
+        positiveBox.style.border = "1px solid rgba(76, 175, 80, 0.45)";
+        positiveBox.style.boxShadow = "0 0 0 1px rgba(76, 175, 80, 0.15) inset";
+        container.appendChild(positiveBox);
     }
 
     if (typeof cleaned.negative === "string" && cleaned.negative.trim()) {
-        container.appendChild(createInfoBox("Negative Prompt", cleaned.negative, "#F44336"));
+        const negativeBox = createInfoBox("Negative Prompt", cleaned.negative, "#F44336", {
+                showCopyButton: false,
+                copyOnContentClick: true,
+            });
+        negativeBox.style.background = "linear-gradient(135deg, rgba(244, 67, 54, 0.16) 0%, rgba(255, 152, 0, 0.10) 100%)";
+        negativeBox.style.borderLeft = "3px solid #F44336";
+        negativeBox.style.border = "1px solid rgba(244, 67, 54, 0.45)";
+        negativeBox.style.boxShadow = "0 0 0 1px rgba(244, 67, 54, 0.15) inset";
+        container.appendChild(negativeBox);
     }
     if (typeof metadata.lyrics === "string" && metadata.lyrics.trim()) {
         container.appendChild(createInfoBox("Lyrics", metadata.lyrics, "#00BCD4"));
@@ -135,7 +154,8 @@ export function createGenerationSection(asset) {
     if (metadata.all_positive_prompts && Array.isArray(metadata.all_positive_prompts) && metadata.all_positive_prompts.length > 1) {
         const multiBox = document.createElement("div");
         multiBox.style.cssText = `
-            background: rgba(0,0,0,0.3);
+            background: var(--comfy-menu-bg, rgba(0,0,0,0.3));
+            border: 1px solid var(--border-color, rgba(255,255,255,0.12));
             border-left: 3px solid #FF9800;
             border-radius: 6px;
             padding: 12px;
@@ -162,9 +182,9 @@ export function createGenerationSection(asset) {
             const item = document.createElement("div");
             item.style.cssText = `
                 font-size: 11px;
-                color: #ddd;
+                color: var(--fg-color, #ddd);
                 padding: 6px 8px;
-                background: rgba(255,255,255,0.05);
+                background: rgba(127,127,127,0.12);
                 border-radius: 4px;
                 word-break: break-word;
             `;
@@ -236,7 +256,7 @@ export function createGenerationSection(asset) {
         modelData.push({ label: "Diffusion", value: formatModelLabel(metadata.diffusion) });
     }
     if (modelData.length > 0) {
-        container.appendChild(createParametersBox("Model & LoRA", modelData, "#9C27B0"));
+        container.appendChild(createParametersBox("Model & LoRA", modelData, "#9C27B0", { emphasis: true }));
     }
 
     const samplingData = [];
@@ -247,7 +267,7 @@ export function createGenerationSection(asset) {
     if (metadata.cfg || metadata.cfg_scale) samplingData.push({ label: "CFG Scale", value: metadata.cfg || metadata.cfg_scale });
     if (metadata.scheduler) samplingData.push({ label: "Scheduler", value: metadata.scheduler });
     if (samplingData.length > 0) {
-        container.appendChild(createParametersBox("Sampling", samplingData, "#FF9800"));
+        container.appendChild(createParametersBox("Sampling", samplingData, "#FF9800", { emphasis: true }));
     }
     if (metadata.lyrics_strength !== undefined && metadata.lyrics_strength !== null) {
         container.appendChild(createParametersBox("Audio", [{ label: "Lyrics Strength", value: metadata.lyrics_strength }], "#00BCD4"));
@@ -323,8 +343,10 @@ export function createGenerationSection(asset) {
     if (metadata.inputs && Array.isArray(metadata.inputs) && metadata.inputs.length > 0) {
         const inputBox = document.createElement("div");
         inputBox.style.cssText = `
-            background: rgba(0,0,0,0.3);
+            background: linear-gradient(135deg, rgba(76, 175, 80, 0.16) 0%, rgba(33, 150, 243, 0.10) 100%);
             border-left: 3px solid #4CAF50;
+            border: 1px solid rgba(76, 175, 80, 0.45);
+            box-shadow: 0 0 0 1px rgba(76, 175, 80, 0.15) inset;
             border-radius: 6px;
             padding: 12px;
             margin-top: 10px;
@@ -349,7 +371,7 @@ export function createGenerationSection(asset) {
         metadata.inputs.forEach(inp => {
             const thumb = document.createElement("div");
             thumb.style.cssText = "width: 64px; height: 64px; background: #222; border-radius: 4px; overflow: hidden; position: relative; cursor: pointer; display: flex; align-items: center; justify-content: center;";
-            thumb.title = `${inp.filename} (click to open in new tab)`;
+            thumb.title = `${inp.filename} (click to copy, double-click to open in new tab)`;
             
             const params = new URLSearchParams({
                 filename: inp.filename,
@@ -409,7 +431,21 @@ export function createGenerationSection(asset) {
                 thumb.appendChild(icon);
             }
             
-            thumb.onclick = (e) => {
+            thumb.onclick = async (e) => {
+                e.stopPropagation();
+                try {
+                    const copyValue = String(inp?.filepath || inp?.filename || "").trim();
+                    if (!copyValue) return;
+                    await navigator.clipboard.writeText(copyValue);
+                    thumb.style.outline = "2px solid rgba(76, 175, 80, 0.9)";
+                    thumb.style.outlineOffset = "1px";
+                    setTimeout(() => {
+                        thumb.style.outline = "";
+                        thumb.style.outlineOffset = "";
+                    }, 350);
+                } catch {}
+            };
+            thumb.ondblclick = (e) => {
                 e.stopPropagation();
                 window.open(src, "_blank");
             };

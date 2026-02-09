@@ -144,6 +144,7 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     const content = document.createElement("div");
     content.classList.add("mjr-am-content");
     let gridContainer = null;
+    let sidebarController = null;
 
     container.tabIndex = -1;
 
@@ -184,6 +185,17 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     gridContainer = createGridContainer();
     gridWrapper.appendChild(gridContainer);
     _activeGridContainer = gridContainer;
+    const summaryBarDisposers = [];
+    const registerSummaryDispose = (fn) => {
+        if (typeof fn === "function") summaryBarDisposers.push(fn);
+    };
+    gridContainer._mjrSummaryBarDispose = () => {
+        for (const fn of summaryBarDisposers.splice(0)) {
+            try {
+                fn();
+            } catch {}
+        }
+    };
     try {
         const handler = () => {
             try {
@@ -191,18 +203,18 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
             } catch {}
         };
         gridContainer.addEventListener("mjr:grid-stats", handler);
-        gridContainer._mjrSummaryBarDispose = () => {
+        registerSummaryDispose(() => {
             try {
                 gridContainer.removeEventListener("mjr:grid-stats", handler);
             } catch {}
-        };
+        });
     } catch {}
     try {
         bindGridScanListeners();
     } catch {}
 
     // Bind grid context menu
-    bindGridContextMenu({
+    container._mjrGridContextMenuUnbind = bindGridContextMenu({
         gridContainer,
         getState: () => state,
         onRequestOpenViewer: (asset) => {
@@ -285,21 +297,58 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
 
     // Live updates when ComfyUI settings change.
     const onSettingsChanged = (_e) => {
+        const changedKey = String(_e?.detail?.key || "").trim();
+        const isInitialSync = changedKey === "__init__";
+        const shouldRefreshGrid =
+            isInitialSync
+            || changedKey === ""
+            || changedKey.startsWith("grid.")
+            || changedKey.startsWith("infiniteScroll.")
+            || changedKey.startsWith("siblings.")
+            || changedKey.startsWith("search.")
+            || changedKey.startsWith("rtHydrate.")
+            || changedKey.startsWith("workflowMinimap.");
+        const shouldRefreshSidebar = isInitialSync || changedKey === "" || changedKey.startsWith("sidebar.");
+        const shouldApplyWatcher = changedKey === "" || changedKey.startsWith("watcher.");
         try {
             const s = loadMajoorSettings();
+            const hover = String(s?.ui?.cardHoverColor || "").trim();
+            const selected = String(s?.ui?.cardSelectionColor || "").trim();
+            const ratingColor = String(s?.ui?.ratingColor || "").trim();
+            const tagColor = String(s?.ui?.tagColor || "").trim();
+            if (/^#[0-9a-fA-F]{3,8}$/.test(hover)) {
+                document.documentElement.style.setProperty("--mjr-card-hover-color", hover);
+            }
+            if (/^#[0-9a-fA-F]{3,8}$/.test(selected)) {
+                document.documentElement.style.setProperty("--mjr-card-selection-color", selected);
+            }
+            if (/^#[0-9a-fA-F]{3,8}$/.test(ratingColor)) {
+                document.documentElement.style.setProperty("--mjr-rating-color", ratingColor);
+            }
+            if (/^#[0-9a-fA-F]{3,8}$/.test(tagColor)) {
+                document.documentElement.style.setProperty("--mjr-tag-color", tagColor);
+            }
             
             // 1. Sidebar position
             applySidebarPosition(s.sidebar?.position || "right");
             
             // 2. Grid visuals (badges, details, sizes)
-            // Refresh must target the actual grid container (GridView state key),
-            // not the scroll wrapper, otherwise VirtualGrid settings won't apply.
-            refreshGrid(gridContainer);
+            // Refresh only when a relevant setting changed to avoid reload storms.
+            if (shouldRefreshGrid) {
+                refreshGrid(gridContainer);
+            }
+            if (shouldRefreshSidebar && state.sidebarOpen && state.activeAssetId) {
+                sidebarController?.refreshActiveAsset?.();
+            }
         } catch {}
         try {
+            if (!shouldApplyWatcher) return;
             applyWatcherForScope(state.scope);
         } catch {}
     };
+    try {
+        onSettingsChanged({ detail: { key: "__init__" } });
+    } catch {}
     try {
         window.addEventListener?.("mjr-settings-changed", onSettingsChanged, { signal: panelLifecycleAC?.signal });
     } catch {}
@@ -367,11 +416,19 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
     };
 
     // Allow context menus to request a refresh (e.g. after "Remove from collection").
+    let _reloadGridHandler = null;
     try {
-        gridContainer.addEventListener("mjr:reload-grid", () => {
+        _reloadGridHandler = () => {
             try {
                 gridController.reloadGrid();
             } catch {}
+        };
+        gridContainer.addEventListener("mjr:reload-grid", _reloadGridHandler);
+        registerSummaryDispose(() => {
+            try {
+                if (_reloadGridHandler) gridContainer.removeEventListener("mjr:reload-grid", _reloadGridHandler);
+            } catch {}
+            _reloadGridHandler = null;
         });
     } catch {}
 
@@ -612,7 +669,7 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         const mo = new MutationObserver(() => schedule());
         mo.observe(gridContainer, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
         gridContainer._mjrSummaryBarObserver = mo;
-        gridContainer._mjrSummaryBarDispose = () => {
+        registerSummaryDispose(() => {
             try {
                 gridContainer.removeEventListener("mjr:grid-stats", onStats);
             } catch {}
@@ -625,10 +682,10 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
             try {
                 mo.disconnect();
             } catch {}
-        };
+        });
     } catch {}
 
-    const sidebarController = bindSidebarOpen({
+    sidebarController = bindSidebarOpen({
         gridContainer,
         sidebar,
         createRatingBadge,
@@ -682,6 +739,10 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
 
     hotkeys.bind(content);
     ratingHotkeys.bind();
+    try {
+        window._mjrHotkeysState = window._mjrHotkeysState || {};
+        window._mjrHotkeysState.scope = "grid";
+    } catch {}
     
     // Attach controllers to container for cleanup on re-render
     try {
@@ -702,10 +763,19 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         } catch {}
         container._mjrVersionUpdateCleanup = null;
         try {
+            if (_scrollTimer) clearTimeout(_scrollTimer);
+            _scrollTimer = null;
+        } catch {}
+        try {
             hotkeys.dispose();
         } catch {}
         try {
             ratingHotkeys.dispose();
+        } catch {}
+        try {
+            if (window._mjrHotkeysState?.scope === "grid") {
+                window._mjrHotkeysState.scope = null;
+            }
         } catch {}
         try {
             agendaCalendar?.dispose?.();
@@ -729,6 +799,12 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
             _autoLoadTimer = null;
         } catch {}
         try {
+            gridContainer?._mjrSummaryBarDispose?.();
+        } catch {}
+        try {
+            gridContainer?._mjrGridContextMenuUnbind?.();
+        } catch {}
+        try {
             disposeGridScanListeners();
         } catch {}
         try {
@@ -737,6 +813,7 @@ export async function renderAssetsManager(container, { useComfyThemeUI = true } 
         if (_activeGridContainer === gridContainer) {
             _activeGridContainer = null;
         }
+        gridContainer = null;
         try {
             popovers.dispose();
         } catch {}
