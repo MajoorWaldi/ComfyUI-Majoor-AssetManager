@@ -1,4 +1,4 @@
-import { createWorkflowDot } from "../../../components/Badges.js";
+﻿import { applyAssetStatusDotState, createWorkflowDot } from "../../../components/Badges.js";
 import { post, getAssetMetadata } from "../../../api/client.js";
 import { ENDPOINTS } from "../../../api/endpoints.js";
 import { pickRootId } from "../../../utils/ids.js";
@@ -10,6 +10,7 @@ const RESCAN_TTL_MS = 1500;
 
 async function rescanSingleAsset({ card, asset, sidebar, onAssetUpdated }) {
     if (!card || !asset) return;
+    if (globalThis._mjrMaintenanceActive) return;
 
     try {
         const now = Date.now();
@@ -21,13 +22,14 @@ async function rescanSingleAsset({ card, asset, sidebar, onAssetUpdated }) {
     const dot = card.querySelector(".mjr-workflow-dot");
     try {
         if (dot) {
-            dot.style.color = "var(--mjr-status-info, #64B5F6)";
+            applyAssetStatusDotState(dot, "pending", "Pending: metadata refresh in progress");
+            dot.classList.add("mjr-pulse-animation");
             dot.style.cursor = "progress";
-            dot.title = "Rescanning…";
+            dot.title = "Pending: metadata refresh in progress";
         }
     } catch {}
 
-    try { comfyToast("Rescanning file…", "info", 2000); } catch {}
+    try { comfyToast("Rescanning file...", "info", 2000); } catch {}
 
     const fileEntry = {
         filename: asset.filename,
@@ -37,28 +39,41 @@ async function rescanSingleAsset({ card, asset, sidebar, onAssetUpdated }) {
     };
 
     let updated = null;
+    let indexOk = false;
     try {
-        await post(ENDPOINTS.INDEX_FILES, { files: [fileEntry], incremental: false });
+        const indexRes = await post(ENDPOINTS.INDEX_FILES, { files: [fileEntry], incremental: false });
+        indexOk = !!indexRes?.ok;
+        if (!indexOk && dot) {
+            applyAssetStatusDotState(dot, "error", "Error: metadata refresh failed");
+            dot.classList.remove("mjr-pulse-animation");
+            dot.style.cursor = "";
+        }
 
-        if (asset.id != null) {
+        if (indexOk && asset.id != null) {
             const fresh = await getAssetMetadata(asset.id);
             if (fresh?.ok && fresh.data) {
                 updated = { ...asset, ...fresh.data };
             }
         }
-    } catch {}
+    } catch {
+        try {
+            if (dot) {
+                applyAssetStatusDotState(dot, "error", "Error: metadata refresh failed");
+                dot.classList.remove("mjr-pulse-animation");
+                dot.style.cursor = "";
+            }
+        } catch {}
+    }
 
     try {
         if (updated) {
             card._mjrAsset = updated;
             if (typeof onAssetUpdated === "function") onAssetUpdated(updated);
 
-            // If sidebar is open on this asset, refresh it without changing selection.
             try {
                 if (sidebar?.classList?.contains?.("is-open")) {
                     const curId = sidebar?._currentAsset?.id ?? sidebar?._currentFullAsset?.id ?? null;
                     if (curId != null && String(curId) === String(updated.id)) {
-                        // The caller owns showAssetInSidebar; handled externally.
                         sidebar._mjrNeedsRefresh = true;
                     }
                 }
@@ -66,10 +81,8 @@ async function rescanSingleAsset({ card, asset, sidebar, onAssetUpdated }) {
         }
     } finally {
         try {
-            // If the dot is still in the DOM (scan failed, dot not replaced by onAssetUpdated),
-            // restore it to its original state so it doesn't stay stuck on blue/pending.
             if (dot && dot.isConnected) {
-                const restored = createWorkflowDot(asset);
+                const restored = createWorkflowDot(updated || asset);
                 if (restored) dot.replaceWith(restored);
             }
         } catch {
@@ -79,7 +92,6 @@ async function rescanSingleAsset({ card, asset, sidebar, onAssetUpdated }) {
 
     return updated;
 }
-
 function setSelectedCard(gridContainer, selectedCard) {
     if (!gridContainer) return;
     try {
@@ -668,3 +680,5 @@ export function bindSidebarOpen({
     gridContainer._mjrSidebarOpenDispose = dispose;
     return { dispose, toggleDetails: openDetailsForSelection, refreshActiveAsset };
 }
+
+

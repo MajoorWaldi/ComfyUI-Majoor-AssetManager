@@ -308,6 +308,17 @@ function _updateGridSettingsClasses(container) {
             
             .mjr-grid .mjr-card-dot-wrapper { display: none; }
             .mjr-grid.mjr-show-dot .mjr-card-dot-wrapper { display: inline-flex; }
+            .mjr-grid .mjr-asset-status-dot {
+                transition: color 0.3s ease, opacity 0.3s ease;
+            }
+            .mjr-grid .mjr-asset-status-dot.mjr-pulse-animation {
+                animation: mjr-pulse 1.5s infinite;
+            }
+            @keyframes mjr-pulse {
+                0% { opacity: 1; }
+                50% { opacity: 0.4; }
+                100% { opacity: 1; }
+            }
 
             .mjr-grid .mjr-meta-res { display: none; }
             .mjr-grid.mjr-show-dimensions .mjr-meta-res { display: inline; }

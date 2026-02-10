@@ -76,7 +76,7 @@ export function setFileBadgeCollision(badgeEl, nameCollision) {
  */
 export function createWorkflowDot(asset) {
     const dot = document.createElement("span");
-    dot.className = "mjr-workflow-dot";
+    dot.className = "mjr-workflow-dot mjr-asset-status-dot";
 
     const toBoolish = (v) => {
         if (v === true) return true;
@@ -110,16 +110,37 @@ export function createWorkflowDot(asset) {
         title = "Pending: metadata not parsed yet";
     }
 
+    applyAssetStatusDotState(dot, anyUnknown ? "pending" : (hasWorkflow === true && hasGen === true ? "success" : anyTrue ? "warning" : "error"), title);
     dot.textContent = "\u25CF";
     dot.title = `${title}\nClick to rescan this file`;
+
+    return dot;
+}
+
+export function applyAssetStatusDotState(dot, state, title = "") {
+    if (!dot) return;
+    const s = String(state || "").toLowerCase();
+    let color = "var(--mjr-status-neutral, #666)";
+    if (s === "pending" || s === "info") color = "var(--mjr-status-info, #64B5F6)";
+    else if (s === "success") color = "var(--mjr-status-success, #4CAF50)";
+    else if (s === "warning") color = "var(--mjr-status-warning, #FF9800)";
+    else if (s === "error") color = "var(--mjr-status-error, #f44336)";
+
+    try {
+        dot.dataset.mjrStatus = s || "neutral";
+    } catch {}
     dot.style.cssText = `
         color: ${color};
         margin-left: 4px;
         font-size: 12px;
         cursor: pointer;
+        transition: color 0.25s ease, opacity 0.25s ease;
     `;
-
-    return dot;
+    if (title) {
+        try {
+            dot.title = String(title);
+        } catch {}
+    }
 }
 
 /**

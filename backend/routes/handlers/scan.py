@@ -599,6 +599,8 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
         svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
+        if is_db_maintenance_active():
+            return _json_response(Result.Err("DB_MAINTENANCE", "Database maintenance in progress. Please wait."))
 
         csrf = _csrf_error(request)
         if csrf:

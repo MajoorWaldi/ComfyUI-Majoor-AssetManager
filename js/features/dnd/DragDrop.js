@@ -11,6 +11,7 @@ import { pickRootId } from "../../utils/ids.js";
 import { DND_GLOBAL_KEY, DND_INSTANCE_VERSION, DND_MIME } from "./utils/constants.js";
 import { dndLog } from "./utils/log.js";
 import { buildPayloadViewURL, getDraggedAsset } from "./utils/payload.js";
+import { getDownloadMimeForFilename, isVideoPayload } from "./utils/video.js";
 import { isCanvasDropTarget, markCanvasDirty } from "./targets/canvas.js";
 import { applyDragOutToOS } from "./out/DragOut.js";
 import {
@@ -50,14 +51,14 @@ const cleanupWorkflowCache = () => {
     }
 };
 
-export const tryLoadWorkflowToCanvas = async (payload) => {
+export const tryLoadWorkflowToCanvas = async (payload, fallbackAbsPath = null) => {
     const pl = payload && typeof payload === "object" ? payload : null;
     const rootId = pickRootId(pl);
 
     // Check cache first
     const cacheKey = pl?.filename
         ? `${pl.type || "output"}:${pl.filename}:${pl.subfolder || ""}:${rootId}`
-        : null;
+        : fallbackAbsPath ? `path:${fallbackAbsPath}` : null;
 
     if (cacheKey) {
         const cached = _workflowCache.get(cacheKey);
@@ -113,6 +114,9 @@ export const tryLoadWorkflowToCanvas = async (payload) => {
                     `&subfolder=${encodeURIComponent(pl.subfolder || "")}` +
                     `&root_id=${encodeURIComponent(rootId)}`;
             }
+        } else if (fallbackAbsPath) {
+            // For absolute paths, use metadata endpoint (can't use quick lookup)
+            url = `${ENDPOINTS.METADATA}?workflow_only=1&path=${encodeURIComponent(String(fallbackAbsPath))}`;
         }
 
         // If we need the fallback metadata endpoint
@@ -233,7 +237,7 @@ export const initDragDrop = () => {
         const types = Array.from(event?.dataTransfer?.types || []);
         if (!types.includes(DND_MIME)) return;
         const payload = getDraggedAsset(event, DND_MIME);
-        if (!payload) return;
+        if (!isVideoPayload(payload)) return;
 
         const node = getNodeUnderClientXY(app, event.clientX, event.clientY);
         const droppedExt = String(payload?.filename || "").split(".").pop() || "";
@@ -259,7 +263,7 @@ export const initDragDrop = () => {
         const types = Array.from(event?.dataTransfer?.types || []);
         if (!types.includes(DND_MIME)) return;
         const payload = getDraggedAsset(event, DND_MIME);
-        if (!payload) return;
+        if (!isVideoPayload(payload)) return;
         if (!isCanvasDropTarget(app, event)) return;
 
         const node = getNodeUnderClientXY(app, event.clientX, event.clientY);
