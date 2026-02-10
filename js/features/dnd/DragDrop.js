@@ -11,7 +11,6 @@ import { pickRootId } from "../../utils/ids.js";
 import { DND_GLOBAL_KEY, DND_INSTANCE_VERSION, DND_MIME } from "./utils/constants.js";
 import { dndLog } from "./utils/log.js";
 import { buildPayloadViewURL, getDraggedAsset } from "./utils/payload.js";
-import { isVideoPayload } from "./utils/video.js";
 import { isCanvasDropTarget, markCanvasDirty } from "./targets/canvas.js";
 import { applyDragOutToOS } from "./out/DragOut.js";
 import {
@@ -234,7 +233,7 @@ export const initDragDrop = () => {
         const types = Array.from(event?.dataTransfer?.types || []);
         if (!types.includes(DND_MIME)) return;
         const payload = getDraggedAsset(event, DND_MIME);
-        if (!isVideoPayload(payload)) return;
+        if (!payload) return;
 
         const node = getNodeUnderClientXY(app, event.clientX, event.clientY);
         const droppedExt = String(payload?.filename || "").split(".").pop() || "";
@@ -260,7 +259,7 @@ export const initDragDrop = () => {
         const types = Array.from(event?.dataTransfer?.types || []);
         if (!types.includes(DND_MIME)) return;
         const payload = getDraggedAsset(event, DND_MIME);
-        if (!isVideoPayload(payload)) return;
+        if (!payload) return;
         if (!isCanvasDropTarget(app, event)) return;
 
         const node = getNodeUnderClientXY(app, event.clientX, event.clientY);

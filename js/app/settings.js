@@ -24,7 +24,7 @@ const DEFAULT_SETTINGS = {
     grid: {
         pageSize: APP_DEFAULTS.DEFAULT_PAGE_SIZE,
         minSize: APP_DEFAULTS.GRID_MIN_SIZE,
-        minSizePreset: "medium",
+        minSizePreset: "small",
         gap: APP_DEFAULTS.GRID_GAP,
         showExtBadge: APP_DEFAULTS.GRID_SHOW_BADGES_EXTENSION,
         showRatingBadge: APP_DEFAULTS.GRID_SHOW_BADGES_RATING,

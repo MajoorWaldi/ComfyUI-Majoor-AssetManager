@@ -21,6 +21,7 @@ from backend.config import (
     BG_SCAN_ON_LIST,
 )
 from shared.scan_throttle import normalize_scan_directory, should_skip_background_scan
+from .db_maintenance import is_db_maintenance_active
 from ..core import _safe_rel_path, _is_within_root, _require_services
 
 logger = get_logger(__name__)
@@ -94,6 +95,8 @@ async def _kickoff_background_scan(
     Used to ensure input/custom folders get indexed without blocking list requests.
     """
     if not BG_SCAN_ON_LIST:
+        return
+    if is_db_maintenance_active():
         return
     normalized_dir = normalize_scan_directory(directory)
     if should_skip_background_scan(normalized_dir, source, root_id, MANUAL_BG_SCAN_GRACE_SECONDS):
@@ -189,6 +192,9 @@ async def _worker_loop() -> None:
             await asyncio.sleep(0.5)
             # Check exit condition or sleep again
             # We keep running to allow new tasks to arrive
+            continue
+        if is_db_maintenance_active():
+            await asyncio.sleep(0.5)
             continue
 
         entry: Optional[dict[str, Any]] = None

@@ -21,6 +21,7 @@ from backend.custom_roots import resolve_custom_root
 from backend.shared import Result, ErrorCode, sanitize_error_message
 from backend.tool_detect import get_tool_status
 from backend.utils import parse_bool
+from .db_maintenance import is_db_maintenance_active
 from ..core import _json_response, _require_services, _csrf_error, _require_write_access, _read_json
 
 SECURITY_PREF_KEYS = {
@@ -130,6 +131,7 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
             "locked": False,
             "malformed": False,
             "recovery_state": "unknown",
+            "maintenance_active": is_db_maintenance_active(),
         }
 
         try:
@@ -138,11 +140,13 @@ def register_health_routes(routes: web.RouteTableDef) -> None:
                 payload = getter()
                 if isinstance(payload, dict):
                     diagnostics = payload
+                    diagnostics["maintenance_active"] = is_db_maintenance_active()
         except Exception as exc:
             diagnostics = {
                 "locked": False,
                 "malformed": False,
                 "recovery_state": "unknown",
+                "maintenance_active": is_db_maintenance_active(),
                 "error": sanitize_error_message(exc, "Failed to read DB diagnostics"),
             }
 

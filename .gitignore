@@ -1,123 +1,95 @@
-# Python cache files
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
+
+# C extensions
+*.pyd
 
 # Distribution / packaging
-.Python
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
 sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
-*.zip
-*_release.zip
+pip-wheel-metadata/
 
 # Virtual environments
 venv/
+.venv/
 env/
 ENV/
-.venv/
+env.bak/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.history/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Test / tooling caches
+# Pytest
 .pytest_cache/
-tests/__reports__/
 tests/__pytest_tmp__/
-.mypy_cache/
-.ruff_cache/
+
+# Coverage
 .coverage
-coverage.xml
 htmlcov/
 
-# Node / frontend
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# Logs
-*.log
-
-# Local databases / artifacts (generated at runtime)
+# Databases / runtime data
 *.db
 *.db-shm
 *.db-wal
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
-*.sqlite3
-*.sqlite3-shm
-*.sqlite3-wal
 
-# Keep committed DB fixtures used by tests
-!tests/**/*.db
-!tests/**/*.sqlite
-!tests/**/*.sqlite3
-
-# ComfyUI / extension runtime outputs (should not be versioned)
-_mjr_index/
-_mjr_batch_zips/
+# ComfyUI / outputs
 output/
-input/
+output/_mjr_index/
 
-# Local archive extracted for comparisons
-__old_version_zip/
+# Node / frontend
+node_modules/
 
-# Local utility scripts
-clean_pycache.bat
-check_sync_await_backend.py
-check_sync_await_refined.py
-fix_async_defs.py
-update_filesystem_handlers.py
-find_duplicates.py
-scripts/benchmark_scan.py
+# Editor / OS files
+.DS_Store
+Thumbs.db
+desktop.ini
 
-# Jupyter Notebooks (scratchpads)
-*.ipynb
+# IDEs
+.vscode/
+.idea/
+*.sublime-workspace
 
-# Build artifacts
-node.zip
-user_guide.html
-variation_exif_dump.json
+# Logs and temp
+*.log
+logs/
+*.tmp
+*.temp
+*~
+*.swp
 
-# Claude Code local settings
-.claude/settings.local.json
+# Testing and tooling
+.tox/
+.nox/
+__pytest_tmp__/
 
-# Audit reports and temporary docs (work files)
-*AUDIT*.md
-DEEP_AUDIT*.md
-SECURITY_FIXES*.md
-VIEWER_*.md
-docs/VIEWER_FULLSCREEN.md
+# Build artefacts
+*.egg
+*.whl
 
-# Generated or Temporary Docs
-docs/COMPLETE_USER_GUIDE.md
-docs/METADATA_VIEWER.md
-docs/USER_GUIDE.md
-ressources/MPDF.png
-docs/adr/0003-context-menu-strategy.md
-ressources/full-moon-with-face.png
+# Misc
+.env
+.env.*
+coverage.xml
+
+# Ignore runtime-generated indexes and caches
+*.cache
+cache/
+
+# Allow local overrides: uncomment to ignore local config
+# local_config.py
+input/hello.txt
+input/hello_1.txt
+
+# Restored project files to ignore
+AGENTS.md
+ROADMAP.md
+VERSION
+eslint.config.js
+ROADMAP.md
+VERSION
+AGENTS.md
+eslint.config.js
+VERSION

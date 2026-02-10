@@ -487,9 +487,9 @@ export async function resetIndex(options = {}) {
         options.root_id ??
         options.customRoot ??
         null;
-      const body = {
-          scope,
-          reindex: _bool(options.reindex, true),
+    const body = {
+        scope,
+        reindex: _bool(options.reindex, true),
           // When scope=all, the backend defaults to a hard DB reset unless explicitly disabled.
           hard_reset_db: _bool(
               options.hardResetDb ??
@@ -509,6 +509,7 @@ export async function resetIndex(options = {}) {
         incremental: _bool(options.incremental, false),
         fast: _bool(options.fast, true),
         background_metadata: _bool(options.backgroundMetadata ?? options.background_metadata, true),
+        maintenance_force: _bool(options.maintenanceForce ?? options.maintenance_force, false),
     };
     if (customRootId) {
         body.custom_root_id = String(customRootId);

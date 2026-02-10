@@ -278,9 +278,12 @@ export function createStatusIndicator(options = {}) {
     `;
     saveDbBtn.onclick = async (event) => {
         event.stopPropagation();
+        globalThis._mjrMaintenanceActive = true;
         const original = saveDbBtn.textContent;
         saveDbBtn.disabled = true;
         saveDbBtn.textContent = t("btn.saving", "Saving...");
+        statusDot.style.background = "var(--mjr-status-info, #64B5F6)";
+        applyStatusHighlight(section, "info");
         try {
             const res = await saveDbBackup();
             if (res?.ok) {
@@ -292,8 +295,13 @@ export function createStatusIndicator(options = {}) {
         } catch (error) {
             comfyToast(error?.message || t("toast.dbSaveFailed", "Failed to save DB backup"), "error");
         } finally {
+            globalThis._mjrMaintenanceActive = false;
             saveDbBtn.disabled = false;
             saveDbBtn.textContent = original;
+            try {
+                const target = getScanContext ? getScanContext() : null;
+                await updateStatus(statusDot, statusText, capabilities, target);
+            } catch {}
         }
     };
     backupRow.appendChild(saveDbBtn);
@@ -320,9 +328,12 @@ export function createStatusIndicator(options = {}) {
         }
         const confirmed = confirm(t("dialog.dbRestore.confirm", "Restore selected DB backup? Current DB will be replaced."));
         if (!confirmed) return;
+        globalThis._mjrMaintenanceActive = true;
         const original = restoreDbBtn.textContent;
         restoreDbBtn.disabled = true;
         restoreDbBtn.textContent = t("btn.restoring", "Restoring...");
+        statusDot.style.background = "var(--mjr-status-warning, #FFA726)";
+        applyStatusHighlight(section, "warning");
         try {
             const res = await restoreDbBackup({ name: selected, useLatest: false });
             if (res?.ok) {
@@ -334,8 +345,13 @@ export function createStatusIndicator(options = {}) {
         } catch (error) {
             comfyToast(error?.message || t("toast.dbRestoreFailed", "Failed to restore DB backup"), "error");
         } finally {
+            globalThis._mjrMaintenanceActive = false;
             restoreDbBtn.disabled = false;
             restoreDbBtn.textContent = original;
+            try {
+                const target = getScanContext ? getScanContext() : null;
+                await updateStatus(statusDot, statusText, capabilities, target);
+            } catch {}
         }
     };
     backupRow.appendChild(restoreDbBtn);
@@ -369,6 +385,7 @@ export function createStatusIndicator(options = {}) {
     };
     resetBtn.onclick = async (event) => {
         event.stopPropagation();
+        globalThis._mjrMaintenanceActive = true;
 
         comfyToast(t("toast.resetTriggered"), "warning", 3000);
 
@@ -377,8 +394,8 @@ export function createStatusIndicator(options = {}) {
         resetBtn.textContent = t("btn.resetting");
         
         // Status indicator feedback
-        statusDot.style.background = "var(--mjr-status-warning, #FFA726)"; // Orange (working)
-        applyStatusHighlight(section, "warning");
+        statusDot.style.background = "var(--mjr-status-info, #64B5F6)";
+        applyStatusHighlight(section, "info");
 
         try {
             const ctx = getScanContext ? getScanContext() : {};
@@ -390,6 +407,7 @@ export function createStatusIndicator(options = {}) {
                 scope,
                 customRootId,
                 reindex: true,
+                maintenance_force: true,
                 hard_reset_db: isAll,
                 clear_scan_journal: true,
                 clear_metadata_cache: true,
@@ -423,8 +441,13 @@ export function createStatusIndicator(options = {}) {
                 comfyToast(error?.message || t("toast.resetFailed"), "error");
             }
         } finally {
+            globalThis._mjrMaintenanceActive = false;
             resetBtn.disabled = false;
             resetBtn.textContent = originalText;
+            try {
+                const target = getScanContext ? getScanContext() : null;
+                await updateStatus(statusDot, statusText, capabilities, target);
+            } catch {}
         }
     };
 
@@ -457,6 +480,7 @@ export function createStatusIndicator(options = {}) {
 
         const confirmed = confirm(t("dialog.dbDelete.confirm"));
         if (!confirmed) return;
+        globalThis._mjrMaintenanceActive = true;
 
         comfyToast(t("toast.dbDeleteTriggered"), "warning", 3000);
 
@@ -465,8 +489,8 @@ export function createStatusIndicator(options = {}) {
         deleteDbBtn.textContent = t("btn.deletingDb");
         resetBtn.disabled = true;
 
-        statusDot.style.background = "var(--mjr-status-warning, #FFA726)";
-        applyStatusHighlight(section, "warning");
+        statusDot.style.background = "var(--mjr-status-info, #64B5F6)";
+        applyStatusHighlight(section, "info");
 
         try {
             const res = await forceDeleteDb();
@@ -485,9 +509,14 @@ export function createStatusIndicator(options = {}) {
             applyStatusHighlight(section, "error");
             comfyToast(error?.message || t("toast.dbDeleteFailed"), "error");
         } finally {
+            globalThis._mjrMaintenanceActive = false;
             deleteDbBtn.disabled = false;
             deleteDbBtn.textContent = originalText;
             resetBtn.disabled = false;
+            try {
+                const target = getScanContext ? getScanContext() : null;
+                await updateStatus(statusDot, statusText, capabilities, target);
+            } catch {}
         }
     };
 
@@ -527,6 +556,10 @@ export function createStatusIndicator(options = {}) {
  * Trigger a scan
  */
 export async function triggerScan(statusDot, statusText, capabilitiesSection = null, scanTarget = null) {
+    if (globalThis?._mjrMaintenanceActive) {
+        comfyToast(t("status.maintenanceBusy", "Database maintenance in progress. Please wait."), "warning", 2200);
+        return;
+    }
     const section = statusText?.closest?.("#mjr-status-body")?.parentElement || statusText?.closest?.("div");
     const desiredScope = String(scanTarget?.scope || "output").toLowerCase();
     const desiredCustomRootId = scanTarget?.customRootId || scanTarget?.custom_root_id || scanTarget?.root_id || null;
@@ -599,8 +632,8 @@ export async function triggerScan(statusDot, statusText, capabilitiesSection = n
     } else if (desiredScope === "output") detail = roots?.output_directory ? ` (${roots.output_directory})` : "";
 
     // Show scanning status
-    statusDot.style.background = "var(--mjr-status-warning, #FFA726)"; // Orange
-    applyStatusHighlight(section, "warning");
+    statusDot.style.background = "var(--mjr-status-info, #64B5F6)";
+    applyStatusHighlight(section, "info");
     setStatusWithHint(statusText, t("status.scanningScope", `Scanning ${scopeLabel}${detail}...`, { scope: scopeLabel, detail }), t("status.scanningHint", "This may take a while"));
 
     const payload = {
@@ -863,12 +896,15 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
         const dbDiagnostics = dbDiagResult?.ok ? (dbDiagResult?.data?.diagnostics || {}) : {};
         const dbMalformed = Boolean(dbDiagnostics?.malformed);
         const dbLocked = Boolean(dbDiagnostics?.locked);
+        const dbMaintenance = Boolean(dbDiagnostics?.maintenance_active);
         const hasIndexedAssets = Number(totalAssets) > 0;
         const hasIndexTimestamp = Boolean(counters?.last_index_end);
         const indexHealthy = hasIndexedAssets && hasIndexTimestamp;
 
         let healthTone = "success";
-        if (!dbAvailable || dbMalformed) {
+        if (dbMaintenance) {
+            healthTone = "info";
+        } else if (!dbAvailable || dbMalformed) {
             healthTone = "error";
         } else if (dbLocked || !indexHealthy) {
             healthTone = "warning";

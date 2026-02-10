@@ -39,6 +39,7 @@ from backend.features.index.watcher_scope import (
     WATCHER_SCOPE_KEY,
     WATCHER_CUSTOM_ROOT_ID_KEY,
 )
+from .db_maintenance import is_db_maintenance_active
 from ..core import (
     _json_response,
     _require_services,
@@ -378,6 +379,8 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
         svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
+        if is_db_maintenance_active():
+            return _json_response(Result.Err("DB_MAINTENANCE", "Database maintenance in progress. Please wait."))
 
         csrf = _csrf_error(request)
         if csrf:
@@ -950,20 +953,29 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
         svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
-
-        prefs = await _resolve_security_prefs(svc)
-        op = _require_operation_enabled("reset_index", prefs=prefs)
-        if not op.ok:
-            return _json_response(op)
-
-        auth = _require_write_access(request)
-        if not auth.ok:
-            return _json_response(auth)
+        if is_db_maintenance_active():
+            return _json_response(Result.Err("DB_MAINTENANCE", "Database maintenance in progress. Please wait."))
 
         body_res = await _read_json(request)
         if not body_res.ok:
             return _json_response(body_res)
         body = body_res.data or {}
+        maintenance_force = parse_bool(
+            body.get("maintenance_force")
+            or body.get("force_maintenance")
+            or body.get("force_reset"),
+            False,
+        )
+
+        if not maintenance_force:
+            prefs = await _resolve_security_prefs(svc)
+            op = _require_operation_enabled("reset_index", prefs=prefs)
+            if not op.ok:
+                return _json_response(op)
+
+            auth = _require_write_access(request)
+            if not auth.ok:
+                return _json_response(auth)
 
         def _bool_option(keys, default):
             for key in keys:

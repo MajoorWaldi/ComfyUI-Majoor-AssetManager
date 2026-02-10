@@ -7,6 +7,7 @@ from __future__ import annotations
 import datetime
 import shutil
 import sqlite3
+import threading
 from pathlib import Path
 
 from aiohttp import web
@@ -18,6 +19,49 @@ from ..core import _json_response, _csrf_error, _require_services, safe_error_me
 logger = get_logger(__name__)
 
 _DB_ARCHIVE_DIR = INDEX_DB_PATH.parent / "archive"
+_DB_MAINTENANCE_ACTIVE = False
+_DB_MAINT_LOCK = threading.Lock()
+
+
+def is_db_maintenance_active() -> bool:
+    with _DB_MAINT_LOCK:
+        return bool(_DB_MAINTENANCE_ACTIVE)
+
+
+def set_db_maintenance_active(active: bool) -> None:
+    global _DB_MAINTENANCE_ACTIVE
+    with _DB_MAINT_LOCK:
+        _DB_MAINTENANCE_ACTIVE = bool(active)
+
+
+async def _stop_watcher_if_running(svc: dict | None) -> bool:
+    watcher = svc.get("watcher") if isinstance(svc, dict) else None
+    try:
+        if watcher and watcher.is_running():
+            await watcher.stop()
+            return True
+    except Exception as exc:
+        logger.debug("Failed to stop watcher during DB maintenance: %s", exc)
+    return False
+
+
+async def _restart_watcher_if_needed(svc: dict | None, should_restart: bool) -> None:
+    if not should_restart or not isinstance(svc, dict):
+        return
+    watcher = svc.get("watcher")
+    if not watcher:
+        return
+    try:
+        from backend.features.index.watcher_scope import build_watch_paths
+        scope_cfg = svc.get("watcher_scope") if isinstance(svc.get("watcher_scope"), dict) else {}
+        scope = (scope_cfg or {}).get("scope")
+        custom_root_id = (scope_cfg or {}).get("custom_root_id")
+        paths = build_watch_paths(scope, custom_root_id)
+        if paths:
+            import asyncio
+            await watcher.start(paths, asyncio.get_running_loop())
+    except Exception as exc:
+        logger.debug("Failed to restart watcher after DB maintenance: %s", exc)
 
 
 def _backup_name(now: datetime.datetime | None = None) -> str:
@@ -113,6 +157,8 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
         if csrf:
             return _json_response(Result.Err("CSRF", csrf))
 
+        set_db_maintenance_active(True)
+        watcher_was_running = False
         # Best-effort: get services, but don't fail if DB is broken
         svc = None
         db = None
@@ -122,106 +168,113 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
             if isinstance(svc, dict):
                 db = svc.get("db")
                 index_service = svc.get("index")
+                watcher_was_running = await _stop_watcher_if_running(svc)
         except Exception:
             pass
 
         logger.warning("Force-delete DB requested (emergency recovery)")
-
-        # 1. Try to drain the adapter's connections (best-effort)
-        if db is not None:
-            try:
-                await db.areset()
-                logger.info("DB adapter areset() succeeded")
-                # If areset worked, skip the manual file deletion
-                started_scans = []
-                if index_service:
+        try:
+            # 1. Try to drain the adapter's connections (best-effort)
+            if db is not None:
+                try:
+                    await db.areset()
+                    logger.info("DB adapter areset() succeeded")
+                    # If areset worked, skip the manual file deletion
+                    started_scans = []
+                    if index_service:
+                        try:
+                            base_path = str(OUTPUT_ROOT_PATH)
+                            asyncio.create_task(
+                                index_service.scan_directory(base_path, recursive=True, incremental=False)
+                            )
+                            started_scans.append(base_path)
+                        except Exception:
+                            pass
+                    return _json_response(Result.Ok({
+                        "method": "adapter_reset",
+                        "deleted": True,
+                        "scans_triggered": started_scans,
+                    }))
+                except Exception as exc:
+                    logger.warning("DB adapter areset() failed (%s), falling back to manual file delete", exc)
+                    # Close whatever we can before manual delete
                     try:
-                        base_path = str(OUTPUT_ROOT_PATH)
-                        asyncio.create_task(
-                            index_service.scan_directory(base_path, recursive=True, incremental=False)
-                        )
-                        started_scans.append(base_path)
+                        db.close()
                     except Exception:
                         pass
-                return _json_response(Result.Ok({
-                    "method": "adapter_reset",
-                    "deleted": True,
-                    "scans_triggered": started_scans,
-                }))
-            except Exception as exc:
-                logger.warning("DB adapter areset() failed (%s), falling back to manual file delete", exc)
-                # Close whatever we can before manual delete
+
+            # 2. Force GC to release file handles (critical on Windows)
+            gc.collect()
+            await asyncio.sleep(0.3)
+            gc.collect()
+
+            # 3. Manually delete DB files from disk
+            base = str(INDEX_DB_PATH)
+            deleted_files = []
+            failed_files = []
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                p = Path(base + suffix)
+                if not p.exists():
+                    continue
+                removed = False
+                for attempt in range(6):
+                    try:
+                        p.unlink()
+                        deleted_files.append(str(p))
+                        removed = True
+                        break
+                    except PermissionError:
+                        gc.collect()
+                        await asyncio.sleep(0.3 * (attempt + 1))
+                    except Exception:
+                        break
+                if not removed and p.exists():
+                    failed_files.append(str(p))
+
+            if failed_files:
+                logger.error("Force-delete: could not remove files: %s", failed_files)
+                return _json_response(Result.Err(
+                    "DELETE_FAILED",
+                    f"Could not delete: {', '.join(failed_files)}. "
+                    "Stop ComfyUI, manually delete the files, then restart.",
+                ))
+
+            logger.info("Force-delete: removed %s", deleted_files)
+
+            # 4. Re-initialize the DB adapter so it creates a fresh database
+            if db is not None:
                 try:
-                    db.close()
+                    db._init_db()
+                    from backend.adapters.db.schema import ensure_tables_exist, ensure_indexes_and_triggers
+                    await ensure_tables_exist(db)
+                    await ensure_indexes_and_triggers(db)
+                    logger.info("DB re-initialized after force delete")
+                except Exception as exc:
+                    logger.warning("DB re-init after force delete failed: %s", exc)
+
+            # 5. Trigger background rescan
+            started_scans = []
+            if index_service is not None:
+                try:
+                    base_path = str(OUTPUT_ROOT_PATH)
+                    asyncio.create_task(
+                        index_service.scan_directory(base_path, recursive=True, incremental=False)
+                    )
+                    started_scans.append(base_path)
                 except Exception:
                     pass
 
-        # 2. Force GC to release file handles (critical on Windows)
-        gc.collect()
-        await asyncio.sleep(0.3)
-        gc.collect()
-
-        # 3. Manually delete DB files from disk
-        base = str(INDEX_DB_PATH)
-        deleted_files = []
-        failed_files = []
-        for suffix in ("", "-wal", "-shm", "-journal"):
-            p = Path(base + suffix)
-            if not p.exists():
-                continue
-            removed = False
-            for attempt in range(6):
-                try:
-                    p.unlink()
-                    deleted_files.append(str(p))
-                    removed = True
-                    break
-                except PermissionError:
-                    gc.collect()
-                    await asyncio.sleep(0.3 * (attempt + 1))
-                except Exception:
-                    break
-            if not removed and p.exists():
-                failed_files.append(str(p))
-
-        if failed_files:
-            logger.error("Force-delete: could not remove files: %s", failed_files)
-            return _json_response(Result.Err(
-                "DELETE_FAILED",
-                f"Could not delete: {', '.join(failed_files)}. "
-                "Stop ComfyUI, manually delete the files, then restart.",
-            ))
-
-        logger.info("Force-delete: removed %s", deleted_files)
-
-        # 4. Re-initialize the DB adapter so it creates a fresh database
-        if db is not None:
+            return _json_response(Result.Ok({
+                "method": "manual_delete",
+                "deleted_files": deleted_files,
+                "scans_triggered": started_scans,
+            }))
+        finally:
             try:
-                db._init_db()
-                from backend.adapters.db.schema import ensure_tables_exist, ensure_indexes_and_triggers
-                await ensure_tables_exist(db)
-                await ensure_indexes_and_triggers(db)
-                logger.info("DB re-initialized after force delete")
-            except Exception as exc:
-                logger.warning("DB re-init after force delete failed: %s", exc)
-
-        # 5. Trigger background rescan
-        started_scans = []
-        if index_service is not None:
-            try:
-                base_path = str(OUTPUT_ROOT_PATH)
-                asyncio.create_task(
-                    index_service.scan_directory(base_path, recursive=True, incremental=False)
-                )
-                started_scans.append(base_path)
+                await _restart_watcher_if_needed(svc if isinstance(svc, dict) else None, watcher_was_running)
             except Exception:
                 pass
-
-        return _json_response(Result.Ok({
-            "method": "manual_delete",
-            "deleted_files": deleted_files,
-            "scans_triggered": started_scans,
-        }))
+            set_db_maintenance_active(False)
 
     @routes.get("/mjr/am/db/backups")
     async def db_backups_list(_request: web.Request):
@@ -305,12 +358,16 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
         except Exception as exc:
             return _json_response(Result.Err("DB_ERROR", safe_error_message(exc, "Failed to resolve backup file")))
 
+        set_db_maintenance_active(True)
         svc, error_result = await _require_services()
         if error_result:
+            set_db_maintenance_active(False)
             return _json_response(error_result)
         db = svc.get("db") if isinstance(svc, dict) else None
         if not db:
+            set_db_maintenance_active(False)
             return _json_response(Result.Err("SERVICE_UNAVAILABLE", "Database service unavailable"))
+        watcher_was_running = await _stop_watcher_if_running(svc if isinstance(svc, dict) else None)
 
         try:
             reset_res = await db.areset()
@@ -329,5 +386,11 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
                 pass
         except Exception as exc:
             return _json_response(Result.Err("DB_ERROR", safe_error_message(exc, "Failed to restore DB backup")))
+        finally:
+            try:
+                await _restart_watcher_if_needed(svc if isinstance(svc, dict) else None, watcher_was_running)
+            except Exception:
+                pass
+            set_db_maintenance_active(False)
 
         return _json_response(Result.Ok({"restored": True, "name": src.name, "path": str(src)}))
