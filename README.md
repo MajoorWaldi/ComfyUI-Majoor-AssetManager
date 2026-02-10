@@ -17,7 +17,6 @@ Majoor Assets Manager is an advanced asset browser for ComfyUI that provides a c
 - **User Guide:** [user_guide.html](user_guide.html)
 - **Installation:** [Installation](#installation)
 - **Changelog:** [CHANGELOG.md](CHANGELOG.md)
-- **Roadmap:** [ROADMAP.md](ROADMAP.md)
 - **Documentation Index:** [docs/DOCUMENTATION_INDEX.md](docs/DOCUMENTATION_INDEX.md)
 
 ## GitHub
