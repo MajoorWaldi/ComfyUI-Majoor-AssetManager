@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+### Added / Improved
+- Enhanced metadata extraction for the AC-Step (Ace Step) custom node.
+- Drag & Drop: stage dropped audio files to the node input (audio file staging).
+### Fixed
+- Fixed drag & drop issues for images and videos.
+- Enhanced index status functionality and various bug fixes.
+
+---
+
 ## [2.3.2] - 2026-02-09
 ### Added / Improved
 - Added language support for Chinese, Korean, Russian, Hindi, Spanish, French, and English. 🌍

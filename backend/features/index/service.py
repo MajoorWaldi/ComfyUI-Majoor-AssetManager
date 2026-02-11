@@ -340,3 +340,22 @@ class IndexService:
             Result with list of unique tags sorted alphabetically
         """
         return await self._updater.get_all_tags()
+
+    def pause_enrichment_for_interaction(self, seconds: float = 1.5) -> None:
+        """
+        Temporarily pause background metadata enrichment during interactive UI reads
+        (search/sort/list) to reduce DB contention.
+        """
+        try:
+            self._enricher.pause_for_interaction(seconds=seconds)
+        except Exception:
+            pass
+
+    async def stop_enrichment(self, clear_queue: bool = True) -> None:
+        """
+        Stop metadata enrichment worker (used during DB maintenance/restore).
+        """
+        try:
+            await self._enricher.stop_enrichment(clear_queue=clear_queue)
+        except Exception:
+            pass

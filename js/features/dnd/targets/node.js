@@ -1,4 +1,9 @@
-import { comboHasAnyVideoValue, looksLikeVideoPath } from "../utils/video.js";
+import {
+    comboHasAnyAudioValue,
+    comboHasAnyVideoValue,
+    looksLikeAudioPath,
+    looksLikeVideoPath
+} from "../utils/video.js";
 
 let highlightedNode = null;
 let highlightedNodePrev = null;
@@ -184,6 +189,98 @@ export const pickBestVideoPathWidget = (node, droppedExt) => {
     if (!best || best.score < 20) return null;
     try {
         best.w.__mjrVideoPickScore = best.score;
+    } catch {}
+    return best.w;
+};
+
+export const pickBestMediaPathWidget = (node, payload, droppedExt) => {
+    const kind = String(payload?.kind || "").toLowerCase();
+    if (kind !== "audio") return pickBestVideoPathWidget(node, droppedExt);
+
+    const widgets = node?.widgets;
+    if (!Array.isArray(widgets) || !widgets.length) return null;
+
+    const ext = String(droppedExt || "").toLowerCase().replace(/^\./, "");
+    const exactNames = new Set(["audio_path", "input_audio", "source_audio", "audio"]);
+    const nodeType = String(node?.type || "").toLowerCase();
+    const isKnownAudioNode =
+        nodeType.includes("loadaudio") ||
+        nodeType.includes("vhs_loadaudioupload") ||
+        nodeType.includes("vhs_loadaudio") ||
+        nodeType.includes("audioloader") ||
+        nodeType.includes("inputaudio") ||
+        nodeType === "loadaudio";
+
+    const candidates = [];
+    for (const w of widgets) {
+        if (!w) continue;
+        const type = String(w?.type || "").toLowerCase();
+        const value = w?.value;
+
+        const rejectTypes = new Set(["number", "int", "float", "boolean", "toggle", "checkbox"]);
+        if (rejectTypes.has(type)) continue;
+        if (typeof value === "number" || typeof value === "boolean") continue;
+
+        const stringLikeByType = type === "text" || type === "string" || type === "combo";
+        const stringLikeByCallback = typeof w?.callback === "function" && typeof value === "string";
+        if (!stringLikeByType && !stringLikeByCallback) continue;
+
+        const rawName = String(w?.name || w?.label || "");
+        const name = rawName.toLowerCase().trim();
+
+        let score = 0;
+        if (exactNames.has(name)) score += 100;
+
+        if (name === "file" && isKnownAudioNode && type === "combo" && comboHasAnyAudioValue(w, ext)) {
+            score += 100;
+        }
+
+        const hasAudio = name.includes("audio") || name.includes("sound") || name.includes("music");
+        const hasAnyHint =
+            name.includes("path") || name.includes("file") || name.includes("input") || name.includes("src") || name.includes("source");
+        if (hasAudio && hasAnyHint) score += 80;
+        if (name.includes("file") || name.includes("path")) score += 35;
+        if (name.includes("media") || name.includes("track")) score += 45;
+
+        const isOutputy =
+            name.includes("output") ||
+            name.includes("save") ||
+            name.includes("export") ||
+            name.includes("folder") ||
+            name.includes("dir");
+        if (isOutputy) score -= 90;
+
+        if (name === "audio") {
+            const empty = typeof value === "string" && value.trim() === "";
+            if (empty) {
+                score += 25;
+            } else if (looksLikeAudioPath(value, ext)) {
+                score += 25;
+            } else {
+                score -= 10;
+            }
+        }
+
+        if (isKnownAudioNode) score += 15;
+        const emptyValue = typeof value === "string" && value.trim() === "";
+        if (emptyValue) score += 3;
+        if (type === "combo" && comboHasAnyAudioValue(w, ext)) score += 12;
+
+        candidates.push({ w, score, emptyValue, combo: type === "combo" });
+    }
+
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        if (b.emptyValue !== a.emptyValue) return b.emptyValue ? 1 : -1;
+        if (b.combo !== a.combo) return b.combo ? 1 : -1;
+        return 0;
+    });
+
+    const best = candidates[0];
+    if (!best || best.score < 20) return null;
+    try {
+        best.w.__mjrAudioPickScore = best.score;
     } catch {}
     return best.w;
 };

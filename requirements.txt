@@ -25,3 +25,6 @@ pywin32>=300; sys_platform == 'win32'
 
 # Testing helpers
 pytest-asyncio>=0.22.0
+
+# Static analysis
+pyflakes>=3.4.0

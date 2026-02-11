@@ -8,7 +8,6 @@ import re
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -184,7 +183,6 @@ def _md_to_html(md: str, *, doc_prefix: str, doc_id_by_md_name: dict[str, str]) 
     list_stack: list[tuple[str, int]] = []  # (ul|ol, indent)
 
     def close_lists(to_indent: int = -1) -> None:
-        nonlocal list_stack
         while list_stack and (to_indent < 0 or list_stack[-1][1] >= to_indent):
             tag, _ = list_stack.pop()
             out.append(f"</{tag}>")

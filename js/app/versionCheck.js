@@ -18,13 +18,28 @@ function normalizeVersion(value) {
     return String(value).trim().replace(/^v/i, "");
 }
 
+/**
+ * Check whether a version/branch should be treated as nightly/dev build.
+ */
+function isNightly(version, branch) {
+    const v = String(version || "").trim().toLowerCase();
+    const b = String(branch || "").trim().toLowerCase();
+    const nightlyKeywords = ["nightly", "dev", "alpha", "experimental"];
+    const hasNightlyKeyword = nightlyKeywords.some((kw) => v.includes(kw) || b.includes(kw));
+
+    // Examples: 1.2.0+a1b2c3d, 6432abc, deadbeef...
+    const hasCommitHash = v.includes("+") || (v.length > 10 && /^[a-f0-9]+$/i.test(v));
+
+    return hasNightlyKeyword || hasCommitHash;
+}
+
 function parseVersionSegments(value) {
     return String(value || "")
+        .split("-")[0]
         .split(".")
         .map((part) => {
-            const num = Number(part);
-            if (Number.isFinite(num)) return Math.max(0, Math.trunc(num));
-            return 0;
+            const num = parseInt(part, 10);
+            return Number.isFinite(num) ? Math.max(0, num) : 0;
         });
 }
 
@@ -109,7 +124,8 @@ export async function checkMajoorVersion({ force = false } = {}) {
         return null;
     }
 
-    if (!localVersion || localVersion.toLowerCase() === "nightly" || branch === "nightly") {
+    if (!localVersion || isNightly(localVersion, branch)) {
+        console.log("Majoor: Nightly/development build detected. Skipping update check.");
         emitVersionUpdateState({ available: false });
         return null;
     }

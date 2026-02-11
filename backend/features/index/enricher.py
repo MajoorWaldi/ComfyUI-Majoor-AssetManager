@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import asyncio
+import time
 from typing import List, Dict, Any, Optional
 
 from ...shared import get_logger, Result
@@ -13,6 +14,26 @@ from ..metadata import MetadataService
 
 
 logger = get_logger(__name__)
+_DB_RESETTING_MSG = "database is resetting - connection rejected"
+_DB_LOCKED_MSGS = ("database is locked", "busy")
+_MAX_ENRICH_RETRIES = 5
+
+
+def _is_db_resetting_error(exc: Exception) -> bool:
+    try:
+        return _DB_RESETTING_MSG in str(exc).lower()
+    except Exception:
+        return False
+
+
+def _is_transient_db_error(exc: Exception) -> bool:
+    try:
+        msg = str(exc).lower()
+    except Exception:
+        return False
+    if _DB_RESETTING_MSG in msg:
+        return True
+    return any(token in msg for token in _DB_LOCKED_MSGS)
 
 
 class MetadataEnricher:
@@ -51,6 +72,31 @@ class MetadataEnricher:
         self._enrich_queue: List[str] = []
         self._enrich_task: Optional[asyncio.Task[None]] = None
         self._enrich_running = False
+        self._retry_counts: Dict[str, int] = {}
+        self._pause_until_monotonic: float = 0.0
+        self._status_active: bool = False
+
+    def _emit_status(self, active: bool, **extra: Any) -> None:
+        try:
+            if self._status_active == bool(active):
+                return
+            self._status_active = bool(active)
+            from ...routes.registry import PromptServer
+            payload = {"active": bool(active), **extra}
+            PromptServer.instance.send_sync("mjr-enrichment-status", payload)
+        except Exception:
+            pass
+
+    def pause_for_interaction(self, seconds: float = 1.5) -> None:
+        """
+        Pause enrichment briefly during UI interactions (search/sort/list).
+        """
+        try:
+            ttl = max(0.1, min(5.0, float(seconds)))
+        except Exception:
+            ttl = 1.5
+        now = time.monotonic()
+        self._pause_until_monotonic = max(self._pause_until_monotonic, now + ttl)
 
     async def start_enrichment(self, filepaths: List[str]) -> None:
         """
@@ -71,13 +117,40 @@ class MetadataEnricher:
                 existing.add(fp)
             if self._enrich_running and self._enrich_task and not self._enrich_task.done():
                 return
+            self._emit_status(True, queued=len(self._enrich_queue))
             self._enrich_running = True
             self._enrich_task = asyncio.create_task(self._enrichment_worker())
+
+    async def stop_enrichment(self, clear_queue: bool = True) -> None:
+        """
+        Stop background enrichment worker and optionally clear pending queue.
+        """
+        task: Optional[asyncio.Task[None]] = None
+        async with self._enrich_lock:
+            task = self._enrich_task
+            self._enrich_task = None
+            self._enrich_running = False
+            if clear_queue:
+                self._enrich_queue.clear()
+                self._retry_counts.clear()
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        self._emit_status(False, queue_left=0 if clear_queue else len(self._enrich_queue))
 
     async def _enrichment_worker(self) -> None:
         """Background worker that processes the enrichment queue."""
         try:
             while True:
+                now = time.monotonic()
+                if self._pause_until_monotonic > now:
+                    await asyncio.sleep(min(0.25, self._pause_until_monotonic - now))
+                    continue
                 async with self._enrich_lock:
                     if not self._enrich_queue:
                         return
@@ -85,11 +158,16 @@ class MetadataEnricher:
                     del self._enrich_queue[:64]
                 await self._enrich_metadata_chunk(chunk)
         except Exception as exc:
-            logger.warning("Metadata enrichment worker failed: %s", exc)
+            if _is_db_resetting_error(exc):
+                logger.info("Metadata enrichment paused during DB maintenance/reset: %s", exc)
+            else:
+                logger.warning("Metadata enrichment worker failed: %s", exc)
         finally:
             async with self._enrich_lock:
                 self._enrich_running = False
                 self._enrich_task = None
+                queue_left = len(self._enrich_queue)
+            self._emit_status(False, queue_left=queue_left)
 
     async def _enrich_metadata_chunk(self, filepaths: List[str]) -> None:
         """
@@ -122,6 +200,7 @@ class MetadataEnricher:
                 id_by_fp[str(fp)] = aid
 
         updates: List[Dict[str, Any]] = []
+        retry_paths: List[str] = []
 
         # Import helper locally to use shared logic (including FTS population)
         from .metadata_helpers import MetadataHelpers
@@ -178,13 +257,17 @@ class MetadataEnricher:
                 continue
             try:
                 async with self.db.lock_for_asset(asset_id):
-                    async with self.db.atransaction(mode="immediate") as tx:
+                    # Use deferred tx to reduce lock contention with concurrent search/sort reads.
+                    async with self.db.atransaction(mode="deferred") as tx:
                         if not tx.ok:
                             logger.warning(
                                 "Metadata enrichment skipped (transaction begin failed) for asset_id=%s: %s",
                                 asset_id,
                                 tx.error,
                             )
+                            fp = str(item.get("filepath") or "")
+                            if fp:
+                                retry_paths.append(fp)
                             continue
                         await self.db.aexecute(
                             """
@@ -206,7 +289,13 @@ class MetadataEnricher:
                         )
                     if not tx.ok:
                         logger.warning("Metadata enrichment commit failed for asset_id=%s: %s", asset_id, tx.error)
+                        fp = str(item.get("filepath") or "")
+                        if fp:
+                            retry_paths.append(fp)
                     else:
+                        fp = str(item.get("filepath") or "")
+                        if fp:
+                            self._retry_counts.pop(fp, None)
                         # Notify frontend so workflow dot updates promptly.
                         try:
                             res = await self.db.aquery(
@@ -227,4 +316,27 @@ class MetadataEnricher:
                         except Exception:
                             pass
             except Exception as exc:
-                logger.warning("Metadata enrichment update failed for asset_id=%s: %s", asset_id, exc)
+                fp = str(item.get("filepath") or "")
+                if _is_transient_db_error(exc):
+                    logger.info("Metadata enrichment deferred for asset_id=%s due to DB contention/reset: %s", asset_id, exc)
+                    if fp:
+                        retry_paths.append(fp)
+                else:
+                    logger.warning("Metadata enrichment update failed for asset_id=%s: %s", asset_id, exc)
+
+        if retry_paths:
+            to_requeue: List[str] = []
+            for fp in retry_paths:
+                try:
+                    c = int(self._retry_counts.get(fp, 0)) + 1
+                except Exception:
+                    c = 1
+                self._retry_counts[fp] = c
+                if c <= _MAX_ENRICH_RETRIES:
+                    to_requeue.append(fp)
+                else:
+                    logger.warning("Metadata enrichment dropped after max retries (%s): %s", _MAX_ENRICH_RETRIES, fp)
+                    self._retry_counts.pop(fp, None)
+            if to_requeue:
+                await asyncio.sleep(0.2)
+                await self.start_enrichment(to_requeue)

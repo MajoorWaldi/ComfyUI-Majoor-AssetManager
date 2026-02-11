@@ -88,8 +88,8 @@ export function createWorkflowDot(asset) {
 
     const hasWorkflow = toBoolish(asset?.has_workflow ?? asset?.hasWorkflow);
     const hasGen = toBoolish(asset?.has_generation_data ?? asset?.hasGenerationData);
+    const enrichmentActive = !!globalThis?._mjrEnrichmentActive;
 
-    let color = "var(--mjr-status-neutral, #666)";
     let title = "Pending: parsing metadata\u2026";
 
     const anyTrue = hasWorkflow === true || hasGen === true;
@@ -97,20 +97,21 @@ export function createWorkflowDot(asset) {
     const anyUnknown = hasWorkflow === null || hasGen === null;
 
     if (hasWorkflow === true && hasGen === true) {
-        color = "var(--mjr-status-success, #4CAF50)";
         title = "Complete: workflow + generation data detected";
     } else if (anyTrue) {
-        color = "var(--mjr-status-warning, #FF9800)";
         title = hasWorkflow === true ? "Partial: workflow only (generation data missing)" : "Partial: generation data only (workflow missing)";
     } else if (anyFalse && !anyTrue && !anyUnknown) {
-        color = "var(--mjr-status-error, #f44336)";
         title = "None: no workflow or generation data found";
     } else if (anyUnknown) {
-        color = "var(--mjr-status-info, #64B5F6)";
         title = "Pending: metadata not parsed yet";
     }
 
-    applyAssetStatusDotState(dot, anyUnknown ? "pending" : (hasWorkflow === true && hasGen === true ? "success" : anyTrue ? "warning" : "error"), title);
+    let status = anyUnknown ? "pending" : (hasWorkflow === true && hasGen === true ? "success" : anyTrue ? "warning" : "error");
+    if (enrichmentActive && status !== "success") {
+        status = "pending";
+        title = "Pending: database metadata enrichment in progress";
+    }
+    applyAssetStatusDotState(dot, status, title);
     dot.textContent = "\u25CF";
     dot.title = `${title}\nClick to rescan this file`;
 

@@ -11,7 +11,7 @@ import { pickRootId } from "../../utils/ids.js";
 import { DND_GLOBAL_KEY, DND_INSTANCE_VERSION, DND_MIME } from "./utils/constants.js";
 import { dndLog } from "./utils/log.js";
 import { buildPayloadViewURL, getDraggedAsset } from "./utils/payload.js";
-import { getDownloadMimeForFilename, isVideoPayload } from "./utils/video.js";
+import { isManagedPayload } from "./utils/video.js";
 import { isCanvasDropTarget, markCanvasDirty } from "./targets/canvas.js";
 import { applyDragOutToOS } from "./out/DragOut.js";
 import {
@@ -19,7 +19,7 @@ import {
     clearHighlight,
     ensureComboHasValue,
     getNodeUnderClientXY,
-    pickBestVideoPathWidget
+    pickBestMediaPathWidget
 } from "./targets/node.js";
 import { stageToInput, stageToInputDetailed } from "./staging/stageToInput.js";
 
@@ -183,6 +183,8 @@ export const bindAssetDragStart = (containerEl) => {
 
             const asset = card._mjrAsset;
             if (!asset || typeof asset !== "object") return;
+            const kind = String(asset?.kind || "").toLowerCase();
+            const isManagedMedia = kind === "video" || kind === "audio";
 
             const type = String(asset?.type || "output").toLowerCase();
             const payload = {
@@ -190,14 +192,16 @@ export const bindAssetDragStart = (containerEl) => {
                 subfolder: asset.subfolder || "",
                 type,
                 root_id: pickRootId(asset) || undefined,
-                kind: asset.kind
+                kind
             };
 
             try {
                 dt.setData(DND_MIME, JSON.stringify(payload));
                 dt.setData("text/plain", String(asset.filename || ""));
-                const viewUrl = buildURL(payload);
-                applyDragOutToOS({ dt, asset, containerEl, card, viewUrl });
+                if (isManagedMedia) {
+                    const viewUrl = buildURL(payload);
+                    applyDragOutToOS({ dt, asset, containerEl, card, viewUrl });
+                }
             } catch {}
 
             const preview = card.querySelector("img") || card.querySelector("video");
@@ -237,11 +241,11 @@ export const initDragDrop = () => {
         const types = Array.from(event?.dataTransfer?.types || []);
         if (!types.includes(DND_MIME)) return;
         const payload = getDraggedAsset(event, DND_MIME);
-        if (!isVideoPayload(payload)) return;
+        if (!isManagedPayload(payload)) return;
 
         const node = getNodeUnderClientXY(app, event.clientX, event.clientY);
         const droppedExt = String(payload?.filename || "").split(".").pop() || "";
-        const widget = node ? pickBestVideoPathWidget(node, droppedExt) : null;
+        const widget = node ? pickBestMediaPathWidget(node, payload, droppedExt) : null;
 
         if (node && widget) {
             event.preventDefault();
@@ -263,12 +267,12 @@ export const initDragDrop = () => {
         const types = Array.from(event?.dataTransfer?.types || []);
         if (!types.includes(DND_MIME)) return;
         const payload = getDraggedAsset(event, DND_MIME);
-        if (!isVideoPayload(payload)) return;
+        if (!isManagedPayload(payload)) return;
         if (!isCanvasDropTarget(app, event)) return;
 
         const node = getNodeUnderClientXY(app, event.clientX, event.clientY);
         const droppedExt = String(payload?.filename || "").split(".").pop() || "";
-        const widget = node ? pickBestVideoPathWidget(node, droppedExt) : null;
+        const widget = node ? pickBestMediaPathWidget(node, payload, droppedExt) : null;
 
         if (!node || !widget) {
             clearHighlight(app, markCanvasDirty);

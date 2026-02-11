@@ -93,3 +93,7 @@ VERSION
 AGENTS.md
 eslint.config.js
 VERSION
+package-lock.json
+package.json
+.claude/settings.local.json
+.claude/settings.local.json

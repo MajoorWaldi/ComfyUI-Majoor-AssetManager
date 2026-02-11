@@ -14,6 +14,8 @@ import { renderAssetsManager, getActiveGridContainer } from "./features/panel/As
 import { extractOutputFiles } from "./utils/extractOutputFiles.js";
 import { post } from "./api/client.js";
 import { ENDPOINTS } from "./api/endpoints.js";
+import { comfyToast } from "./app/toast.js";
+import { t } from "./app/i18n.js";
 
 const UI_FLAGS = {
     useComfyThemeUI: true,
@@ -124,6 +126,12 @@ app.registerExtension({
                     api.removeEventListener("execution_error", api._mjrExecutionEndHandler);
                     api.removeEventListener("execution_interrupted", api._mjrExecutionEndHandler);
                 }
+                if (api._mjrEnrichmentStatusHandler) {
+                    api.removeEventListener("mjr-enrichment-status", api._mjrEnrichmentStatusHandler);
+                }
+                if (api._mjrDbRestoreStatusHandler) {
+                    api.removeEventListener("mjr-db-restore-status", api._mjrDbRestoreStatusHandler);
+                }
             } catch {}
 
             // Listen for ComfyUI execution - extract output files and send to backend
@@ -186,6 +194,67 @@ app.registerExtension({
                 } catch {}
             };
             api.addEventListener("mjr-scan-complete", api._mjrScanCompleteHandler);
+
+            api._mjrEnrichmentStatusHandler = (event) => {
+                try {
+                    const detail = event?.detail || {};
+                    const active = !!detail?.active;
+                    const prev = !!globalThis?._mjrEnrichmentActive;
+                    globalThis._mjrEnrichmentActive = active;
+                    window.dispatchEvent(new CustomEvent("mjr-enrichment-status", { detail }));
+                    if (prev !== active) {
+                        const grid = getActiveGridContainer();
+                        if (grid) loadAssets(grid, undefined, { reset: true });
+                    }
+                    if (prev && !active) {
+                        comfyToast(t("toast.enrichmentComplete", "Metadata enrichment complete"), "success", 2600);
+                    }
+                } catch {}
+            };
+            api.addEventListener("mjr-enrichment-status", api._mjrEnrichmentStatusHandler);
+
+            api._mjrDbRestoreStatusHandler = (event) => {
+                try {
+                    const detail = event?.detail || {};
+                    const step = String(detail?.step || "");
+                    const level = String(detail?.level || "info");
+                    const op = String(detail?.operation || "");
+                    window.dispatchEvent(new CustomEvent("mjr-db-restore-status", { detail }));
+                    const isDelete = op === "delete_db";
+                    const isReset = op === "reset_index";
+                    const map = {
+                        started: isDelete
+                            ? t("toast.dbDeleteTriggered", "Deleting database and rebuilding...")
+                            : isReset
+                            ? t("toast.resetTriggered", "Reset triggered: Reindexing all files...")
+                            : t("toast.dbRestoreStarted", "DB restore started"),
+                        stopping_workers: t("toast.dbRestoreStopping", "Stopping running workers"),
+                        resetting_db: t("toast.dbRestoreResetting", "Unlocking and resetting database"),
+                        delete_db: t("toast.dbDeleteTriggered", "Deleting database and rebuilding..."),
+                        recreate_db: t("toast.dbRestoreReplacing", "Recreating database"),
+                        replacing_files: t("toast.dbRestoreReplacing", "Replacing database files"),
+                        restarting_scan: t("toast.dbRestoreRescan", "Restarting scan"),
+                        done: isDelete
+                            ? t("toast.dbDeleteSuccess", "Database deleted and rebuilt. Files are being reindexed.")
+                            : isReset
+                            ? t("toast.resetStarted", "Index reset started. Files will be reindexed in the background.")
+                            : t("toast.dbRestoreSuccess", "Database backup restored"),
+                        failed: String(
+                            detail?.message
+                                || (isDelete
+                                    ? t("toast.dbDeleteFailed", "Failed to delete database")
+                                    : isReset
+                                    ? t("toast.resetFailed", "Failed to reset index")
+                                    : t("toast.dbRestoreFailed", "Failed to restore DB backup"))
+                        ),
+                    };
+                    const msg = map[step] || String(detail?.message || "");
+                    if (!msg) return;
+                    const tone = level === "error" || step === "failed" ? "error" : step === "done" ? "success" : "info";
+                    comfyToast(msg, tone, step === "done" || step === "failed" ? 2800 : 1800);
+                } catch {}
+            };
+            api.addEventListener("mjr-db-restore-status", api._mjrDbRestoreStatusHandler);
 
             console.log("📂 Majoor [✅] Real-time listener registered");
         } else {

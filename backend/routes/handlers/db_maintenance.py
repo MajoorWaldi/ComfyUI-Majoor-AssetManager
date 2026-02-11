@@ -5,14 +5,16 @@ Database maintenance endpoints (safe, opt-in).
 from __future__ import annotations
 
 import datetime
+import gc
 import shutil
 import sqlite3
 import threading
+import asyncio
 from pathlib import Path
 
 from aiohttp import web
 
-from backend.config import INDEX_DB_PATH
+from backend.config import INDEX_DB_PATH, OUTPUT_ROOT_PATH
 from backend.shared import Result, get_logger
 from ..core import _json_response, _csrf_error, _require_services, safe_error_message
 
@@ -97,6 +99,41 @@ def _sqlite_backup_file(src: Path, dst: Path) -> None:
             src_conn.backup(dst_conn)
 
 
+def _emit_restore_status(step: str, level: str = "info", message: str | None = None, **extra) -> None:
+    try:
+        from ..registry import PromptServer
+        payload = {"step": str(step or ""), "level": str(level or "info")}
+        if message:
+            payload["message"] = str(message)
+        if extra:
+            payload.update(extra)
+        PromptServer.instance.send_sync("mjr-db-restore-status", payload)
+    except Exception:
+        pass
+
+
+async def _remove_with_retry(path: Path, attempts: int = 6) -> None:
+    if not path.exists():
+        return
+    last_exc = None
+    for attempt in range(max(1, int(attempts))):
+        try:
+            path.unlink()
+            return
+        except Exception as exc:
+            last_exc = exc
+            gc.collect()
+            await asyncio.sleep(0.2 * (attempt + 1))
+    if path.exists():
+        raise last_exc or RuntimeError(f"Failed to delete file: {path}")
+
+
+async def _replace_db_from_backup(src: Path, dst: Path) -> None:
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        await _remove_with_retry(Path(str(dst) + suffix))
+    await asyncio.to_thread(shutil.copy2, src, dst)
+
+
 def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
     """Register database maintenance routes."""
     @routes.post("/mjr/am/db/optimize")
@@ -158,6 +195,7 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
             return _json_response(Result.Err("CSRF", csrf))
 
         set_db_maintenance_active(True)
+        _emit_restore_status("started", "info", operation="delete_db")
         watcher_was_running = False
         # Best-effort: get services, but don't fail if DB is broken
         svc = None
@@ -169,6 +207,12 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
                 db = svc.get("db")
                 index_service = svc.get("index")
                 watcher_was_running = await _stop_watcher_if_running(svc)
+                _emit_restore_status("stopping_workers", "info", operation="delete_db")
+                if index_service and hasattr(index_service, "stop_enrichment"):
+                    try:
+                        await index_service.stop_enrichment(clear_queue=True)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -177,19 +221,23 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
             # 1. Try to drain the adapter's connections (best-effort)
             if db is not None:
                 try:
+                    _emit_restore_status("delete_db", "info", operation="delete_db")
                     await db.areset()
                     logger.info("DB adapter areset() succeeded")
+                    _emit_restore_status("recreate_db", "info", operation="delete_db")
                     # If areset worked, skip the manual file deletion
                     started_scans = []
                     if index_service:
                         try:
                             base_path = str(OUTPUT_ROOT_PATH)
+                            _emit_restore_status("restarting_scan", "info", operation="delete_db")
                             asyncio.create_task(
                                 index_service.scan_directory(base_path, recursive=True, incremental=False)
                             )
                             started_scans.append(base_path)
                         except Exception:
                             pass
+                    _emit_restore_status("done", "success", operation="delete_db")
                     return _json_response(Result.Ok({
                         "method": "adapter_reset",
                         "deleted": True,
@@ -212,6 +260,7 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
             base = str(INDEX_DB_PATH)
             deleted_files = []
             failed_files = []
+            _emit_restore_status("delete_db", "info", operation="delete_db")
             for suffix in ("", "-wal", "-shm", "-journal"):
                 p = Path(base + suffix)
                 if not p.exists():
@@ -244,6 +293,7 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
             # 4. Re-initialize the DB adapter so it creates a fresh database
             if db is not None:
                 try:
+                    _emit_restore_status("recreate_db", "info", operation="delete_db")
                     db._init_db()
                     from backend.adapters.db.schema import ensure_tables_exist, ensure_indexes_and_triggers
                     await ensure_tables_exist(db)
@@ -257,6 +307,7 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
             if index_service is not None:
                 try:
                     base_path = str(OUTPUT_ROOT_PATH)
+                    _emit_restore_status("restarting_scan", "info", operation="delete_db")
                     asyncio.create_task(
                         index_service.scan_directory(base_path, recursive=True, incremental=False)
                     )
@@ -264,11 +315,15 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
                 except Exception:
                     pass
 
+            _emit_restore_status("done", "success", operation="delete_db")
             return _json_response(Result.Ok({
                 "method": "manual_delete",
                 "deleted_files": deleted_files,
                 "scans_triggered": started_scans,
             }))
+        except Exception as exc:
+            _emit_restore_status("failed", "error", safe_error_message(exc, "Delete DB failed"), operation="delete_db")
+            return _json_response(Result.Err("DB_ERROR", safe_error_message(exc, "Delete DB failed")))
         finally:
             try:
                 await _restart_watcher_if_needed(svc if isinstance(svc, dict) else None, watcher_was_running)
@@ -359,21 +414,35 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
             return _json_response(Result.Err("DB_ERROR", safe_error_message(exc, "Failed to resolve backup file")))
 
         set_db_maintenance_active(True)
+        _emit_restore_status("started", "info", operation="restore_db")
         svc, error_result = await _require_services()
         if error_result:
             set_db_maintenance_active(False)
+            _emit_restore_status("failed", "error", error_result.error if hasattr(error_result, "error") else None, operation="restore_db")
             return _json_response(error_result)
         db = svc.get("db") if isinstance(svc, dict) else None
+        index_service = svc.get("index") if isinstance(svc, dict) else None
         if not db:
             set_db_maintenance_active(False)
+            _emit_restore_status("failed", "error", "Database service unavailable", operation="restore_db")
             return _json_response(Result.Err("SERVICE_UNAVAILABLE", "Database service unavailable"))
         watcher_was_running = await _stop_watcher_if_running(svc if isinstance(svc, dict) else None)
 
         try:
+            _emit_restore_status("stopping_workers", "info", operation="restore_db")
+            if index_service and hasattr(index_service, "stop_enrichment"):
+                try:
+                    await index_service.stop_enrichment(clear_queue=True)
+                except Exception:
+                    pass
+
+            _emit_restore_status("resetting_db", "info", operation="restore_db")
             reset_res = await db.areset()
             if not reset_res.ok:
+                _emit_restore_status("failed", "error", reset_res.error or "Failed to reset DB", operation="restore_db")
                 return _json_response(Result.Err(reset_res.code or "DB_ERROR", reset_res.error or "Failed to reset DB"))
-            shutil.copy2(src, INDEX_DB_PATH)
+            _emit_restore_status("replacing_files", "info", operation="restore_db")
+            await _replace_db_from_backup(src, INDEX_DB_PATH)
             try:
                 db._init_db()
             except Exception:
@@ -384,7 +453,25 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
                 await migrate_schema(db)
             except Exception:
                 pass
+
+            scans_triggered: list[str] = []
+            if index_service:
+                _emit_restore_status("restarting_scan", "info", operation="restore_db")
+                try:
+                    out_path = str(Path(OUTPUT_ROOT_PATH).resolve())
+                    asyncio.create_task(index_service.scan_directory(out_path, recursive=True, incremental=False, source="output"))
+                    scans_triggered.append(out_path)
+                except Exception:
+                    pass
+                try:
+                    import folder_paths  # type: ignore
+                    input_path = str(Path(folder_paths.get_input_directory()).resolve())
+                    asyncio.create_task(index_service.scan_directory(input_path, recursive=True, incremental=False, source="input"))
+                    scans_triggered.append(input_path)
+                except Exception:
+                    pass
         except Exception as exc:
+            _emit_restore_status("failed", "error", safe_error_message(exc, "Failed to restore DB backup"), operation="restore_db")
             return _json_response(Result.Err("DB_ERROR", safe_error_message(exc, "Failed to restore DB backup")))
         finally:
             try:
@@ -392,5 +479,21 @@ def register_db_maintenance_routes(routes: web.RouteTableDef) -> None:
             except Exception:
                 pass
             set_db_maintenance_active(False)
-
-        return _json_response(Result.Ok({"restored": True, "name": src.name, "path": str(src)}))
+        _emit_restore_status("done", "success", "Database restore completed", operation="restore_db")
+        return _json_response(
+            Result.Ok(
+                {
+                    "restored": True,
+                    "name": src.name,
+                    "path": str(src),
+                    "scans_triggered": scans_triggered if "scans_triggered" in locals() else [],
+                    "steps": [
+                        "stopping_workers",
+                        "resetting_db",
+                        "replacing_files",
+                        "restarting_scan",
+                        "done",
+                    ],
+                }
+            )
+        )

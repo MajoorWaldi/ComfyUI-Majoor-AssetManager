@@ -77,3 +77,31 @@ async def test_geninfo_detects_a2a_workflow_type() -> None:
     inputs = res.data.get("inputs") or []
     assert isinstance(inputs, list) and inputs
     assert any(str(i.get("type")) == "audio" for i in inputs if isinstance(i, dict))
+
+
+@pytest.mark.asyncio
+async def test_geninfo_acestep15tasktextencode_reads_lyrics_textbox() -> None:
+    prompt = {
+        "15": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "ace_step.safetensors"}},
+        "18": {
+            "class_type": "ACEStep15TaskTextEncode",
+            "inputs": {
+                "clip": ["15", 1],
+                "task_text": "[Verse]\\nhello from textbox lyrics",
+            },
+        },
+        "47": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["18", 0]}},
+        "17": {"class_type": "EmptyAceStepLatentAudio", "inputs": {}, "widgets_values": [150, 1]},
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {"model": ["15", 0], "positive": ["18", 0], "negative": ["47", 0], "latent_image": ["17", 0]},
+            "widgets_values": [123, "fixed", 30, 4.5, "euler", "simple", 1.0],
+        },
+        "19": {"class_type": "SaveAudio", "inputs": {"audio": ["3", 0]}},
+    }
+
+    res = parse_geninfo_from_prompt(prompt)
+    assert res.ok
+    assert isinstance(res.data, dict)
+    lyrics = str((res.data.get("lyrics") or {}).get("value") or "")
+    assert "hello from textbox lyrics" in lyrics

@@ -328,6 +328,7 @@ export function createStatusIndicator(options = {}) {
         }
         const confirmed = confirm(t("dialog.dbRestore.confirm", "Restore selected DB backup? Current DB will be replaced."));
         if (!confirmed) return;
+        comfyToast(t("toast.dbRestoreStarted", "DB restore started"), "info", 1800);
         globalThis._mjrMaintenanceActive = true;
         const original = restoreDbBtn.textContent;
         restoreDbBtn.disabled = true;
@@ -337,7 +338,6 @@ export function createStatusIndicator(options = {}) {
         try {
             const res = await restoreDbBackup({ name: selected, useLatest: false });
             if (res?.ok) {
-                comfyToast(t("toast.dbRestoreSuccess", "Database backup restored"), "success", 2800);
                 await refreshBackups();
             } else {
                 comfyToast(res?.error || t("toast.dbRestoreFailed", "Failed to restore DB backup"), "error");
@@ -387,8 +387,6 @@ export function createStatusIndicator(options = {}) {
         event.stopPropagation();
         globalThis._mjrMaintenanceActive = true;
 
-        comfyToast(t("toast.resetTriggered"), "warning", 3000);
-
         const originalText = resetBtn.textContent;
         resetBtn.disabled = true;
         resetBtn.textContent = t("btn.resetting");
@@ -418,28 +416,13 @@ export function createStatusIndicator(options = {}) {
             if (res?.ok) {
                 statusDot.style.background = "var(--mjr-status-success, #4CAF50)";
                 applyStatusHighlight(section, "success");
-                comfyToast(t("toast.resetStarted"), "success");
             } else {
                 statusDot.style.background = "var(--mjr-status-error, #f44336)";
                 applyStatusHighlight(section, "error");
-                const err = String(res?.error || "").toLowerCase();
-                const isCorrupt = err.includes("malform") || err.includes("corrupt") || err.includes("disk image") || res?.code === "SERVICE_UNAVAILABLE" || res?.code === "QUERY_FAILED";
-                if (isCorrupt) {
-                    comfyToast(t("toast.resetFailedCorrupt"), "error", 8000);
-                } else {
-                    comfyToast(res?.error || t("toast.resetFailed"), "error");
-                }
             }
-        } catch (error) {
+        } catch (_error) {
             statusDot.style.background = "var(--mjr-status-error, #f44336)";
             applyStatusHighlight(section, "error");
-            const msg = String(error?.message || "").toLowerCase();
-            const isCorrupt = msg.includes("malform") || msg.includes("corrupt") || msg.includes("disk image");
-            if (isCorrupt) {
-                comfyToast(t("toast.resetFailedCorrupt"), "error", 8000);
-            } else {
-                comfyToast(error?.message || t("toast.resetFailed"), "error");
-            }
         } finally {
             globalThis._mjrMaintenanceActive = false;
             resetBtn.disabled = false;
@@ -482,8 +465,6 @@ export function createStatusIndicator(options = {}) {
         if (!confirmed) return;
         globalThis._mjrMaintenanceActive = true;
 
-        comfyToast(t("toast.dbDeleteTriggered"), "warning", 3000);
-
         const originalText = deleteDbBtn.textContent;
         deleteDbBtn.disabled = true;
         deleteDbBtn.textContent = t("btn.deletingDb");
@@ -498,16 +479,13 @@ export function createStatusIndicator(options = {}) {
                 globalThis._mjrCorruptToastShown = false;
                 statusDot.style.background = "var(--mjr-status-success, #4CAF50)";
                 applyStatusHighlight(section, "success");
-                comfyToast(t("toast.dbDeleteSuccess"), "success");
             } else {
                 statusDot.style.background = "var(--mjr-status-error, #f44336)";
                 applyStatusHighlight(section, "error");
-                comfyToast(res?.error || t("toast.dbDeleteFailed"), "error");
             }
-        } catch (error) {
+        } catch (_error) {
             statusDot.style.background = "var(--mjr-status-error, #f44336)";
             applyStatusHighlight(section, "error");
-            comfyToast(error?.message || t("toast.dbDeleteFailed"), "error");
         } finally {
             globalThis._mjrMaintenanceActive = false;
             deleteDbBtn.disabled = false;
@@ -548,6 +526,72 @@ export function createStatusIndicator(options = {}) {
         section.style.transform = "";
         applyStatusHighlight(section, section.dataset?.mjrStatusTone || "neutral", { toast: false });
     };
+
+    const onDbRestoreStatus = async (event) => {
+        try {
+            if (!section?.isConnected || !statusDot?.isConnected || !statusText?.isConnected) return;
+            const detail = event?.detail || {};
+            const step = String(detail?.step || "");
+            if (!step) return;
+
+            if (
+                step === "started" ||
+                step === "stopping_workers" ||
+                step === "resetting_db" ||
+                step === "delete_db" ||
+                step === "recreate_db" ||
+                step === "replacing_files" ||
+                step === "restarting_scan"
+            ) {
+                globalThis._mjrMaintenanceActive = true;
+                statusDot.style.background = "var(--mjr-status-info, #64B5F6)";
+                applyStatusHighlight(section, "info", { toast: false });
+                setStatusWithHint(
+                    statusText,
+                    t("status.pending", "Pending..."),
+                    t("status.dbRestoreInProgress", "Database restore in progress")
+                );
+                return;
+            }
+
+            if (step === "failed") {
+                globalThis._mjrMaintenanceActive = false;
+                statusDot.style.background = "var(--mjr-status-error, #f44336)";
+                applyStatusHighlight(section, "error", { toast: false });
+                setStatusLines(statusText, [
+                    t("status.error", "Error"),
+                    String(detail?.message || t("toast.dbRestoreFailed", "Failed to restore DB backup")),
+                ]);
+                return;
+            }
+
+            if (step === "done") {
+                globalThis._mjrMaintenanceActive = false;
+                statusDot.style.background = "var(--mjr-status-success, #4CAF50)";
+                applyStatusHighlight(section, "success", { toast: false });
+                setStatusWithHint(
+                    statusText,
+                    t("status.ready", "Ready"),
+                    t("toast.dbRestoreSuccess", "Database backup restored")
+                );
+                try {
+                    const target = getScanContext ? getScanContext() : null;
+                    setTimeout(() => {
+                        void updateStatus(statusDot, statusText, capabilities, target);
+                    }, 600);
+                } catch {}
+            }
+        } catch {}
+    };
+    try {
+        const old = window.__MJR_DB_RESTORE_STATUS_HANDLER;
+        if (typeof old === "function") {
+            window.removeEventListener("mjr-db-restore-status", old);
+        }
+        window.__MJR_DB_RESTORE_STATUS_HANDLER = onDbRestoreStatus;
+        section._mjrDbRestoreStatusHandler = onDbRestoreStatus;
+        window.addEventListener("mjr-db-restore-status", onDbRestoreStatus);
+    } catch {}
 
     return section;
 }

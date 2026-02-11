@@ -46,6 +46,15 @@ AUTOCOMPLETE_RATE_LIMIT_WINDOW_SECONDS = 60
 logger = get_logger(__name__)
 
 
+def _touch_enrichment_pause(services: dict | None, seconds: float = 1.5) -> None:
+    try:
+        idx = (services or {}).get("index") if isinstance(services, dict) else None
+        if idx and hasattr(idx, "pause_enrichment_for_interaction"):
+            idx.pause_enrichment_for_interaction(seconds=seconds)
+    except Exception:
+        pass
+
+
 def _date_bounds_for_range(range_name, reference=None):
     if not range_name:
         return (None, None)
@@ -181,6 +190,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
         services, error = await _require_services()
         if error:
              return _json_response(error)
+        _touch_enrichment_pause(services, seconds=1.2)
 
         # services["index"] is user's IndexService instance
         # IndexService exposes .searcher as a public attribute
@@ -271,6 +281,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
             subfolder = request.query.get("subfolder", "")
             root_dir = Path(folder_paths.get_input_directory())
             svc, _ = await _require_services()
+            _touch_enrichment_pause(svc, seconds=1.5)
 
             # If index service is available, try DB-first approach
             if svc and svc.get("index"):
@@ -321,6 +332,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
                 return _json_response(root_result)
             root_dir = root_result.data
             svc, _ = await _require_services()
+            _touch_enrichment_pause(svc, seconds=1.5)
 
             # If index service is available, try DB-first approach
             if svc and svc.get("index"):
@@ -369,6 +381,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
         svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
+        _touch_enrichment_pause(svc, seconds=1.5)
 
         output_root = str(Path(OUTPUT_ROOT).resolve(strict=False))
         input_root = str(Path(folder_paths.get_input_directory()).resolve(strict=False))
@@ -672,6 +685,7 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
         svc, error_result = await _require_services()
         if error_result:
             return _json_response(error_result)
+        _touch_enrichment_pause(svc, seconds=1.5)
 
         raw_query = request.query.get("q", "").strip()
         parsed_query, inline_filters = _parse_inline_query_filters(raw_query)

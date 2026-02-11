@@ -183,7 +183,13 @@ def extract_audio_metadata(
             if not parsed:
                 continue
             metadata["parameters"] = text
-            metadata.update(parsed)
+            # Preserve already-parsed ComfyUI structures. Some free-text fields can
+            # produce a "prompt" string via A1111 parser and must not clobber a real
+            # prompt graph dict extracted from metadata tags.
+            for key, value in parsed.items():
+                if key in ("workflow", "prompt") and isinstance(metadata.get(key), dict):
+                    continue
+                metadata[key] = value
             if metadata["quality"] != "full":
                 metadata["quality"] = "partial"
             break

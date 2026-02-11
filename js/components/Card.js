@@ -731,6 +731,7 @@ function createThumbnail(asset, viewUrl) {
         video.playsInline = true;
         video.preload = "metadata";
         video.classList.add("mjr-thumb-media");
+        video.draggable = false;
         video.dataset.src = viewUrl;
         if (poster) video.poster = poster;
         video.controls = false;
@@ -776,6 +777,8 @@ function createThumbnail(asset, viewUrl) {
             img.src = AUDIO_THUMB_URL;
             img.alt = asset.filename || "Audio";
             img.classList.add("mjr-thumb-media");
+            // Critical for audio DnD: avoid dragging the static thumbnail image URL.
+            img.draggable = false;
             try {
                 img.loading = "lazy";
                 img.decoding = "async";

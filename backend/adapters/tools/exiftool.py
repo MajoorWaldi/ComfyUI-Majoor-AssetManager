@@ -300,7 +300,8 @@ class ExifTool:
             process = _run(cmd, stdin_input)
 
             if os.name == "nt" and process.returncode != 0:
-                stderr_msg = (process.stderr or "").strip()
+                stderr_msg, _ = _decode_bytes_best_effort(process.stderr)
+                stderr_msg = stderr_msg.strip()
                 # Retry only for the specific "file not found" failure mode; avoid
                 # masking other errors (invalid tags, parse errors, etc.).
                 if "file not found" in stderr_msg.lower():

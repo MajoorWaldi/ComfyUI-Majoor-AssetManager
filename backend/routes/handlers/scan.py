@@ -44,9 +44,6 @@ from ..core import (
     _json_response,
     _require_services,
     _csrf_error,
-    _require_operation_enabled,
-    _resolve_security_prefs,
-    _require_write_access,
     _check_rate_limit,
     _read_json,
     safe_error_message,
@@ -58,6 +55,19 @@ from ..core import (
 )
 
 logger = get_logger(__name__)
+
+
+def _emit_maintenance_status(step: str, level: str = "info", message: str | None = None, **extra) -> None:
+    try:
+        from ..registry import PromptServer
+        payload = {"step": str(step or ""), "level": str(level or "info")}
+        if message:
+            payload["message"] = str(message)
+        if extra:
+            payload.update(extra)
+        PromptServer.instance.send_sync("mjr-db-restore-status", payload)
+    except Exception:
+        pass
 
 _DEFAULT_MAX_UPLOAD_SIZE_BYTES = 500 * 1024 * 1024
 _DB_CONSISTENCY_SAMPLE = int(os.environ.get("MJR_DB_CONSISTENCY_SAMPLE", "32"))
@@ -962,22 +972,9 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
         if not body_res.ok:
             return _json_response(body_res)
         body = body_res.data or {}
-        maintenance_force = parse_bool(
-            body.get("maintenance_force")
-            or body.get("force_maintenance")
-            or body.get("force_reset"),
-            False,
-        )
-
-        if not maintenance_force:
-            prefs = await _resolve_security_prefs(svc)
-            op = _require_operation_enabled("reset_index", prefs=prefs)
-            if not op.ok:
-                return _json_response(op)
-
-            auth = _require_write_access(request)
-            if not auth.ok:
-                return _json_response(auth)
+        # Access model aligned with DB maintenance endpoints (force-delete / backup-restore):
+        # CSRF check only, no additional write-token / allow_reset_index gate.
+        _emit_maintenance_status("started", "info", operation="reset_index")
 
         def _bool_option(keys, default):
             for key in keys:
@@ -1054,6 +1051,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
 
         db = svc.get("db")
         if not db:
+            _emit_maintenance_status("failed", "error", "Database service unavailable", operation="reset_index")
             return _json_response(Result.Err("SERVICE_UNAVAILABLE", "Database service unavailable"))
 
         # Best-effort coordination with concurrent scans.
@@ -1062,6 +1060,12 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
         try:
             index_svc = svc.get("index")
             scan_lock = getattr(index_svc, "_scan_lock", None)
+            _emit_maintenance_status("stopping_workers", "info", operation="reset_index")
+            if index_svc and hasattr(index_svc, "stop_enrichment"):
+                try:
+                    await index_svc.stop_enrichment(clear_queue=True)
+                except Exception:
+                    pass
         except Exception:
             scan_lock = None
 
@@ -1074,6 +1078,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
 
         if should_hard_reset_db:
             # 1) Hard reset DB files (includes -wal/-shm) using adapter logic (Windows-safe).
+            _emit_maintenance_status("resetting_db", "info", operation="reset_index")
             try:
                 if scan_lock is not None and hasattr(scan_lock, "__aenter__"):
                     async with scan_lock:
@@ -1082,11 +1087,13 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                     reset_res = await db.areset()
             except Exception as exc:
                 logger.exception("Hard reset DB failed")
+                _emit_maintenance_status("failed", "error", sanitize_error_message(exc, "Hard reset failed"), operation="reset_index")
                 return _json_response(
                     Result.Err("RESET_FAILED", sanitize_error_message(exc, "Hard reset failed"))
                 )
 
             if not reset_res.ok:
+                _emit_maintenance_status("failed", "error", reset_res.error or "Hard reset failed", operation="reset_index")
                 return _json_response(reset_res)
 
             cleared = {
@@ -1103,7 +1110,9 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
             totals = {key: 0 for key in ("scanned", "added", "updated", "skipped", "errors")}
             if reindex:
                 if not svc.get("index"):
+                    _emit_maintenance_status("failed", "error", "Index service unavailable", operation="reset_index")
                     return _json_response(Result.Err("SERVICE_UNAVAILABLE", "Index service unavailable"))
+                _emit_maintenance_status("restarting_scan", "info", operation="reset_index")
                 for target in target_roots:
                     try:
                         result = await asyncio.wait_for(
@@ -1119,9 +1128,11 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                             timeout=TO_THREAD_TIMEOUT_S,
                         )
                     except asyncio.TimeoutError:
+                        _emit_maintenance_status("failed", "error", "Index reset scan timed out", operation="reset_index")
                         return _json_response(Result.Err("TIMEOUT", "Index reset scan timed out"))
                     except Exception as exc:
                         logger.exception("Index reset scan failed")
+                        _emit_maintenance_status("failed", "error", sanitize_error_message(exc, "Index reset scan failed"), operation="reset_index")
                         return _json_response(
                             Result.Err(
                                 "RESET_FAILED",
@@ -1130,6 +1141,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                         )
 
                     if not result.ok:
+                        _emit_maintenance_status("failed", "error", result.error or "Index reset scan failed", operation="reset_index")
                         return _json_response(result)
 
                     stats = result.data or {}
@@ -1152,6 +1164,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
             }
 
             # No need to VACUUM or rebuild FTS here: db.areset() reinitializes schema + indexes.
+            _emit_maintenance_status("done", "success", operation="reset_index")
             return _json_response(Result.Ok({"cleared": cleared, "scan_summary": scan_summary, "rebuild_fts": None}))
 
         async def _clear_table(table: str, prefixes: list[str] | None) -> Result[int]:
@@ -1244,6 +1257,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
             return Result.Ok(cleared)
 
         try:
+            _emit_maintenance_status("resetting_db", "info", operation="reset_index")
             if scan_lock is not None and hasattr(scan_lock, "__aenter__"):
                 async with scan_lock:
                     res = await _do_clears()
@@ -1251,6 +1265,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                 res = await _do_clears()
         except Exception as exc:
             logger.exception("Index reset clear phase failed")
+            _emit_maintenance_status("failed", "error", sanitize_error_message(exc, "Index reset failed during clear phase"), operation="reset_index")
             return _json_response(
                 Result.Err(
                     "RESET_FAILED",
@@ -1269,6 +1284,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                         reset_res = await db.areset()
                 except Exception as exc:
                     logger.exception("Fallback hard reset after malformed DB failed")
+                    _emit_maintenance_status("failed", "error", sanitize_error_message(exc, "Malformed DB and fallback hard reset failed"), operation="reset_index")
                     return _json_response(
                         Result.Err(
                             "RESET_FAILED",
@@ -1276,6 +1292,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                         )
                     )
                 if not reset_res.ok:
+                    _emit_maintenance_status("failed", "error", reset_res.error or "Hard reset failed", operation="reset_index")
                     return _json_response(reset_res)
                 cleared = {
                     "scan_journal": None,
@@ -1288,6 +1305,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                 }
                 # Continue with optional reindex path below.
             else:
+                _emit_maintenance_status("failed", "error", res.error or "Index reset failed", operation="reset_index")
                 return _json_response(res)
 
         # FULL RESET CLEANUP: VACUUM and Physical Files
@@ -1329,6 +1347,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
         scan_details: list[dict[str, Any]] = []
         totals = {key: 0 for key in ("scanned", "added", "updated", "skipped", "errors")}
         if reindex:
+            _emit_maintenance_status("restarting_scan", "info", operation="reset_index")
             for target in target_roots:
                 try:
                     result = await asyncio.wait_for(
@@ -1344,9 +1363,11 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                         timeout=TO_THREAD_TIMEOUT_S,
                     )
                 except asyncio.TimeoutError:
+                    _emit_maintenance_status("failed", "error", "Index reset scan timed out", operation="reset_index")
                     return _json_response(Result.Err("TIMEOUT", "Index reset scan timed out"))
                 except Exception as exc:
                     logger.exception("Index reset scan failed")
+                    _emit_maintenance_status("failed", "error", sanitize_error_message(exc, "Index reset scan failed"), operation="reset_index")
                     return _json_response(
                         Result.Err(
                             "RESET_FAILED",
@@ -1355,6 +1376,7 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                     )
 
                 if not result.ok:
+                    _emit_maintenance_status("failed", "error", result.error or "Index reset scan failed", operation="reset_index")
                     return _json_response(result)
 
                 stats = result.data or {}
@@ -1387,13 +1409,16 @@ def register_scan_routes(routes: web.RouteTableDef) -> None:
                     return _json_response(Result.Err("DB_ERROR", tx.error or "Commit failed"))
             except Exception as exc:
                 logger.exception("FTS rebuild failed during index reset")
+                _emit_maintenance_status("failed", "error", sanitize_error_message(exc, "FTS rebuild failed"), operation="reset_index")
                 return _json_response(
                     Result.Err("DB_ERROR", sanitize_error_message(exc, "FTS rebuild failed"))
                 )
             if not rebuild_result.ok:
+                _emit_maintenance_status("failed", "error", rebuild_result.error or "FTS rebuild failed", operation="reset_index")
                 return _json_response(rebuild_result)
             rebuild_status = True
 
+        _emit_maintenance_status("done", "success", operation="reset_index")
         return _json_response(
             Result.Ok(
                 {

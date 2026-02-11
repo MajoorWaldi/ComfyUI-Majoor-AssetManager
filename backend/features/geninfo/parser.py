@@ -677,8 +677,15 @@ def _extract_lyrics_from_prompt_nodes(nodes_by_id: Dict[str, Dict[str, Any]]) ->
             continue
         ins = _inputs(node)
 
+        is_acestep_task = ("acestep15tasktextencode" in ct) or ("acesteptasktextencode" in ct)
+
         lyrics = None
-        for key in ("lyrics", "lyric", "lyric_text", "text_lyrics"):
+        lyric_keys = ("lyrics", "lyric", "lyric_text", "text_lyrics")
+        # ACEStep task encoders often store the full song text in a generic textbox.
+        if is_acestep_task:
+            lyric_keys = ("lyrics", "lyric", "lyric_text", "text_lyrics", "task_text", "task", "text")
+
+        for key in lyric_keys:
             v = ins.get(key)
             if isinstance(v, str) and v.strip():
                 lyrics = v.strip()
@@ -698,6 +705,18 @@ def _extract_lyrics_from_prompt_nodes(nodes_by_id: Dict[str, Dict[str, Any]]) ->
                 lyrics = widgets[1].strip()
             if strength is None and len(widgets) > 2:
                 strength = _scalar(widgets[2])
+        elif isinstance(widgets, dict):
+            for key in ("lyrics", "lyric_text", "text_lyrics", "task_text", "task", "text"):
+                v = widgets.get(key)
+                if isinstance(v, str) and v.strip():
+                    lyrics = lyrics or v.strip()
+                    break
+            if strength is None:
+                for key in ("lyrics_strength", "lyric_strength"):
+                    v = _scalar(widgets.get(key))
+                    if v is not None:
+                        strength = v
+                        break
 
         if isinstance(lyrics, str) and lyrics.strip():
             return lyrics, strength, f"{_node_type(node)}:{nid}"

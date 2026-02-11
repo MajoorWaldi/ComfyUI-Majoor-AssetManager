@@ -12,6 +12,16 @@ from ...config import get_tool_paths
 
 logger = get_logger(__name__)
 
+_DB_RESETTING_MSG = "database is resetting - connection rejected"
+
+
+def _is_db_resetting_error(exc: Exception) -> bool:
+    try:
+        return _DB_RESETTING_MSG in str(exc).lower()
+    except Exception:
+        return False
+
+
 class HealthService:
     """
     Health check service.
@@ -100,7 +110,10 @@ class HealthService:
                 }
 
         except Exception as e:
-            logger.error(f"Database check failed: {e}")
+            if _is_db_resetting_error(e):
+                logger.info("Database check deferred during DB maintenance/reset: %s", e)
+            else:
+                logger.error(f"Database check failed: {e}")
             return {
                 "available": False,
                 "schema_version": 0,
@@ -270,7 +283,10 @@ class HealthService:
             return Result.Ok(counters)
 
         except Exception as e:
-            logger.error(f"Failed to get counters: {e}")
+            if _is_db_resetting_error(e):
+                logger.info("Counters unavailable during DB maintenance/reset: %s", e)
+            else:
+                logger.error(f"Failed to get counters: {e}")
             return Result.Err("DB_ERROR", str(e))
 
     def _get_tool_capabilities(self) -> dict:

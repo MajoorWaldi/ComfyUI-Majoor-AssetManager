@@ -566,7 +566,28 @@ function showLoadingOverlay(gridContainer, message = "Loading assets...") {
         overlay = document.createElement("div");
         overlay.className = OVERLAY_CLASS;
     }
+    overlay.style.cssText = `
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 16px;
+        pointer-events: none;
+        font-size: 14px;
+        line-height: 1.4;
+        color: var(--muted-text, #bdbdbd);
+        background: rgba(0, 0, 0, 0.35);
+        z-index: 4;
+    `;
     overlay.textContent = message;
+    try {
+        const pos = String(getComputedStyle(gridContainer).position || "").toLowerCase();
+        if (!pos || pos === "static") {
+            gridContainer.style.position = "relative";
+        }
+    } catch {}
     if (!gridContainer.contains(overlay)) {
         gridContainer.appendChild(overlay);
     }
@@ -1191,6 +1212,8 @@ function appendAssets(gridContainer, assets, state) {
         const key = assetKey(asset);
         if (!key) continue;
         if (state.seenKeys.has(key)) continue;
+        // Defensive: also skip if an asset with the same id already exists
+        if (asset.id != null && state.assets.some(a => String(a.id) === String(asset.id))) continue;
         state.seenKeys.add(key);
         
         validNewAssets.push(asset);
@@ -1672,7 +1695,21 @@ export async function loadAssets(gridContainer, query = "*", options = {}) {
         try {
             gridContainer.dataset.mjrHiddenPngSiblings = "0";
         } catch {}
-        
+
+        // Discard any pending upsert batch to prevent stale partial assets
+        // from racing with the fresh API response.
+        try {
+            const batchState = UPSERT_BATCH_STATE.get(gridContainer);
+            if (batchState) {
+                if (batchState.timer) {
+                    clearTimeout(batchState.timer);
+                    batchState.timer = null;
+                }
+                batchState.pending.clear();
+                batchState.flushing = false;
+            }
+        } catch {}
+
         // Clear virtual grid items (but keep instance)
         const vg = ensureVirtualGrid(gridContainer, state);
         if (vg) vg.setItems([]);
@@ -2117,12 +2154,16 @@ function _flushUpsertBatch(gridContainer) {
                 state.assets[existingIndex] = { ...existingAsset };
                 modified = true;
             } else {
-                if (!state.seenKeys.has(key)) {
+                // Defensive: skip if already tracked by seenKeys OR if another asset
+                // with the same id somehow exists (guards against race conditions).
+                const alreadySeen = state.seenKeys.has(key) ||
+                    (asset.id != null && state.assets.some(a => String(a.id) === assetId));
+                if (!alreadySeen) {
                     const sortKey = gridContainer.dataset.mjrSort || "mtime_desc";
                     const insertPos = findInsertPosition(state.assets, asset, sortKey);
 
                     state.seenKeys.add(key);
-                    
+
                     // If insertion is near the top, mark re-sort to avoid large index shifts.
                     const shouldResort = insertPos <= Math.min(10, state.assets.length);
                     if (insertPos === -1) {
@@ -2345,7 +2386,7 @@ let _gridScanListenersBound = false;
 const _onScanComplete = (_e) => {
     try {
         if (typeof document === "undefined" || !document.querySelectorAll) return;
-        const grids = document.querySelectorAll(".mjr-grid-container");
+        const grids = document.querySelectorAll(".mjr-grid");
         for (const grid of grids) {
             try {
                 if (!grid?.isConnected) continue;

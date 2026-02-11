@@ -3,7 +3,8 @@
     "allow": [
       "Bash(ls:*)",
       "Bash(pip show:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(find:*)"
     ]
   }
 }
