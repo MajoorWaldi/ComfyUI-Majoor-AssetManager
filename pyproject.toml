@@ -1,7 +1,7 @@
 [project]
 name = "majoor-assetsmanager"
 description = "Majoor Assets Manager is an advanced asset browser for ComfyUI that provides a comprehensive solution for managing, organizing, and viewing your generated assets. It integrates directly into ComfyUI, offering features like full-text search, metadata extraction, rating and tagging systems, and advanced viewing capabilities."
-version = "2.3.2"
+version = "2.3.3"
 requires-python = ">=3.10, <3.15"
 license = {file = "LICENSE"} 
 authors = [

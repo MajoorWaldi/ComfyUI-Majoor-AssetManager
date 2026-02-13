@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [2.3.3] - 2026-02-13
 ### Added / Improved
 - Enhanced metadata extraction for the AC-Step (Ace Step) custom node.
 - Drag & Drop: stage dropped audio files to the node input (audio file staging).

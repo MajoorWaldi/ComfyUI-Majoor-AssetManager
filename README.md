@@ -86,7 +86,7 @@ You can install a specific release tag or the nightly branch by using the GitHub
 
 - Release tag (example):
 
-  https://github.com/MajoorWaldi/ComfyUI-Majoor-AssetsManager/archive/refs/tags/v2.3.2.zip
+  https://github.com/MajoorWaldi/ComfyUI-Majoor-AssetsManager/archive/refs/tags/v2.3.3.zip
 
 - Nightly / latest main branch (example):
 
