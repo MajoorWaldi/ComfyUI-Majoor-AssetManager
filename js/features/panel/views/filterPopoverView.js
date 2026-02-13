@@ -4,36 +4,14 @@ export function createFilterPopoverView() {
     const filterPopover = document.createElement("div");
     filterPopover.className = "mjr-popover mjr-filter-popover";
     filterPopover.style.display = "none";
-    filterPopover.style.cssText = `
-        display:none;
-        border: 1px solid rgba(120,180,255,0.35);
-        background: linear-gradient(180deg, rgba(16,24,36,0.96) 0%, rgba(11,16,24,0.96) 100%);
-        box-shadow: 0 14px 34px rgba(0,0,0,0.42), 0 0 0 1px rgba(130,185,255,0.16) inset;
-        border-radius: 12px;
-        padding: 12px;
-        min-width: 340px;
-    `;
+    filterPopover.style.cssText = "display:none;";
 
     const makeGroup = (title) => {
         const g = document.createElement("div");
         g.className = "mjr-filter-group";
-        g.style.cssText = `
-            border: 1px solid rgba(120,180,255,0.24);
-            background: linear-gradient(180deg, rgba(22,32,48,0.55), rgba(15,22,34,0.55));
-            border-radius: 10px;
-            padding: 10px;
-            margin-bottom: 10px;
-        `;
         const h = document.createElement("div");
+        h.className = "mjr-filter-group-title";
         h.textContent = title;
-        h.style.cssText = `
-            font-size: 11px;
-            font-weight: 700;
-            letter-spacing: 0.4px;
-            text-transform: uppercase;
-            color: rgba(167,209,255,0.95);
-            margin-bottom: 8px;
-        `;
         g.appendChild(h);
         return g;
     };
