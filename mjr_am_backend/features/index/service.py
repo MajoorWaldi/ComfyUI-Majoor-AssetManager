@@ -195,6 +195,10 @@ class IndexService:
                 mtime = None
 
             async with self.db.atransaction(mode="immediate"):
+                defer_fk = await self.db.aexecute("PRAGMA defer_foreign_keys = ON")
+                if not defer_fk.ok:
+                    return Result.Err("DB_ERROR", defer_fk.error or "Failed to defer foreign key checks")
+
                 if mtime is None:
                     upd = await self.db.aexecute(
                         "UPDATE assets SET filepath = ?, filename = ?, subfolder = ?, updated_at = CURRENT_TIMESTAMP WHERE filepath = ?",
@@ -208,14 +212,19 @@ class IndexService:
                 if not upd.ok:
                     return Result.Err("DB_ERROR", upd.error or "Failed to update asset filepath")
 
-                await self.db.aexecute(
+                sj = await self.db.aexecute(
                     "UPDATE scan_journal SET filepath = ?, dir_path = ?, mtime = COALESCE(?, mtime), last_seen = CURRENT_TIMESTAMP WHERE filepath = ?",
                     (new_fp, subfolder, mtime, old_fp),
                 )
-                await self.db.aexecute(
+                if not sj.ok:
+                    return Result.Err("DB_ERROR", sj.error or "Failed to update scan_journal filepath")
+
+                mc = await self.db.aexecute(
                     "UPDATE metadata_cache SET filepath = ?, last_updated = CURRENT_TIMESTAMP WHERE filepath = ?",
                     (new_fp, old_fp),
                 )
+                if not mc.ok:
+                    return Result.Err("DB_ERROR", mc.error or "Failed to update metadata_cache filepath")
         except Exception as exc:
             return Result.Err("DB_ERROR", str(exc))
 

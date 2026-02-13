@@ -922,10 +922,8 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
                 )
             )
 
-        db_updated = False
         # Update database record
         try:
-            # Update assets table
             try:
                 mtime = int(new_path.stat().st_mtime)
             except FileNotFoundError:
@@ -937,24 +935,39 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
                         _safe_error_message(exc, "Failed to stat renamed file"),
                     )
                 )
-            update_res = await svc["db"].aexecute(
-                "UPDATE assets SET filename = ?, filepath = ?, mtime = ? WHERE id = ?",
-                (new_name, str(new_path), mtime, asset_id)
-            )
-            if not update_res.ok:
-                return _json_response(update_res)
-            db_updated = True
 
-            # Update related tables - clean old cache entries
-            await svc["db"].aexecute("DELETE FROM scan_journal WHERE filepath = ?", (str(current_path),))
-            await svc["db"].aexecute("DELETE FROM metadata_cache WHERE filepath = ?", (str(current_path),))
+            async with svc["db"].atransaction(mode="immediate"):
+                defer_fk = await svc["db"].aexecute("PRAGMA defer_foreign_keys = ON")
+                if not defer_fk.ok:
+                    return _json_response(Result.Err("DB_ERROR", defer_fk.error or "Failed to defer foreign key checks"))
+
+                update_res = await svc["db"].aexecute(
+                    "UPDATE assets SET filename = ?, filepath = ?, mtime = ? WHERE id = ?",
+                    (new_name, str(new_path), mtime, asset_id)
+                )
+                if not update_res.ok:
+                    return _json_response(Result.Err("DB_ERROR", update_res.error or "Failed to update assets filepath"))
+
+                # Keep FK-linked tables in sync with renamed filepath.
+                sj_res = await svc["db"].aexecute(
+                    "UPDATE scan_journal SET filepath = ? WHERE filepath = ?",
+                    (str(new_path), str(current_resolved)),
+                )
+                if not sj_res.ok:
+                    return _json_response(Result.Err("DB_ERROR", sj_res.error or "Failed to update scan_journal filepath"))
+
+                mc_res = await svc["db"].aexecute(
+                    "UPDATE metadata_cache SET filepath = ? WHERE filepath = ?",
+                    (str(new_path), str(current_resolved)),
+                )
+                if not mc_res.ok:
+                    return _json_response(Result.Err("DB_ERROR", mc_res.error or "Failed to update metadata_cache filepath"))
         except Exception as exc:
-            if not db_updated:
-                try:
-                    if new_path.exists() and not current_resolved.exists():
-                        new_path.rename(current_resolved)
-                except Exception as rollback_exc:
-                    logger.error("Failed to rollback rename for asset %s: %s", asset_id, rollback_exc)
+            try:
+                if new_path.exists() and not current_resolved.exists():
+                    new_path.rename(current_resolved)
+            except Exception as rollback_exc:
+                logger.error("Failed to rollback rename for asset %s: %s", asset_id, rollback_exc)
             return _json_response(
                 Result.Err(
                     "DB_ERROR",
@@ -966,7 +979,7 @@ def register_asset_routes(routes: web.RouteTableDef) -> None:
             "renamed": 1,
             "old_name": current_filename,
             "new_name": new_name,
-            "old_path": str(current_path),
+            "old_path": str(current_resolved),
             "new_path": str(new_path)
         }))
 
@@ -1138,8 +1151,26 @@ async def download_asset(request: web.Request) -> web.StreamResponse:
 
     Query param: filepath (absolute path, must be within allowed roots)
     """
+    # Optional preview mode for in-app media display (viewer/grid fallback URLs).
+    # Preview mode can trigger many concurrent thumbnail requests from the grid, so it
+    # needs a much higher bucket than user-triggered downloads.
+    preview = str(request.query.get("preview", "")).strip().lower() in ("1", "true", "yes", "on")
+
     # Rate limiting
-    allowed, retry_after = _check_rate_limit(request, "download_asset", max_requests=30, window_seconds=60)
+    if preview:
+        allowed, retry_after = _check_rate_limit(
+            request,
+            "download_asset_preview",
+            max_requests=2000,
+            window_seconds=60,
+        )
+    else:
+        allowed, retry_after = _check_rate_limit(
+            request,
+            "download_asset",
+            max_requests=30,
+            window_seconds=60,
+        )
     if not allowed:
         return web.Response(status=429, text=f"Rate limit exceeded. Retry after {retry_after}s")
 
@@ -1179,7 +1210,10 @@ async def download_asset(request: web.Request) -> web.StreamResponse:
 
     response = web.StreamResponse()
     response.headers["Content-Type"] = mime_type
-    response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    disposition = "inline" if preview else "attachment"
+    response.headers["Content-Disposition"] = f'{disposition}; filename="{filename}"'
+    if preview:
+        response.headers["Cache-Control"] = "private, max-age=60"
 
     try:
         await response.prepare(request)
@@ -1189,6 +1223,21 @@ async def download_asset(request: web.Request) -> web.StreamResponse:
                 if not chunk:
                     break
                 await response.write(chunk)
+        try:
+            await response.write_eof()
+        except Exception:
+            pass
+    except (ConnectionResetError, BrokenPipeError):
+        # Client disconnected mid-stream (tab closed/navigation/virtualized preview churn).
+        logger.debug("Client disconnected while streaming file %s", filepath)
+        return response
+    except RuntimeError as e:
+        if "Connection lost" in str(e):
+            logger.debug("Client connection lost while streaming file %s", filepath)
+            return response
+        logger.error(f"Error streaming file {filepath}: {e}")
+        # Cannot return a new response after prepare()
+        return response
     except Exception as e:
         logger.error(f"Error streaming file {filepath}: {e}")
         # Cannot return a new response after prepare()

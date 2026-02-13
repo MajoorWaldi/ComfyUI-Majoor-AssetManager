@@ -437,6 +437,7 @@ export function createGridContainer() {
     } catch {}
     try {
         container._mjrSetSelection = (ids, activeId = "") => setSelectionIds(container, ids, { activeId });
+        container._mjrRemoveAssets = (assetIds, options = {}) => removeAssetsFromGrid(container, assetIds, options);
         container._mjrSyncSelection = (ids) => syncSelectionClasses(container, ids);
         container._mjrGetRenderedCards = () => {
             try {

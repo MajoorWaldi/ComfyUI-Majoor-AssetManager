@@ -280,6 +280,15 @@ export function buildAssetViewURL(asset) {
     }
     if (!type) type = "output";
 
+    const hasNativeBucket = rawPath.includes("/output/") || rawPath.includes("/input/");
+    const subfolderLooksAbsolute =
+        /^[a-zA-Z]:\//.test(subfolder) || subfolder.startsWith("/");
+    // Fallback: non-native output/input roots (or broken absolute subfolder values)
+    // cannot be served by ComfyUI `/view`, so use backend filepath streaming URL.
+    if (rawPath && (subfolderLooksAbsolute || (!hasNativeBucket && type !== "custom"))) {
+        return buildDownloadURL(rawPath, { inline: true });
+    }
+
     if (type === "custom") {
         const rid = String(pickRootId(asset) || "").trim();
         if (rid) return buildCustomViewURL(filename, subfolder, rid);
@@ -304,7 +313,10 @@ export function buildSearchURL(params = {}) {
 /**
  * Build download URL for asset
  */
-export function buildDownloadURL(filepath) {
+export function buildDownloadURL(filepath, options = {}) {
     if (!filepath) return "";
-    return `${ENDPOINTS.DOWNLOAD}?filepath=${encodeURIComponent(filepath)}`;
+    const inline = !!options?.inline;
+    let url = `${ENDPOINTS.DOWNLOAD}?filepath=${encodeURIComponent(filepath)}`;
+    if (inline) url += "&preview=1";
+    return url;
 }

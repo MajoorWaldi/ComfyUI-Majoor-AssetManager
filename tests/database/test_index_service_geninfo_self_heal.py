@@ -85,3 +85,58 @@ async def test_get_asset_does_not_self_heal_incomplete_geninfo(services):
     assert gi.get("negative") in (None, {})
     assert gi.get("checkpoint") in (None, {})
 
+
+@pytest.mark.asyncio
+async def test_rename_file_updates_fk_linked_tables_without_integrity_error(services, tmp_path):
+    db = services["db"]
+    index = services["index"]
+
+    old_file = tmp_path / "old_name.png"
+    new_file = tmp_path / "new_name.png"
+    old_file.write_bytes(b"png")
+    new_file.write_bytes(b"png")
+
+    old_fp = str(old_file)
+    new_fp = str(new_file)
+
+    res = await db.aexecute(
+        """
+        INSERT INTO assets (filepath, filename, kind, ext, subfolder, source, root_id, size, mtime)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            old_fp,
+            old_file.name,
+            "image",
+            ".png",
+            str(old_file.parent),
+            "output",
+            None,
+            old_file.stat().st_size,
+            int(old_file.stat().st_mtime),
+        ),
+    )
+    assert res.ok, res.error
+
+    res = await db.aexecute(
+        "INSERT INTO scan_journal(filepath, dir_path, state_hash, mtime, size) VALUES (?, ?, ?, ?, ?)",
+        (old_fp, str(old_file.parent), "state", int(old_file.stat().st_mtime), old_file.stat().st_size),
+    )
+    assert res.ok, res.error
+
+    res = await db.aexecute(
+        "INSERT INTO metadata_cache(filepath, state_hash, metadata_hash, metadata_raw) VALUES (?, ?, ?, ?)",
+        (old_fp, "state", "meta", "{}"),
+    )
+    assert res.ok, res.error
+
+    rename_res = await index.rename_file(old_fp, new_fp)
+    assert rename_res.ok, rename_res.error
+
+    q_assets = await db.aquery("SELECT filepath FROM assets WHERE filepath = ?", (new_fp,))
+    assert q_assets.ok and q_assets.data
+    q_sj = await db.aquery("SELECT filepath FROM scan_journal WHERE filepath = ?", (new_fp,))
+    assert q_sj.ok and q_sj.data
+    q_mc = await db.aquery("SELECT filepath FROM metadata_cache WHERE filepath = ?", (new_fp,))
+    assert q_mc.ok and q_mc.data
+

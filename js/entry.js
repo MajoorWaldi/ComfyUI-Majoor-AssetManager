@@ -9,7 +9,7 @@ import { ensureStyleLoaded } from "./app/style.js";
 import { registerMajoorSettings, startRuntimeStatusDashboard } from "./app/settings.js";
 import { getComfyApi, registerSidebarTabCompat } from "./app/comfyApiBridge.js";
 import { initDragDrop } from "./features/dnd/DragDrop.js";
-import { loadAssets, upsertAsset } from "./features/grid/GridView.js";
+import { loadAssets, upsertAsset, removeAssetsFromGrid } from "./features/grid/GridView.js";
 import { renderAssetsManager, getActiveGridContainer } from "./features/panel/AssetsManagerPanel.js";
 import { extractOutputFiles } from "./utils/extractOutputFiles.js";
 import { post } from "./api/client.js";
@@ -136,6 +136,12 @@ app.registerExtension({
                 }
             } catch {}
 
+            try {
+                if (window._mjrAssetsDeletedHandler) {
+                    window.removeEventListener("mjr:assets-deleted", window._mjrAssetsDeletedHandler);
+                }
+            } catch {}
+
             // Listen for ComfyUI execution - extract output files and send to backend
             api._mjrExecutedHandler = (event) => {
                 const outputFiles = dedupeFiles(extractOutputFiles(event?.detail?.output));
@@ -255,6 +261,18 @@ app.registerExtension({
                 } catch {}
             };
             api.addEventListener("mjr-db-restore-status", api._mjrDbRestoreStatusHandler);
+
+            window._mjrAssetsDeletedHandler = (event) => {
+                try {
+                    const ids = Array.isArray(event?.detail?.ids)
+                        ? event.detail.ids.map((x) => String(x || "")).filter(Boolean)
+                        : [];
+                    if (!ids.length) return;
+                    const grid = getActiveGridContainer();
+                    if (grid) removeAssetsFromGrid(grid, ids);
+                } catch {}
+            };
+            window.addEventListener("mjr:assets-deleted", window._mjrAssetsDeletedHandler);
 
             console.log("📂 Majoor [✅] Real-time listener registered");
         } else {

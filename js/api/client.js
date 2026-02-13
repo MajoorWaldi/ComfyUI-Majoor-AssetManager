@@ -476,9 +476,9 @@ export async function getOutputDirectorySetting() {
     return get(ENDPOINTS.SETTINGS_OUTPUT_DIRECTORY);
 }
 
-export async function setOutputDirectorySetting(outputDirectory) {
+export async function setOutputDirectorySetting(outputDirectory, options = {}) {
     const value = String(outputDirectory ?? "").trim();
-    return post(ENDPOINTS.SETTINGS_OUTPUT_DIRECTORY, { output_directory: value });
+    return post(ENDPOINTS.SETTINGS_OUTPUT_DIRECTORY, { output_directory: value }, options);
 }
 
 export async function getSecuritySettings() {
@@ -624,11 +624,27 @@ export async function mergeDuplicateTags(keepAssetId, mergeAssetIds = []) {
 }
 
 export async function deleteAsset(assetId) {
-    return post("/mjr/am/asset/delete", { asset_id: normalizeAssetId(assetId) });
+    const id = normalizeAssetId(assetId);
+    const res = await post("/mjr/am/asset/delete", { asset_id: id });
+    if (res?.ok) _emitAssetsDeleted([id]);
+    return res;
 }
 
 export async function deleteAssets(assetIds) {
-    return post("/mjr/am/assets/delete", { ids: assetIds });
+    const ids = Array.isArray(assetIds) ? assetIds.map((x) => normalizeAssetId(x)).filter(Boolean) : [];
+    const res = await post("/mjr/am/assets/delete", { ids: assetIds });
+    if (res?.ok) _emitAssetsDeleted(ids);
+    return res;
+}
+
+function _emitAssetsDeleted(ids) {
+    try {
+        const normalized = (Array.isArray(ids) ? ids : [ids])
+            .map((x) => String(x || "").trim())
+            .filter(Boolean);
+        if (!normalized.length) return;
+        window.dispatchEvent(new CustomEvent("mjr:assets-deleted", { detail: { ids: normalized } }));
+    } catch {}
 }
 
 export async function renameAsset(assetId, newName) {

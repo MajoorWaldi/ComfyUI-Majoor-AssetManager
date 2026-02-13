@@ -1671,6 +1671,11 @@ export const registerMajoorSettings = (app, onApplied) => {
                 .catch(() => {});
         } catch {}
 
+        let _outputDirCommittedValue = String(settings.paths?.outputDirectory || "");
+        let _outputDirSaveTimer = null;
+        let _outputDirSaveSeq = 0;
+        let _outputDirSaveAbort = null;
+
         safeAddSetting({
             id: `${SETTINGS_PREFIX}.Paths.OutputDirectory`,
             category: cat(t("cat.advanced"), "Paths"),
@@ -1682,27 +1687,50 @@ export const registerMajoorSettings = (app, onApplied) => {
                 placeholder: "D:\\\\____COMFY_OUTPUTS",
             },
             onChange: async (value) => {
-                const previous = String(settings.paths?.outputDirectory || "");
                 const next = String(value || "").trim();
                 settings.paths = settings.paths || {};
                 settings.paths.outputDirectory = next;
                 saveMajoorSettings(settings);
-                notifyApplied("paths.outputDirectory");
+
+                // The Comfy settings text input can fire on each keystroke.
+                // Debounce + cancel in-flight requests to prevent backend/UI stalls.
                 try {
-                    const res = await setOutputDirectorySetting(next);
-                    if (!res?.ok) {
-                        throw new Error(res?.error || "Failed to set output directory");
+                    if (_outputDirSaveTimer) {
+                        clearTimeout(_outputDirSaveTimer);
+                        _outputDirSaveTimer = null;
                     }
-                    const serverValue = String(res?.data?.output_directory || next);
-                    settings.paths.outputDirectory = serverValue;
-                    saveMajoorSettings(settings);
-                    notifyApplied("paths.outputDirectory");
-                } catch (error) {
-                    settings.paths.outputDirectory = previous;
-                    saveMajoorSettings(settings);
-                    notifyApplied("paths.outputDirectory");
-                    comfyToast(error?.message || "Failed to set output directory", "error");
-                }
+                } catch {}
+                _outputDirSaveTimer = setTimeout(async () => {
+                    _outputDirSaveTimer = null;
+                    const seq = ++_outputDirSaveSeq;
+                    try {
+                        _outputDirSaveAbort?.abort?.();
+                    } catch {}
+                    _outputDirSaveAbort = typeof AbortController !== "undefined" ? new AbortController() : null;
+                    try {
+                        const res = await setOutputDirectorySetting(
+                            next,
+                            _outputDirSaveAbort ? { signal: _outputDirSaveAbort.signal } : {}
+                        );
+                        if (seq !== _outputDirSaveSeq) return;
+                        if (!res?.ok) {
+                            throw new Error(res?.error || "Failed to set output directory");
+                        }
+                        const serverValue = String(res?.data?.output_directory || next).trim();
+                        settings.paths.outputDirectory = serverValue;
+                        _outputDirCommittedValue = serverValue;
+                        saveMajoorSettings(settings);
+                        notifyApplied("paths.outputDirectory");
+                    } catch (error) {
+                        if (seq !== _outputDirSaveSeq) return;
+                        const aborted = String(error?.name || "") === "AbortError" || String(error?.code || "") === "ABORTED";
+                        if (aborted) return;
+                        settings.paths.outputDirectory = _outputDirCommittedValue;
+                        saveMajoorSettings(settings);
+                        notifyApplied("paths.outputDirectory");
+                        comfyToast(error?.message || "Failed to set output directory", "error");
+                    }
+                }, 700);
             },
         });
 
@@ -1714,6 +1742,7 @@ export const registerMajoorSettings = (app, onApplied) => {
                     settings.paths = settings.paths || {};
                     if (settings.paths.outputDirectory !== serverValue) {
                         settings.paths.outputDirectory = serverValue;
+                        _outputDirCommittedValue = serverValue;
                         saveMajoorSettings(settings);
                         notifyApplied("paths.outputDirectory");
                     }

@@ -912,7 +912,8 @@ class MetadataService:
             "kind": classify_file(file_path),
             "ext": os.path.splitext(file_path)[1].lower()
         }
-        # Try to get birthtime (Unix/Mac)
-        if hasattr(stat, "st_birthtime"):
-            info["birthtime"] = stat.st_birthtime
+        # st_birthtime is not available on all platforms/filesystems.
+        birthtime = getattr(stat, "st_birthtime", None)
+        if birthtime is not None:
+            info["birthtime"] = birthtime
         return info
