@@ -73,6 +73,22 @@ def _normalize_dir_path(path: str) -> Optional[Path]:
         return None
 
 
+def _canonical_path_key(path_value: str) -> str:
+    """
+    Build a normalized path key for duplicate detection across case/format variants.
+
+    Example on Windows:
+      D:\\Images == d:\\images == D:/Images
+    """
+    try:
+        expanded = os.path.expanduser(str(path_value or "").strip())
+        absolute = os.path.abspath(expanded)
+        normalized = os.path.normpath(absolute)
+        return os.path.normcase(normalized)
+    except Exception:
+        return str(path_value or "").strip().lower()
+
+
 def _read_store() -> Dict[str, Any]:
     if not _STORE_PATH.exists():
         return {"version": 1, "roots": []}
@@ -125,13 +141,33 @@ def list_custom_roots() -> Result[List[Dict[str, Any]]]:
                 continue
             normalized = _normalize_dir_path(path)
             if not normalized:
+                cleaned.append(
+                    {
+                        "id": rid,
+                        "path": path,
+                        "label": str(r.get("label") or "").strip() or path,
+                        "created_at": r.get("created_at"),
+                        "offline": True,
+                        "invalid": True,
+                    }
+                )
                 continue
+            exists = False
+            is_dir = False
+            try:
+                exists = normalized.exists()
+                is_dir = normalized.is_dir()
+            except Exception:
+                exists = False
+                is_dir = False
+            offline = not (exists and is_dir)
             cleaned.append(
                 {
                     "id": rid,
                     "path": str(normalized),
                     "label": str(r.get("label") or "").strip() or normalized.name or str(normalized),
                     "created_at": r.get("created_at"),
+                    "offline": bool(offline),
                 }
             )
         return Result.Ok(cleaned)
@@ -148,6 +184,7 @@ def add_custom_root(path: str, label: Optional[str] = None) -> Result[Dict[str, 
         return Result.Err("NOT_A_DIRECTORY", f"Not a directory: {normalized}")
 
     resolved = str(normalized)
+    normalized_key = _canonical_path_key(resolved)
     root_id = str(uuid4())
     created_at = _utc_now_iso()
     safe_label = (label or "").strip() or normalized.name or resolved
@@ -179,7 +216,7 @@ def add_custom_root(path: str, label: Optional[str] = None) -> Result[Dict[str, 
             if not isinstance(r, dict):
                 continue
             existing_path = r.get("path")
-            if existing_path and str(existing_path) == resolved:
+            if existing_path and _canonical_path_key(str(existing_path)) == normalized_key:
                 existing_id = str(r.get("id") or "")
                 return Result.Ok(
                     {
@@ -241,5 +278,10 @@ def resolve_custom_root(root_id: str) -> Result[Path]:
             normalized = _normalize_dir_path(str(r.get("path") or ""))
             if not normalized:
                 return Result.Err("INVALID_INPUT", "Invalid stored path")
+            try:
+                if not normalized.exists() or not normalized.is_dir():
+                    return Result.Err("OFFLINE", f"Custom root is offline: {normalized}")
+            except Exception:
+                return Result.Err("OFFLINE", f"Custom root is offline: {normalized}")
             return Result.Ok(normalized)
     return Result.Err("NOT_FOUND", f"Custom root not found: {rid}")

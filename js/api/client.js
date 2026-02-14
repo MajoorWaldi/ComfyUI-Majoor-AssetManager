@@ -648,7 +648,7 @@ export async function deleteAsset(assetOrId) {
 
 export async function deleteAssets(assetIds) {
     const ids = Array.isArray(assetIds) ? assetIds.map((x) => normalizeAssetId(x)).filter(Boolean) : [];
-    const res = await post("/mjr/am/assets/delete", { ids: assetIds });
+    const res = await post("/mjr/am/assets/delete", { ids });
     if (res?.ok) _emitAssetsDeleted(ids);
     return res;
 }

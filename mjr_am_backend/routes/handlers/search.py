@@ -21,10 +21,6 @@ except Exception:
 
 from mjr_am_backend.config import OUTPUT_ROOT, TO_THREAD_TIMEOUT_S
 from mjr_am_backend.custom_roots import resolve_custom_root
-from mjr_am_backend.features.browser import (
-    list_visible_subfolders,
-    list_filesystem_browser_entries,
-)
 from mjr_am_backend.shared import Result, get_logger
 from mjr_am_backend.features.index.metadata_helpers import MetadataHelpers
 from ..core import _json_response, _require_services, _read_json, safe_error_message
@@ -37,7 +33,7 @@ MAX_LIST_LIMIT = 5000
 MAX_LIST_OFFSET = 1_000_000
 MAX_RATING = 5
 VALID_KIND_FILTERS = {"image", "video", "audio", "model3d"}
-VALID_SORT_KEYS = {"mtime_desc", "mtime_asc", "name_asc", "name_desc"}
+VALID_SORT_KEYS = {"mtime_desc", "mtime_asc", "name_asc", "name_desc", "none"}
 
 LIST_RATE_LIMIT_MAX_REQUESTS = 50
 LIST_RATE_LIMIT_WINDOW_SECONDS = 60
@@ -541,11 +537,16 @@ def register_search_routes(routes: web.RouteTableDef) -> None:
             return _json_response(result)
 
         if scope == "custom":
+            from mjr_am_backend.features.browser import (
+                list_visible_subfolders,
+                list_filesystem_browser_entries,
+            )
             subfolder = request.query.get("subfolder", "")
             root_id = request.query.get("custom_root_id", "") or request.query.get("root_id", "")
             if not str(root_id or "").strip():
                 svc, _ = await _require_services()
-                browser_result = list_filesystem_browser_entries(
+                browser_result = await asyncio.to_thread(
+                    list_filesystem_browser_entries,
                     subfolder,
                     query,
                     limit,

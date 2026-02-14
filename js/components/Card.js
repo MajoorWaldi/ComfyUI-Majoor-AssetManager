@@ -37,8 +37,6 @@ const AUDIO_THUMB_URL = (() => {
  */
 
 const VIDEO_THUMBS_KEY = "__MJR_VIDEO_THUMBS__";
-const VIDEO_THUMB_MAX_AUTOPLAY_HOVER = 6;
-const VIDEO_THUMB_MAX_AUTOPLAY_ALWAYS = 12;
 const VIDEO_THUMB_MAX_PREPARED = 48;
 const VIDEO_THUMB_LOAD_TIMEOUT_MS = 5000;
 const VIDEO_THUMB_FIRST_FRAME_SEEK_S = 1.0;
@@ -55,7 +53,6 @@ const getVideoAutoplayMode = () => {
 };
 
 const isVideoAutoplayAlways = () => getVideoAutoplayMode() === "always";
-const getMaxAutoplay = () => isVideoAutoplayAlways() ? VIDEO_THUMB_MAX_AUTOPLAY_ALWAYS : VIDEO_THUMB_MAX_AUTOPLAY_HOVER;
 
 export function cleanupVideoThumbsIn(rootEl) {
     try {
@@ -187,7 +184,7 @@ const getVideoThumbManager = () => {
         } catch {}
     };
 
-    const stopVideo = (video) => {
+    const stopVideo = (video, { releaseSrc = true } = {}) => {
         if (!video) return;
         try {
             video.pause();
@@ -195,12 +192,14 @@ const getVideoThumbManager = () => {
         try {
             video.currentTime = 0;
         } catch {}
-        try {
-            if (video.getAttribute("src")) {
-                video.removeAttribute("src");
-                video.load();
-            }
-        } catch {}
+        if (releaseSrc) {
+            try {
+                if (video.getAttribute("src")) {
+                    video.removeAttribute("src");
+                    video.load();
+                }
+            } catch {}
+        }
         prepared.delete(video);
         try {
             playing.delete(video);
@@ -240,11 +239,6 @@ const getVideoThumbManager = () => {
 
         if (!playing.has(video)) {
             playing.add(video);
-            while (playing.size > getMaxAutoplay()) {
-                const oldest = playing.values().next().value;
-                // Demote to prepared (paused with frame kept)
-                pauseVideo(oldest);
-            }
         } else {
             playing.delete(video);
             playing.add(video);
@@ -295,7 +289,9 @@ const getVideoThumbManager = () => {
             const overlay = v._mjrPlayOverlay || null;
             if (!enabled) {
                 try { v._mjrHovered = false; } catch {}
-                stopVideo(v);
+                try { v._mjrResumeOnVisible = false; } catch {}
+                if (v._mjrVisible) pauseVideo(v);
+                else stopVideo(v);
                 if (overlay) overlay.style.opacity = "1";
                 continue;
             }
@@ -382,13 +378,15 @@ const getVideoThumbManager = () => {
 
                           // "always": play when visible; "hover": play when visible + hovered
                           const shouldPlay = autoplayEnabled && isVisible
-                              && (always || !!video._mjrHovered);
+                              && (always || !!video._mjrHovered || !!video._mjrResumeOnVisible);
 
                           if (shouldPlay) {
+                              try { video._mjrResumeOnVisible = false; } catch {}
                               playVideo(video);
                               if (overlay) overlay.style.opacity = "0";
                           } else {
                               if (autoplayEnabled) pauseVideo(video);
+                              else if (isVisible) pauseVideo(video);
                               else stopVideo(video);
                               if (overlay) overlay.style.opacity = "1";
                           }
@@ -420,6 +418,12 @@ const getVideoThumbManager = () => {
         observe(video) {
             if (!observer || !video) return;
             try {
+                if (video._mjrReleaseTimer) {
+                    clearTimeout(video._mjrReleaseTimer);
+                    video._mjrReleaseTimer = null;
+                }
+            } catch {}
+            try {
                 api._bindVideo(video);
                 observed.add(video);
                 observer.observe(video);
@@ -431,8 +435,30 @@ const getVideoThumbManager = () => {
                 observer.unobserve(video);
             } catch {}
             observed.delete(video);
+            const wasPlaying = playing.has(video) || !!video._mjrHovered;
             playing.delete(video);
-            stopVideo(video);
+            // Keep current frame during virtual-grid recycle to prevent flicker/disappearing thumbs.
+            stopVideo(video, { releaseSrc: false });
+            try {
+                prepared.delete(video);
+            } catch {}
+            try { video._mjrVisible = false; } catch {}
+            try { video._mjrHovered = false; } catch {}
+            try { video._mjrResumeOnVisible = !!wasPlaying; } catch {}
+            // Release decoded resources later if the node stays detached.
+            try {
+                if (video._mjrReleaseTimer) {
+                    clearTimeout(video._mjrReleaseTimer);
+                    video._mjrReleaseTimer = null;
+                }
+                video._mjrReleaseTimer = setTimeout(() => {
+                    try { video._mjrReleaseTimer = null; } catch {}
+                    try {
+                        if (video.isConnected || observed.has(video)) return;
+                    } catch {}
+                    stopVideo(video, { releaseSrc: true });
+                }, 15_000);
+            } catch {}
             
             // Cleanup hover listeners on parent thumb
             try {

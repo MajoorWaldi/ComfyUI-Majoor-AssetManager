@@ -228,6 +228,9 @@ app.registerExtension({
                     window.dispatchEvent(new CustomEvent("mjr-db-restore-status", { detail }));
                     const isDelete = op === "delete_db";
                     const isReset = op === "reset_index";
+                    if (isDelete && !["started", "done", "failed"].includes(step)) {
+                        return;
+                    }
                     const map = {
                         started: isDelete
                             ? t("toast.dbDeleteTriggered", "Deleting database and rebuilding...")

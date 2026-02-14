@@ -1214,41 +1214,20 @@ async def download_asset(request: web.Request) -> web.StreamResponse:
     # Sanitize filename for Content-Disposition header
     filename = resolved.name.replace('"', '').replace('\r', '').replace('\n', '')[:255]
 
-    response = web.StreamResponse()
-    response.headers["Content-Type"] = mime_type
+    # Use FileResponse so aiohttp handles efficient file streaming and HTTP range
+    # semantics for media previews.
+    response = web.FileResponse(path=str(resolved))
     disposition = "inline" if preview else "attachment"
-    response.headers["Content-Disposition"] = f'{disposition}; filename="{filename}"'
-    if preview:
-        response.headers["Cache-Control"] = "private, max-age=60"
-
     try:
-        await response.prepare(request)
-        with open(resolved, "rb") as f:
-            while True:
-                chunk = f.read(8192)
-                if not chunk:
-                    break
-                await response.write(chunk)
-        try:
-            await response.write_eof()
-        except Exception:
-            pass
-    except (ConnectionResetError, BrokenPipeError):
-        # Client disconnected mid-stream (tab closed/navigation/virtualized preview churn).
-        logger.debug("Client disconnected while streaming file %s", filepath)
-        return response
-    except RuntimeError as e:
-        if "Connection lost" in str(e):
-            logger.debug("Client connection lost while streaming file %s", filepath)
-            return response
-        logger.error(f"Error streaming file {filepath}: {e}")
-        # Cannot return a new response after prepare()
-        return response
-    except Exception as e:
-        logger.error(f"Error streaming file {filepath}: {e}")
-        # Cannot return a new response after prepare()
-        return response
-
+        response.headers["Content-Type"] = mime_type
+        response.headers["Content-Disposition"] = f'{disposition}; filename="{filename}"'
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        if preview:
+            response.headers["Cache-Control"] = "private, max-age=60"
+        else:
+            response.headers["Cache-Control"] = "private, no-cache"
+    except Exception:
+        pass
     return response
 
 

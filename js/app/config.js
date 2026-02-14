@@ -81,7 +81,7 @@ export const APP_DEFAULTS = Object.freeze({
     GRID_SHOW_DETAILS_DIMENSIONS: true,
     GRID_SHOW_DETAILS_GENTIME: true,
     GRID_SHOW_WORKFLOW_DOT: true,
-    GRID_VIDEO_AUTOPLAY_MODE: "off", // "off" | "hover" | "always"
+    GRID_VIDEO_AUTOPLAY_MODE: "hover", // "off" | "hover" | "always"
     UI_CARD_HOVER_COLOR: "#3D3D3D",
     UI_CARD_SELECTION_COLOR: "#4A90E2",
     UI_RATING_COLOR: "#FF9500",

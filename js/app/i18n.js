@@ -815,6 +815,16 @@ const LANGUAGE_NAMES = Object.freeze({
 });
 
 const CORE_TRANSLATIONS = {
+    "en-US": {
+        "tab.custom": "Browser",
+        "scope.custom": "Browser",
+        "scope.customBrowser": "Browser",
+    },
+    "fr-FR": {
+        "tab.custom": "Navigateur",
+        "scope.custom": "Navigateur",
+        "scope.customBrowser": "Navigateur",
+    },
     "zh-CN": {
         "cat.grid": "ç½‘æ ¼",
         "cat.cards": "å¡ç‰‡",

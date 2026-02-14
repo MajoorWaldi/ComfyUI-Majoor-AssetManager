@@ -95,6 +95,8 @@ class IndexScanner:
         self._scan_lock = scan_lock
         self._index_lock = index_lock or scan_lock
         self._current_scan_id: Optional[str] = None
+        self._batch_fallback_count = 0
+        self._batch_fallback_lock = threading.Lock()
 
     @staticmethod
     def _drain_walk_queue(q: "Queue[Optional[Path]]", max_items: int) -> list[Optional[Path]]:
@@ -191,6 +193,8 @@ class IndexScanner:
                 "updated": 0,
                 "skipped": 0,
                 "errors": 0,
+                "batch_fallbacks": 0,
+                "skipped_state_changed": 0,
                 "start_time": datetime.now().isoformat()
             }
 
@@ -428,6 +432,8 @@ class IndexScanner:
                 "updated": 0,
                 "skipped": 0,
                 "errors": 0,
+                "batch_fallbacks": 0,
+                "skipped_state_changed": 0,
                 "start_time": datetime.now().isoformat()
             }
             added_ids: List[int] = []
@@ -521,7 +527,7 @@ class IndexScanner:
 
         # Phase 1: Stat files and determine which need metadata extraction
         prepared: List[Dict[str, Any]] = []
-        needs_metadata: List[tuple[Path, str, int, int, str, Optional[int]]] = []  # (path, filepath, mtime, size, state_hash, existing_id)
+        needs_metadata: List[tuple[Path, str, int, int, int, str, Optional[int]]] = []  # (path, filepath, mtime_ns, mtime, size, state_hash, existing_id)
 
         # Prefetch metadata cache and asset_metadata entries for the entire batch to avoid N+1 queries
         filepaths = [str(p) for p in batch]
@@ -639,7 +645,7 @@ class IndexScanner:
 
             # This file needs processing
             if not fast:
-                needs_metadata.append((file_path, filepath, mtime, size, state_hash, existing_id if existing_id else None))
+                needs_metadata.append((file_path, filepath, int(mtime_ns), mtime, size, state_hash, existing_id if existing_id else None))
             else:
                 # Fast mode - no metadata
                 rel_path = self._safe_relative_path(file_path, base_dir)
@@ -649,6 +655,7 @@ class IndexScanner:
                     "metadata_result": Result.Ok({}),
                     "filepath": filepath,
                     "file_path": file_path,
+                    "mtime_ns": int(mtime_ns),
                     "state_hash": state_hash,
                     "mtime": mtime,
                     "size": size,
@@ -664,7 +671,7 @@ class IndexScanner:
             paths_to_extract = [item[0] for item in needs_metadata]
             batch_metadata = await self.metadata.get_metadata_batch([str(p) for p in paths_to_extract], scan_id=self._current_scan_id)
 
-            for file_path, filepath, mtime, size, state_hash, existing_id_opt in needs_metadata:
+            for file_path, filepath, mtime_ns, mtime, size, state_hash, existing_id_opt in needs_metadata:
                 metadata_result: Result[Dict[str, Any]] | None = batch_metadata.get(str(file_path))
                 if not metadata_result:
                     metadata_result = MetadataHelpers.metadata_error_payload(Result.Err("METADATA_MISSING", "No metadata returned"), filepath)
@@ -680,6 +687,7 @@ class IndexScanner:
                         "metadata_result": metadata_result,
                         "filepath": filepath,
                         "file_path": file_path,
+                        "mtime_ns": int(mtime_ns),
                         "state_hash": state_hash,
                         "mtime": mtime,
                         "size": size,
@@ -700,6 +708,7 @@ class IndexScanner:
                         "kind": kind,
                         "metadata_result": metadata_result,
                         "file_path": file_path,
+                        "mtime_ns": int(mtime_ns),
                         "state_hash": state_hash,
                         "mtime": mtime,
                         "size": size,
@@ -722,6 +731,14 @@ class IndexScanner:
                     if action in ("skipped", "skipped_journal"):
                         stats["skipped"] += 1
                         continue
+                    file_path_value = entry.get("file_path")
+                    if isinstance(file_path_value, Path):
+                        expected_mtime_ns = int(entry.get("mtime_ns") or 0)
+                        expected_size = int(entry.get("size") or 0)
+                        if self._file_state_drifted(file_path_value, expected_mtime_ns, expected_size):
+                            stats["skipped"] += 1
+                            stats["skipped_state_changed"] = int(stats.get("skipped_state_changed") or 0) + 1
+                            continue
 
                     if action == "refresh":
                         asset_id = entry.get("asset_id")
@@ -889,6 +906,9 @@ class IndexScanner:
                 raise
             # If the entire batch transaction fails, fall back to processing items individually
             logger.warning("Batch transaction failed: %s. Falling back to individual processing.", str(batch_error))
+            stats["batch_fallbacks"] = int(stats.get("batch_fallbacks") or 0) + 1
+            with self._batch_fallback_lock:
+                self._batch_fallback_count += 1
             stats["errors"] += len(prepared)  # Temporarily count all as errors, will be corrected below
             failed_entries: list[str] = []
 
@@ -903,6 +923,15 @@ class IndexScanner:
                     continue
 
                 try:
+                    file_path_obj = entry.get("file_path")
+                    if isinstance(file_path_obj, Path):
+                        expected_mtime_ns = int(entry.get("mtime_ns") or 0)
+                        expected_size = int(entry.get("size") or 0)
+                        if self._file_state_drifted(file_path_obj, expected_mtime_ns, expected_size):
+                            stats["skipped"] += 1
+                            stats["skipped_state_changed"] = int(stats.get("skipped_state_changed") or 0) + 1
+                            stats["errors"] = max(0, stats["errors"] - 1)
+                            continue
                     async with self.db.atransaction(mode="immediate") as tx:
                         if not tx.ok:
                             failed_entries.append(filepath_value)
@@ -1234,22 +1263,56 @@ class IndexScanner:
             return classify_file(str(p)) != "unknown"
 
         if recursive:
-            for root, _, filenames in os.walk(directory):
-                for filename in filenames:
-                    # Avoid Path allocation + classify loops when possible.
-                    try:
-                        ext = os.path.splitext(filename)[1].lower()
-                    except Exception:
-                        ext = ""
-                    if ext and _EXT_TO_KIND and _EXT_TO_KIND.get(ext, "unknown") == "unknown":
-                        continue
-                    file_path = Path(root) / filename
-                    if _is_supported(file_path):
-                        yield file_path
+            # Iterative scandir is generally faster than os.walk on large trees/NAS shares.
+            stack: list[Path] = [directory]
+            while stack:
+                current = stack.pop()
+                try:
+                    with os.scandir(current) as it:
+                        for entry in it:
+                            try:
+                                if entry.is_dir(follow_symlinks=False):
+                                    stack.append(Path(entry.path))
+                                    continue
+                                # Keep historical behavior: index symlinks to files, but do not recurse
+                                # into symlinked directories.
+                                if not entry.is_file(follow_symlinks=True):
+                                    continue
+                                name = entry.name
+                                try:
+                                    ext = os.path.splitext(name)[1].lower()
+                                except Exception:
+                                    ext = ""
+                                if ext and _EXT_TO_KIND and _EXT_TO_KIND.get(ext, "unknown") == "unknown":
+                                    continue
+                                file_path = Path(entry.path)
+                                if _is_supported(file_path):
+                                    yield file_path
+                            except (OSError, PermissionError):
+                                continue
+                except (OSError, PermissionError):
+                    continue
         else:
             for item in directory.iterdir():
                 if item.is_file() and _is_supported(item):
                     yield item
+
+    @staticmethod
+    def _file_state_drifted(file_path: Path, expected_mtime_ns: int, expected_size: int) -> bool:
+        """Return True when file changed between initial stat and DB write time."""
+        try:
+            st = file_path.stat()
+            return int(st.st_mtime_ns) != int(expected_mtime_ns) or int(st.st_size) != int(expected_size)
+        except Exception:
+            return True
+
+    def get_runtime_status(self) -> Dict[str, Any]:
+        try:
+            with self._batch_fallback_lock:
+                fallback_count = int(self._batch_fallback_count)
+        except Exception:
+            fallback_count = 0
+        return {"batch_fallbacks_total": fallback_count}
 
     def _chunk_file_batches(self, files: List[Path]) -> Iterable[List[Path]]:
         """Yield batches of files for bounded transactions."""
@@ -1567,41 +1630,6 @@ class IndexScanner:
                 return Result.Err("DB_ERROR", tx_state.error or "Commit failed")
             action = "skipped_refresh" if refreshed else "skipped"
             return Result.Ok({"action": action})
-
-            # Update existing asset
-            if existing_id:
-                tx_state = None
-                try:
-                    async with self.db.lock_for_asset(existing_id):
-                        try:
-                            async with self.db.atransaction(mode="immediate") as tx:
-                                tx_state = tx
-                                if not tx_state.ok:
-                                    return Result.Err("DB_ERROR", tx_state.error or "Failed to begin transaction")
-                                result = await self._update_asset(
-                                    existing_id,
-                                    file_path,
-                                    mtime,
-                                    size,
-                                    metadata_result,
-                                    source=source,
-                                    root_id=root_id,
-                                    write_metadata=False,
-                                    skip_lock=True,
-                                )
-                                if result.ok:
-                                    await self._write_scan_journal_entry(filepath, base_dir, state_hash, mtime, size)
-                        except sqlite3.OperationalError as exc:
-                            if self.db._is_locked_error(exc):
-                                logger.warning("Database busy while updating asset %s: %s", existing_id, exc)
-                            raise
-                except sqlite3.OperationalError:
-                    return Result.Err("DB_BUSY", "Database busy while updating asset")
-                if not tx_state or not tx_state.ok:
-                    return Result.Err("DB_ERROR", tx_state.error or "Commit failed")
-                if not fast:
-                    await self._write_metadata_row(existing_id, metadata_result, filepath=str(file_path))
-                return result
 
         # Add new asset
         tx_state = None

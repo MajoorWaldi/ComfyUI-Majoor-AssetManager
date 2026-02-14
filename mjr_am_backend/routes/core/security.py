@@ -23,6 +23,7 @@ _DEFAULT_RATE_LIMIT_CLEANUP_INTERVAL = 100
 _DEFAULT_RATE_LIMIT_MIN_WINDOW_SECONDS = 60
 _DEFAULT_CLIENT_ID_HASH_HEX_CHARS = 16
 _DEFAULT_TRUSTED_PROXIES = "127.0.0.1,::1"
+_RATE_LIMIT_OVERFLOW_CLIENT_ID = "__overflow__"
 
 try:
     _MAX_RATE_LIMIT_CLIENTS = int(os.environ.get("MAJOOR_RATE_LIMIT_MAX_CLIENTS", str(_DEFAULT_MAX_RATE_LIMIT_CLIENTS)))
@@ -465,6 +466,7 @@ def _require_authenticated_user(request: web.Request) -> "Result[str]":
 
 def _parse_trusted_proxies() -> list["ipaddress._BaseNetwork"]:
     raw = os.environ.get("MAJOOR_TRUSTED_PROXIES", _DEFAULT_TRUSTED_PROXIES)
+    allow_insecure = _env_truthy("MAJOOR_ALLOW_INSECURE_TRUSTED_PROXIES", default=False)
     out: list["ipaddress._BaseNetwork"] = []
     for part in (raw or "").split(","):
         s = part.strip()
@@ -479,6 +481,17 @@ def _parse_trusted_proxies() -> list["ipaddress._BaseNetwork"]:
                 out.append(ipaddress.ip_network(f"{ip}/{ip.max_prefixlen}", strict=False))
         except Exception:
             continue
+    # Refuse universal trust by default. This blocks spoofing via X-Forwarded-For from arbitrary peers.
+    if not allow_insecure:
+        filtered: list["ipaddress._BaseNetwork"] = []
+        for net in out:
+            try:
+                if int(getattr(net, "prefixlen", 0)) == 0:
+                    continue
+            except Exception:
+                pass
+            filtered.append(net)
+        out = filtered
     return out
 
 
@@ -548,23 +561,30 @@ def _get_or_create_client_state(client_id: str) -> dict[str, list[float]]:
     if client_id in _rate_limit_state:
         _rate_limit_state.move_to_end(client_id)
         return _rate_limit_state[client_id]
+    # Under client-ID flood, avoid unbounded churn by routing overflow clients to a shared bucket.
+    if len(_rate_limit_state) >= _MAX_RATE_LIMIT_CLIENTS:
+        overflow = _rate_limit_state.get(_RATE_LIMIT_OVERFLOW_CLIENT_ID)
+        if overflow is None:
+            overflow = defaultdict(list)
+            _rate_limit_state[_RATE_LIMIT_OVERFLOW_CLIENT_ID] = overflow
+        _rate_limit_state.move_to_end(_RATE_LIMIT_OVERFLOW_CLIENT_ID)
+        return overflow
     _evict_oldest_clients_if_needed()
     state: dict[str, list[float]] = defaultdict(list)
     _rate_limit_state[client_id] = state
     return state
 
 
-def _cleanup_rate_limit_state(now: float, window_seconds: int) -> None:
-    with _rate_limit_lock:
-        for client_id, endpoints in list(_rate_limit_state.items()):
-            for endpoint, timestamps in list(endpoints.items()):
-                recent = [ts for ts in timestamps if now - ts < window_seconds]
-                if recent:
-                    endpoints[endpoint] = recent
-                else:
-                    endpoints.pop(endpoint, None)
-            if not endpoints:
-                _rate_limit_state.pop(client_id, None)
+def _cleanup_rate_limit_state_locked(now: float, window_seconds: int) -> None:
+    for client_id, endpoints in list(_rate_limit_state.items()):
+        for endpoint, timestamps in list(endpoints.items()):
+            recent = [ts for ts in timestamps if now - ts < window_seconds]
+            if recent:
+                endpoints[endpoint] = recent
+            else:
+                endpoints.pop(endpoint, None)
+        if not endpoints:
+            _rate_limit_state.pop(client_id, None)
 
 
 def _check_rate_limit(
@@ -592,7 +612,7 @@ def _check_rate_limit(
         with _rate_limit_lock:
             _rate_limit_cleanup_counter += 1
             if _rate_limit_cleanup_counter >= _rate_limit_cleanup_interval:
-                _cleanup_rate_limit_state(now, max(window_seconds, _RATE_LIMIT_MIN_WINDOW_SECONDS))
+                _cleanup_rate_limit_state_locked(now, max(window_seconds, _RATE_LIMIT_MIN_WINDOW_SECONDS))
                 _rate_limit_cleanup_counter = 0
 
             client_state = _get_or_create_client_state(client_id)

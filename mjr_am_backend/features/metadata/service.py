@@ -732,8 +732,12 @@ class MetadataService:
                 seen_ffprobe.add(path)
                 ffprobe_targets.append(path)
 
-        exif_results: Dict[str, Result[Dict[str, Any]]] = self.exiftool.read_batch(exif_targets) if exif_targets else {}
-        ffprobe_results: Dict[str, Result[Dict[str, Any]]] = self.ffprobe.read_batch(ffprobe_targets) if ffprobe_targets else {}
+        exif_results: Dict[str, Result[Dict[str, Any]]] = (
+            await self.exiftool.aread_batch(exif_targets) if exif_targets else {}
+        )
+        ffprobe_results: Dict[str, Result[Dict[str, Any]]] = (
+            await asyncio.to_thread(self.ffprobe.read_batch, ffprobe_targets) if ffprobe_targets else {}
+        )
 
         def _exif_for(path: str) -> Optional[Dict[str, Any]]:
             ex_res = exif_results.get(path)

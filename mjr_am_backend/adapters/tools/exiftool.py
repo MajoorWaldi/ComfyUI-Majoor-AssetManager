@@ -2,6 +2,7 @@
 ExifTool adapter for reading and writing metadata.
 """
 import os
+import asyncio
 import subprocess
 import json
 import shutil
@@ -204,6 +205,31 @@ class ExifTool:
         if not resolved:
             return None
 
+        # Optional hardening: when MAJOOR_EXIFTOOL_TRUSTED_DIRS is set, require the
+        # resolved binary to live under one of the configured directories.
+        trusted_dirs_raw = str(os.getenv("MAJOOR_EXIFTOOL_TRUSTED_DIRS", "") or "").strip()
+        if trusted_dirs_raw:
+            try:
+                resolved_path = Path(resolved).resolve(strict=True)
+                trusted_roots: List[Path] = []
+                for item in trusted_dirs_raw.split(os.pathsep):
+                    item = item.strip()
+                    if not item:
+                        continue
+                    try:
+                        trusted_roots.append(Path(item).expanduser().resolve(strict=True))
+                    except Exception:
+                        continue
+                if trusted_roots:
+                    ok = any(
+                        resolved_path == root or root in resolved_path.parents
+                        for root in trusted_roots
+                    )
+                    if not ok:
+                        return None
+            except Exception:
+                return None
+
         try:
             name = Path(resolved).name.lower()
         except Exception:
@@ -327,11 +353,20 @@ class ExifTool:
                 return Result.Err(
                     ErrorCode.EXIFTOOL_ERROR,
                     stderr_msg or "ExifTool command failed",
+                    return_code=int(process.returncode),
                     quality="degraded"
                 )
 
             # Parse JSON output
             if not stdout.strip():
+                if process.returncode != 0:
+                    stderr_msg = stderr.strip()
+                    return Result.Err(
+                        ErrorCode.EXIFTOOL_ERROR,
+                        stderr_msg or f"ExifTool failed with return code {int(process.returncode)}",
+                        return_code=int(process.returncode),
+                        quality="degraded",
+                    )
                 return Result.Err(
                     ErrorCode.PARSE_ERROR,
                     "ExifTool returned empty output",
@@ -493,7 +528,15 @@ class ExifTool:
 
             # Parse JSON output
             if not stdout.strip():
-                err = Result.Err(ErrorCode.PARSE_ERROR, "ExifTool returned empty output", quality="degraded")
+                if process.returncode != 0:
+                    err = Result.Err(
+                        ErrorCode.EXIFTOOL_ERROR,
+                        (stderr.strip() or f"ExifTool batch failed with return code {int(process.returncode)}"),
+                        return_code=int(process.returncode),
+                        quality="degraded",
+                    )
+                else:
+                    err = Result.Err(ErrorCode.PARSE_ERROR, "ExifTool returned empty output", quality="degraded")
                 for path in valid_paths:
                     results[path] = err
                 return results
@@ -671,7 +714,8 @@ class ExifTool:
                 logger.warning(f"ExifTool write error for {path}: {stderr_msg}")
                 return Result.Err(
                     ErrorCode.EXIFTOOL_ERROR,
-                    stderr_msg or "ExifTool write failed"
+                    stderr_msg or "ExifTool write failed",
+                    return_code=int(process.returncode),
                 )
 
             logger.debug(f"Metadata written to {path}")
@@ -689,3 +733,17 @@ class ExifTool:
                 ErrorCode.EXIFTOOL_ERROR,
                 str(e)
             )
+
+    async def aread(self, path: str, tags: Optional[List[str]] = None) -> Result[Dict[str, Any]]:
+        """Async wrapper for read() executed off the event loop thread."""
+        return await asyncio.to_thread(self.read, path, tags)
+
+    async def aread_batch(
+        self, paths: List[str], tags: Optional[List[str]] = None
+    ) -> Dict[str, Result[Dict[str, Any]]]:
+        """Async wrapper for read_batch() executed off the event loop thread."""
+        return await asyncio.to_thread(self.read_batch, paths, tags)
+
+    async def awrite(self, path: str, metadata: dict, preserve_workflow: bool = True) -> Result[bool]:
+        """Async wrapper for write() executed off the event loop thread."""
+        return await asyncio.to_thread(self.write, path, metadata, preserve_workflow)

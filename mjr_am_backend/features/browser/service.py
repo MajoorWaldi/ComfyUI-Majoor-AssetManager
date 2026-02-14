@@ -175,6 +175,7 @@ def list_filesystem_browser_entries(
     Browser-mode listing for custom scope (no pre-selected root).
     Returns folders + media files under absolute `path_value`, or roots when empty.
     """
+    folders: list[dict] = []
     q = str(query or "*").strip()
     ql = q.lower()
     browse_all = q in ("", "*")
@@ -209,7 +210,6 @@ def list_filesystem_browser_entries(
     if not target.is_dir():
         return Result.Err("INVALID_INPUT", "Path is not a directory")
 
-    folders: list[dict] = []
     files: list[dict] = []
     try:
         for entry in target.iterdir():

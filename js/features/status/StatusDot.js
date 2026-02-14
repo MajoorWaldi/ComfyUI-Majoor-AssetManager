@@ -128,7 +128,7 @@ function formatWatcherScopeLabel(scope) {
     const s = String(scope || "").toLowerCase();
     if (s === "all") return t("scope.allFull", "All (Inputs + Outputs)");
     if (s === "input" || s === "inputs") return t("scope.input", "Inputs");
-    if (s === "custom") return t("scope.custom", "Custom");
+    if (s === "custom") return t("scope.custom", "Browser");
     return t("scope.output", "Outputs");
 }
 
@@ -883,6 +883,7 @@ function buildDbHealthLine(healthData, dbDiagData) {
 function buildIndexHealthLine(counters, desiredScope) {
     const totalAssets = Number(counters?.total_assets || 0);
     const lastIndexEnd = counters?.last_index_end;
+    const lastScanEnd = counters?.last_scan_end;
     const scopeLabel =
         desiredScope === "all"
             ? t("scope.all", "Inputs + Outputs")
@@ -895,7 +896,7 @@ function buildIndexHealthLine(counters, desiredScope) {
     if (!Number.isFinite(totalAssets) || totalAssets <= 0) {
         return `${t("status.indexHealthEmpty", "Index health: empty")} (${scopeLabel})`;
     }
-    if (!lastIndexEnd) {
+    if (!lastIndexEnd && !lastScanEnd) {
         return `${t("status.indexHealthPartial", "Index health: partial")} (${scopeLabel})`;
     }
     return `${t("status.indexHealthOk", "Index health: ok")} (${scopeLabel})`;
@@ -999,7 +1000,7 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
         const dbMaintenance = Boolean(dbDiagnostics?.maintenance_active);
         const enrichmentActive = !!globalThis?._mjrEnrichmentActive;
         const hasIndexedAssets = Number(totalAssets) > 0;
-        const hasIndexTimestamp = Boolean(counters?.last_index_end);
+        const hasIndexTimestamp = Boolean(counters?.last_index_end || counters?.last_scan_end);
         const indexHealthy = hasIndexedAssets && hasIndexTimestamp;
 
         let healthTone = "success";
@@ -1036,7 +1037,7 @@ export async function updateStatus(statusDot, statusText, capabilitiesSection = 
                 : desiredScope === "input"
                 ? t("scope.input", "Inputs")
                 : desiredScope === "custom"
-                ? t("scope.customBrowser", "Custom Browser")
+                ? t("scope.customBrowser", "Browser")
                 : t("scope.output", "Outputs");
 
         if (healthTone === "error") {

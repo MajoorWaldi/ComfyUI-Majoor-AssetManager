@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import os
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -30,7 +31,7 @@ from .db_maintenance import is_db_maintenance_active
 from ..core import _safe_rel_path, _is_within_root, _require_services
 
 logger = get_logger(__name__)
-VALID_SORT_KEYS = {"mtime_desc", "mtime_asc", "name_asc", "name_desc"}
+VALID_SORT_KEYS = {"mtime_desc", "mtime_asc", "name_asc", "name_desc", "none"}
 
 
 def _normalize_sort_key(sort: Optional[str]) -> str:
@@ -40,7 +41,10 @@ def _normalize_sort_key(sort: Optional[str]) -> str:
     return "mtime_desc"
 
 # Locks for async concurrency safety
-_BACKGROUND_SCAN_LOCK = asyncio.Lock()
+_BACKGROUND_SCAN_LOCKS_GUARD = asyncio.Lock()
+_BACKGROUND_SCAN_LOCKS: dict[str, asyncio.Lock] = {}
+_BACKGROUND_SCAN_LOCKS_ORDER: OrderedDict[str, None] = OrderedDict()
+_BACKGROUND_SCAN_LOCKS_MAX = max(32, int(os.getenv("MAJOOR_BG_SCAN_LOCKS_MAX", "1024") or 1024))
 _BACKGROUND_SCAN_LAST: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _BACKGROUND_SCAN_FAILURES: list[dict[str, Any]] = []
 _MAX_FAILURE_HISTORY = int(BG_SCAN_FAILURE_HISTORY_MAX)
@@ -53,6 +57,57 @@ _SCAN_PENDING_MAX = int(SCAN_PENDING_MAX)
 
 _FS_LIST_CACHE_LOCK = asyncio.Lock()
 _FS_LIST_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
+
+
+def _safe_mtime_int(value: Any) -> int:
+    try:
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return 0
+            return int(float(text))
+    except Exception:
+        return 0
+    return 0
+
+
+async def _get_background_scan_lock(key: str) -> asyncio.Lock:
+    async with _BACKGROUND_SCAN_LOCKS_GUARD:
+        lock = _BACKGROUND_SCAN_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _BACKGROUND_SCAN_LOCKS[key] = lock
+        _BACKGROUND_SCAN_LOCKS_ORDER[key] = None
+        _BACKGROUND_SCAN_LOCKS_ORDER.move_to_end(key)
+        while len(_BACKGROUND_SCAN_LOCKS_ORDER) > _BACKGROUND_SCAN_LOCKS_MAX:
+            removed = False
+            # Bounded sweep: never loop forever when many old locks are still in use.
+            sweep = max(1, len(_BACKGROUND_SCAN_LOCKS_ORDER))
+            for _ in range(sweep):
+                old_key, _ = _BACKGROUND_SCAN_LOCKS_ORDER.popitem(last=False)
+                old_lock = _BACKGROUND_SCAN_LOCKS.get(old_key)
+                if old_key == key:
+                    _BACKGROUND_SCAN_LOCKS_ORDER[old_key] = None
+                    _BACKGROUND_SCAN_LOCKS_ORDER.move_to_end(old_key)
+                    continue
+                try:
+                    if old_lock is not None and old_lock.locked():
+                        _BACKGROUND_SCAN_LOCKS_ORDER[old_key] = None
+                        _BACKGROUND_SCAN_LOCKS_ORDER.move_to_end(old_key)
+                        continue
+                except Exception:
+                    pass
+                _BACKGROUND_SCAN_LOCKS.pop(old_key, None)
+                removed = True
+                break
+            if not removed:
+                # No removable unlocked entries right now; keep table as-is and exit.
+                break
+        return lock
 
 
 def _is_truthy_boolish(value: Any) -> bool:
@@ -117,13 +172,13 @@ async def _kickoff_background_scan(
 
     try:
         key = f"{source}|{str(root_id or '')}|{normalized_dir}"
-        now = time.time()
+        now_mono = time.monotonic()
 
         def _peek_entry(k: str) -> tuple[float, bool]:
             try:
                 e = _BACKGROUND_SCAN_LAST.get(k)
                 if isinstance(e, dict):
-                    last_v = float(e.get("last") or 0.0)
+                    last_v = float(e.get("last_mono") or e.get("last") or 0.0)
                     in_prog = bool(e.get("in_progress"))
                     return last_v, in_prog
                 if isinstance(e, (int, float)):
@@ -135,41 +190,42 @@ async def _kickoff_background_scan(
         last_seen, in_progress = _peek_entry(key)
         if in_progress:
             return
-        if now - last_seen < min_interval_seconds:
+        if now_mono - last_seen < min_interval_seconds:
             return
 
-        async with _BACKGROUND_SCAN_LOCK:
+        scan_lock = await _get_background_scan_lock(key)
+        async with scan_lock:
             # Double-check under lock
             last_seen, in_progress = _peek_entry(key)
             if in_progress:
                 return
-            if now - last_seen < min_interval_seconds:
+            if now_mono - last_seen < min_interval_seconds:
                 return
 
-        job = {
-            "directory": str(normalized_dir),
-            "source": str(source),
-            "root_id": str(root_id) if root_id is not None else None,
-            "recursive": bool(recursive),
-            "incremental": bool(incremental),
-            "fast": bool(fast),
-            "background_metadata": bool(background_metadata),
-        }
+            job = {
+                "directory": str(normalized_dir),
+                "source": str(source),
+                "root_id": str(root_id) if root_id is not None else None,
+                "recursive": bool(recursive),
+                "incremental": bool(incremental),
+                "fast": bool(fast),
+                "background_metadata": bool(background_metadata),
+            }
 
-        _ensure_worker()
+            _ensure_worker()
 
-        async with _SCAN_PENDING_LOCK:
-            if key in _SCAN_PENDING:
-                return
-            # Move to end if exists (refresh priority)
-            _SCAN_PENDING[key] = job
-            
-            # Enforce max pending size
-            while len(_SCAN_PENDING) > _SCAN_PENDING_MAX:
-                _SCAN_PENDING.popitem(last=False)
+            async with _SCAN_PENDING_LOCK:
+                if key in _SCAN_PENDING:
+                    return
+                # Move to end if exists (refresh priority)
+                _SCAN_PENDING[key] = job
+                
+                # Enforce max pending size
+                while len(_SCAN_PENDING) > _SCAN_PENDING_MAX:
+                    _SCAN_PENDING.popitem(last=False)
 
-        # Only mark as enqueued once we've successfully updated _SCAN_PENDING.
-        _set_background_entry(key, {"last": now, "in_progress": False})
+            # Only mark as enqueued once we've successfully updated _SCAN_PENDING.
+            _set_background_entry(key, {"last_mono": now_mono, "in_progress": False, "last_wall": time.time()})
     except Exception:
         return
 
@@ -215,7 +271,8 @@ async def _worker_loop() -> None:
             key = _build_task_key(task)
             entry = _ensure_background_entry(key)
             entry["in_progress"] = True
-            entry["last"] = time.time()
+            entry["last_mono"] = time.monotonic()
+            entry["last_wall"] = time.time()
 
             # Import strictly locally or use the core helper to avoid circular imports if possible
             # But here we are effectively inside backend.routes.handlers
@@ -262,7 +319,8 @@ async def _worker_loop() -> None:
         finally:
             if entry is not None:
                 entry["in_progress"] = False
-                entry["last"] = time.time()
+                entry["last_mono"] = time.monotonic()
+                entry["last_wall"] = time.time()
         # Yield to event loop
         await asyncio.sleep(0)
 
@@ -287,9 +345,9 @@ def _ensure_background_entry(key: str) -> dict[str, Any]:
         _set_background_entry(key, entry)
         return entry
     if isinstance(entry, (int, float)):
-        entry = {"last": float(entry), "in_progress": False}
+        entry = {"last_mono": float(entry), "in_progress": False}
     else:
-        entry = {"last": 0.0, "in_progress": False}
+        entry = {"last_mono": 0.0, "in_progress": False}
     _set_background_entry(key, entry)
     return entry
 
@@ -349,6 +407,90 @@ def _collect_filesystem_entries(
     return entries
 
 
+def _collect_filesystem_entries_window(
+    target_dir_resolved: Path,
+    base: Path,
+    asset_type: str,
+    root_id: Optional[str],
+    *,
+    query_lower: str,
+    browse_all: bool,
+    filter_kind: str,
+    filter_extensions: list[str],
+    offset: int,
+    limit: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """
+    Streaming collection for sort=none.
+
+    Scans all entries to compute exact `total`, but only stats/builds rows for
+    the requested pagination window.
+    """
+    out: list[dict[str, Any]] = []
+    total = 0
+    start = max(0, int(offset or 0))
+    lim = int(limit or 0)
+    end = (start + lim) if lim > 0 else None
+
+    for entry in os.scandir(target_dir_resolved):
+        try:
+            if not entry.is_file():
+                continue
+        except OSError:
+            continue
+        filename = str(entry.name or "")
+        if not filename:
+            continue
+        kind = classify_file(filename)
+        if kind == "unknown":
+            continue
+        if filter_kind and kind != filter_kind:
+            continue
+        if not browse_all and query_lower not in filename.lower():
+            continue
+        ext = _normalize_extension(Path(filename).suffix.lower())
+        if filter_extensions and ext and ext not in filter_extensions:
+            continue
+
+        idx = total
+        total += 1
+        if idx < start:
+            continue
+        if end is not None and len(out) >= (end - start):
+            continue
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        try:
+            rel_to_root = Path(entry.path).parent.relative_to(base)
+            sub = "" if str(rel_to_root) == "." else str(rel_to_root).replace("\\", "/")
+        except Exception:
+            sub = ""
+        out.append(
+            {
+                "id": None,
+                "filename": filename,
+                "subfolder": sub,
+                "filepath": str(entry.path),
+                "kind": kind,
+                "ext": Path(filename).suffix.lower(),
+                "size": stat.st_size,
+                "mtime": int(stat.st_mtime),
+                "width": None,
+                "height": None,
+                "duration": None,
+                "rating": 0,
+                "tags": [],
+                "has_workflow": None,
+                "has_generation_data": None,
+                "type": asset_type,
+                "root_id": root_id,
+            }
+        )
+    return out, total
+
+
 async def _fs_cache_get_or_build(
     base: Path,
     target_dir_resolved: Path,
@@ -380,8 +522,8 @@ async def _fs_cache_get_or_build(
             and isinstance(cached.get("entries"), list)
         ):
             try:
-                now = time.time()
-                cached_at = float(cached.get("cached_at") or 0.0)
+                now = time.monotonic()
+                cached_at = float(cached.get("cached_at_mono") or cached.get("cached_at") or 0.0)
                 if cached_at and (now - cached_at) <= float(FS_LIST_CACHE_TTL_SECONDS):
                     _FS_LIST_CACHE.move_to_end(cache_key)
                     return Result.Ok({"entries": cached["entries"], "dir_mtime_ns": dir_mtime_ns})
@@ -408,6 +550,7 @@ async def _fs_cache_get_or_build(
             "dir_mtime_ns": dir_mtime_ns,
             "watch_token": watch_token,
             "entries": entries,
+            "cached_at_mono": time.monotonic(),
             "cached_at": time.time(),
         }
         _FS_LIST_CACHE.move_to_end(cache_key)
@@ -462,6 +605,68 @@ async def _list_filesystem_assets(
     mtime_end_raw = filters.get("mtime_end") if filters is not None else None
     filter_mtime_start = int(mtime_start_raw) if mtime_start_raw is not None else None
     filter_mtime_end = int(mtime_end_raw) if mtime_end_raw is not None else None
+    sort_key = _normalize_sort_key(sort)
+
+    # Streaming fast path for massive folders: avoids stat/materialization for all entries.
+    if (
+        sort_key == "none"
+        and filter_min_rating <= 0
+        and not filter_workflow_only
+        and filter_mtime_start is None
+        and filter_mtime_end is None
+    ):
+        try:
+            entries_window, total_window = await asyncio.to_thread(
+                _collect_filesystem_entries_window,
+                target_dir_resolved,
+                base,
+                asset_type,
+                root_id,
+                query_lower=q_lower,
+                browse_all=browse_all,
+                filter_kind=filter_kind,
+                filter_extensions=filter_extensions,
+                offset=int(offset or 0),
+                limit=int(limit or 0),
+            )
+            # Keep DB hydration behavior consistent with non-fast path.
+            try:
+                lookup = getattr(index_service, "lookup_assets_by_filepaths", None)
+                if callable(lookup) and entries_window:
+                    filepaths = [str(a.get("filepath") or "") for a in entries_window if isinstance(a, dict)]
+                    filepaths = [p for p in filepaths if p]
+                    if filepaths:
+                        enrich_result = await lookup(filepaths)
+                        if enrich_result and getattr(enrich_result, "ok", False) and isinstance(enrich_result.data, dict):
+                            mapping = enrich_result.data
+                            for asset in entries_window:
+                                if not isinstance(asset, dict):
+                                    continue
+                                fp = str(asset.get("filepath") or "")
+                                db_row = mapping.get(fp)
+                                if not isinstance(db_row, dict):
+                                    continue
+                                asset["id"] = db_row.get("id")
+                                asset["rating"] = int(db_row.get("rating") or 0)
+                                asset["tags"] = db_row.get("tags") or []
+                                asset["has_workflow"] = db_row.get("has_workflow")
+                                asset["has_generation_data"] = db_row.get("has_generation_data")
+                                if db_row.get("root_id"):
+                                    asset["root_id"] = db_row.get("root_id")
+            except Exception as exc:
+                logger.debug("Filesystem DB enrichment skipped (sort=none path): %s", exc)
+            return Result.Ok(
+                {
+                    "assets": entries_window,
+                    "total": int(total_window),
+                    "limit": limit,
+                    "offset": offset,
+                    "query": q,
+                    "sort": sort_key,
+                }
+            )
+        except OSError as exc:
+            return Result.Err("LIST_FAILED", sanitize_error_message(exc, "Failed to list directory"))
 
     # Changed to await the async cache builder
     cache_result = await _fs_cache_get_or_build(base, target_dir_resolved, asset_type, root_id)
@@ -485,15 +690,14 @@ async def _list_filesystem_assets(
             continue
         entries.append(item)
 
-    sort_key = _normalize_sort_key(sort)
     if sort_key == "name_asc":
         entries.sort(key=lambda x: str(x.get("filename") or "").lower())
     elif sort_key == "name_desc":
         entries.sort(key=lambda x: str(x.get("filename") or "").lower(), reverse=True)
     elif sort_key == "mtime_asc":
-        entries.sort(key=lambda x: int(x.get("mtime") or 0))
+        entries.sort(key=lambda x: _safe_mtime_int(x.get("mtime")))
     else:
-        entries.sort(key=lambda x: int(x.get("mtime") or 0), reverse=True)
+        entries.sort(key=lambda x: _safe_mtime_int(x.get("mtime")), reverse=True)
 
     # Enrich with DB fields (workflow/generation/tags/rating) when available.
     try:

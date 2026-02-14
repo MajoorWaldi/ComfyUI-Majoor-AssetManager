@@ -277,6 +277,7 @@ class _AsyncLoopThread:
     def __init__(self):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
+        self._thread_ident: Optional[int] = None
         self._ready = threading.Event()
 
     def start(self) -> asyncio.AbstractEventLoop:
@@ -286,6 +287,7 @@ class _AsyncLoopThread:
         self._ready.clear()
 
         def _run():
+            self._thread_ident = threading.get_ident()
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             self._loop = loop
@@ -315,6 +317,11 @@ class _AsyncLoopThread:
 
     def run(self, coro):
         loop = self.start()
+        # Calling run() from the loop thread deadlocks on fut.result().
+        if self._thread_ident == threading.get_ident():
+            raise RuntimeError(
+                "Synchronous DB API called from DB loop thread; use async DB methods to avoid deadlock"
+            )
         fut = asyncio.run_coroutine_threadsafe(coro, loop)
         return fut.result()
 
@@ -330,6 +337,7 @@ class _AsyncLoopThread:
             loop.call_soon_threadsafe(loop.stop)
         except Exception:
             pass
+        self._thread_ident = None
 
 
 class Sqlite:
@@ -357,6 +365,8 @@ class Sqlite:
         # Reset mechanics
         self._resetting = False
         self._active_conns: set[aiosqlite.Connection] = set()
+        self._active_conns_idle = threading.Event()
+        self._active_conns_idle.set()
         
         self._timeout = float(user_config.get("timeout", timeout))
         self._query_timeout = float(user_config.get("queryTimeout", DB_QUERY_TIMEOUT if DB_QUERY_TIMEOUT is not None else 0.0))
@@ -691,6 +701,7 @@ class Sqlite:
             except Empty:
                 conn = await self._create_connection()
             self._active_conns.add(conn)
+            self._active_conns_idle.clear()
             return conn
         except Exception:
             self._async_sem.release()
@@ -699,6 +710,8 @@ class Sqlite:
     async def _release_connection_async(self, conn: aiosqlite.Connection):
         try:
             self._active_conns.discard(conn)
+            if not self._active_conns:
+                self._active_conns_idle.set()
             if not conn:
                 return
             if not self._pool.full():
@@ -804,19 +817,32 @@ class Sqlite:
             raise
 
     def _tx_token(self) -> Optional[str]:
-        # Sync callers (rare) may still use thread-local token set by transaction().
-        return getattr(self._tx_local, "token", None) if hasattr(self, "_tx_local") else None
+        # Thread-local token for sync transaction() remains primary for back-compat.
+        # Fallback to ContextVar to support sync helper calls accidentally invoked from async flow.
+        tok = getattr(self._tx_local, "token", None) if hasattr(self, "_tx_local") else None
+        if tok:
+            return str(tok)
+        try:
+            ctx_tok = _TX_TOKEN.get()
+        except Exception:
+            ctx_tok = None
+        return str(ctx_tok) if ctx_tok else None
 
     @staticmethod
     def _rows_to_dicts(rows: Any) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        for r in rows or []:
-            try:
-                out.append(dict(r))
-            except Exception:
-                # best-effort; should not happen with sqlite3.Row
-                pass
-        return out
+        if not rows:
+            return []
+        try:
+            return [dict(r) for r in rows]
+        except Exception:
+            # Best-effort fallback if driver returns mixed row shapes.
+            out: List[Dict[str, Any]] = []
+            for r in rows:
+                try:
+                    out.append(dict(r))
+                except Exception:
+                    pass
+            return out
 
     async def _with_query_timeout(self, coro):
         try:
@@ -1478,6 +1504,7 @@ class Sqlite:
              except Exception:
                  pass
         self._active_conns.clear()
+        self._active_conns_idle.set()
 
         # Reset counters/semaphores as everything is closed
         self._async_sem = None
@@ -1502,17 +1529,12 @@ class Sqlite:
     async def _drain_for_reset_async(self):
         """Prepare for reset: lock new connections, wait for active ones, close all."""
         self._resetting = True
-        
-        # Wait for active connections to finish (max 5s)
-        # We can be aggressive because we have the "Force Close" capability in _close_all_async now
-        for _ in range(10):
-            if not self._active_conns:
-                break
-            await asyncio.sleep(0.5)
-            
-        if self._active_conns:
-            logger.warning(f"DB Reset: Forced close with {len(self._active_conns)} active connections")
-            
+
+        # Wait deterministically for in-flight checkouts to drain (max 5s), then force close.
+        drained = await asyncio.to_thread(self._active_conns_idle.wait, 5.0)
+        if not drained and self._active_conns:
+            logger.warning("DB Reset: Forced close with %d active connections", len(self._active_conns))
+             
         await self._close_all_async()
 
     async def areset(self) -> Result[bool]:
